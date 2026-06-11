@@ -32,7 +32,7 @@ pub fn generate(
 /// app actually uses `db` — db-free apps stay a zero-dependency std crate.
 fn gen_cargo(program: &XeresProgram) -> String {
     let dep = if uses_db(program) {
-        "\n[dependencies]\npostgres = \"0.19\"\n"
+        "\n[dependencies]\npostgres = \"0.19\"\npostgres-native-tls = \"0.5\"\nnative-tls = \"0.2\"\n"
     } else {
         "\n"
     };
@@ -1208,9 +1208,9 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                 let sql = args.first().map(|a| emit_expr(a, ts)).unwrap_or_else(|| "\"\"".into());
                 let params = pg_params(args.get(1..).unwrap_or(&[]));
                 return if method == "exec" {
-                    format!("db_exec({}, {})", sql, params)
+                    format!("db_exec(&({}), {})", sql, params)
                 } else {
-                    format!("db_query({}, {})", sql, params)
+                    format!("db_query(&({}), {})", sql, params)
                 };
             }
             // `optional.or(default)` — TS `??`, Rust `unwrap_or`.
@@ -1291,19 +1291,15 @@ fn pg_params(args: &[Expr]) -> String {
 fn emit_server_stmt(s: &Stmt, f: &FunctionNode, program: &XeresProgram) -> String {
     if let Stmt::Return(Expr::MethodCall { receiver, method, args }) = s {
         let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
+        // `return db.query_one(...)` -> first row mapped onto the return model
         if is_db && method == "query_one" {
             if let Some(model_name) = &f.return_type {
                 if let Some(model) = program.models.iter().find(|m| &m.name == model_name) {
                     let sql = args.first().map(|a| emit_expr(a, false)).unwrap_or_else(|| "\"\"".into());
                     let params = pg_params(args.get(1..).unwrap_or(&[]));
-                    let fields = model
-                        .properties
-                        .iter()
-                        .map(|p| format!("{n}: __r.get(\"{n}\")", n = p.name))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let fields = row_fields(model);
                     return format!(
-                        "return {{ let __rows = db_query({sql}, {params}); \
+                        "return {{ let __rows = db_query(&({sql}), {params}); \
                          let __r = __rows.into_iter().next().expect(\"xeres: query_one returned no rows\"); \
                          {model} {{ {fields} }} }};",
                         sql = sql, params = params, model = model_name, fields = fields
@@ -1311,15 +1307,46 @@ fn emit_server_stmt(s: &Stmt, f: &FunctionNode, program: &XeresProgram) -> Strin
                 }
             }
         }
+        // `return db.query(...)` -> every row mapped, List<Model>
+        if is_db && method == "query" {
+            if let Some(list_ty) = &f.return_type {
+                if let Some(model_name) = generic_inner("List", list_ty) {
+                    if let Some(model) = program.models.iter().find(|m| m.name == model_name) {
+                        let sql = args.first().map(|a| emit_expr(a, false)).unwrap_or_else(|| "\"\"".into());
+                        let params = pg_params(args.get(1..).unwrap_or(&[]));
+                        let fields = row_fields(model);
+                        return format!(
+                            "return db_query(&({sql}), {params}).into_iter().map(|__r| {model} {{ {fields} }}).collect();",
+                            sql = sql, params = params, model = model_name, fields = fields
+                        );
+                    }
+                }
+            }
+        }
     }
     emit_stmt(s, "let", false)
+}
+
+/// `name: __r.get("name"), ...` — map a postgres Row's columns onto a model.
+fn row_fields(model: &crate::parser::ModelNode) -> String {
+    model
+        .properties
+        .iter()
+        .map(|p| format!("{n}: __r.get(\"{n}\")", n = p.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 const DB_PRELUDE: &str = r#"use postgres::types::ToSql;
 
 fn db_client() -> postgres::Client {
     let url = std::env::var("DATABASE_URL").expect("xeres: DATABASE_URL is not set");
-    postgres::Client::connect(&url, postgres::NoTls).expect("xeres: database connection failed")
+    // TLS-capable connector: hosted Postgres (Supabase/Neon/RDS) requires SSL.
+    // Honors sslmode in DATABASE_URL (e.g. ?sslmode=require / disable).
+    let tls = postgres_native_tls::MakeTlsConnector::new(
+        native_tls::TlsConnector::new().expect("xeres: TLS init failed"),
+    );
+    postgres::Client::connect(&url, tls).expect("xeres: database connection failed")
 }
 fn db_exec(sql: &str, params: &[&(dyn ToSql + Sync)]) -> i64 {
     db_client().execute(sql, params).map(|n| n as i64).unwrap_or(0)

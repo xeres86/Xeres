@@ -1,0 +1,14 @@
+// EXPECT: PASS — db.query maps every row onto the return List<Model>.
+model User {
+  id: String
+  username: String
+  age: Int
+}
+
+server fn list_users() -> List<User> {
+  return db.query("select id, username, age from users order by username")
+}
+
+server fn adults(min: Int) -> List<User> {
+  return db.query("select id, username, age from users where age >= $1", min)
+}

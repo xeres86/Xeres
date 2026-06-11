@@ -1,4 +1,4 @@
-# Xeres — Roadmap to v0.1
+# Xeres — Roadmap
 
 ## Vision
 A tier-safe web language. One `.xrs` file compiles to two tiers — a Rust server
@@ -7,45 +7,38 @@ enforced by the **compiler**, not by convention: secrets and server
 capabilities physically cannot reach the browser. Local-first by default. Zero
 framework runtime in the browser.
 
-## Done
-- **Compiler** (Rust): lexer, parser, checker (rules R1–R14), codegen.
-- **Boundary**: `server`/`ui`/`shared`, `secret` fields, `declassify`, `await`
-  for UI→server RPC, wire-level secret stripping.
-- **Data**: `model`, record construction, client `state`, `synced state`
-  collections + a real sync round-trip (server merge + reactive pull).
-- **Views**: `column`/`row`/`heading`/`text`/`button`/`input`/`password`,
-  `bind`, `for`, `if`/`else`.
-- **Interactivity**: handlers, collection `add`/`remove`, per-item delete,
-  reactive rendering.
-- **Tooling**: global `xeres` compiler, `create-xeres` scaffolder, clean
-  default page, 27 passing fixtures, `COMPARISON.md`.
+## v0.1.0 — shipped
+See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
+- Compiler (lexer, parser, checker **R1–R16**, codegen) with a 35-fixture suite
+  wired into `cargo test` + CI.
+- The boundary: `secret` containment at type *and* wire level, `declassify`,
+  `await` RPC, server-only `db` capability.
+- Views (`state`, `bind`, `for`, `if/else`, handlers), local-first synced
+  collections with a real sync round-trip, `try/catch`, `List<T>`/`Optional<T>`,
+  model-typed RPC args, Postgres (`query_one`/`query`/`exec`, TLS-capable).
+- `create-xeres` scaffolder; generated apps are zero-dependency unless `db`
+  is used.
 
-## v0.1 — the finish line
-1. **Persistence / `Db` layer** — a server-only `Db` capability (a `Located`,
-   non-`Wire` type that cannot cross to the client). Typed CRUD over models,
-   persisted to disk. Turns `login`/todo stubs into real apps. *(keystone)*
-2. **Model-typed RPC args** — allow `save(user: User)` (decoder is scalar-only).
-3. **Error handling across RPC** — `try`/`Result` so a failed `await` is handled
-   in the UI instead of throwing silently.
-4. **More types** — `List<T>`, `Optional<T>`/nullable.
-5. **`xeres dev`** — watch + rebuild + serve (one command).
+## v0.2 — next
+1. **`xeres dev`** — watch + rebuild + serve in one command.
+2. **Verify the db path end-to-end** — full toolchain (binutils/MSVC) + a live
+   Postgres; `Optional<Model>` return for `query_one` misses.
+3. **Sync hardening** — field-level merge (CRDT / cr-sqlite) instead of
+   row-level last-write-wins.
+4. **`for` over `List<T>`** in views (not just synced collections).
+5. **List/Optional inside RPC arguments** (currently default server-side).
+6. **Auth primitives** — session tokens (a `declassify`d secret), TLS story
+   for the app server.
+7. **Distribution** — publish `create-xeres` to npm; prebuilt `xeres` binaries
+   (the esbuild model); start on the self-contained runtime so generated apps
+   don't need `cargo`.
 
-## Deferred to v0.2+
-- CRDT / cr-sqlite sync hardening (v0.1 ships last-write-wins).
-- Real SQLite/Postgres adapter (if v0.1 uses an on-disk store).
-- `enum`s; the `Tainted`/information-flow layer; TLS + session tokens.
-- LSP (editor diagnostics), formatter.
-- Self-contained runtime so generated apps need no `cargo`.
-
-## Publication checklist
-- License: `MIT OR Apache-2.0` (Rust-ecosystem norm).
-- README, a docs page, `CHANGELOG.md`, the `COMPARISON.md`.
-- Wire the fixtures into `cargo test` + CI.
-- Publish `create-xeres` to npm; ship prebuilt `xeres` binaries via GitHub
-  Releases (the esbuild model).
-- **Distribution model A** for v0.1 (the generated app needs `cargo`; documented).
-  **Model B** (self-contained runtime, no `cargo`) is a v0.2 goal.
-- Tag `v0.1.0`.
+## Later
+- `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword
+  already reserves the surface).
+- LSP (inline R-rule diagnostics in editors), `xeres fmt`.
+- More databases behind the same `db` API (MySQL, SQL Server, Oracle).
+- Real SQLite (cr-sqlite) for the on-device store.
 
 ## Dogfooding (alongside, not after)
 Build one real reference app in Xeres — an auth'd notes/todo — as the proof and

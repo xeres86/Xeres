@@ -6,7 +6,8 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **pre-v0.1**, in active development. See [ROADMAP.md](ROADMAP.md).
+> Status: **v0.1.0**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
 
@@ -229,6 +230,7 @@ Every program is checked against these. A violation is a compile error.
 | **R13** input-binding | `bind x` requires a `String` `state` cell |
 | **R14** if-condition | an `if` condition must be `Bool` |
 | **R15** db-capability | `db` is server-only; methods are `query_one`/`query`/`exec` |
+| **R16** try-context | `try`/`catch` is browser-only; server failures surface as a failed `await` |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,
