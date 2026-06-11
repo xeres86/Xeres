@@ -23,8 +23,8 @@ if (existsSync(dir)) {
 const files = {
   "app.xrs": APP_XRS(name),
   "package.json": PKG_JSON(name),
-  "xeres-dev.mjs": XERES_DEV(),
-  ".gitignore": "out/\nnode_modules/\n",
+  ".env.example": ENV_EXAMPLE(),
+  ".gitignore": "out/\nnode_modules/\n.env\n",
   "README.md": README(name),
 };
 
@@ -40,11 +40,11 @@ console.log(`
 
     cd ${name}
     npm install
-    npm run dev        # compiles app.xrs and starts the Xeres server
+    npm run dev        # xeres dev: compile, serve, and rebuild on change
 
   Then open http://127.0.0.1:8080
 
-  Needs: the \`xeres\` compiler on your PATH (or set XERES_BIN), plus cargo.
+  Needs: the \`xeres\` compiler on your PATH, plus cargo and node.
 `);
 
 // ---------------------------------------------------------------- templates
@@ -74,8 +74,9 @@ function PKG_JSON(app) {
       private: true,
       type: "module",
       scripts: {
-        dev: "node xeres-dev.mjs dev",
-        build: "node xeres-dev.mjs build",
+        dev: "xeres dev app.xrs",
+        build:
+          "xeres build app.xrs && npx --yes esbuild out/server/static/client.ts --bundle --format=esm --outfile=out/server/static/client.js && cargo build --release --manifest-path out/server/Cargo.toml",
       },
     },
     null,
@@ -83,35 +84,10 @@ function PKG_JSON(app) {
   ) + "\n";
 }
 
-function XERES_DEV() {
-  return `// Dev runner: compile app.xrs -> bundle client -> run the Xeres server.
-import { spawnSync } from "node:child_process";
-
-const XERES = process.env.XERES_BIN || "xeres";
-const mode = process.argv[2] || "dev";
-
-function run(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { stdio: "inherit", shell: true, ...opts });
-  if (r.status !== 0) {
-    console.error(\`\\n✗ \${cmd} \${args.join(" ")} failed\`);
-    process.exit(r.status ?? 1);
-  }
-}
-
-console.log("→ compiling app.xrs");
-run(XERES, ["build", "app.xrs"]);
-
-console.log("→ bundling client");
-run("npx", ["--yes", "esbuild", "out/server/static/client.ts",
-  "--bundle", "--format=esm", "--outfile=out/server/static/client.js"]);
-
-if (mode === "build") {
-  console.log("✓ built to out/server");
-  process.exit(0);
-}
-
-console.log("→ starting Xeres server on http://127.0.0.1:8080");
-run("cargo", ["run", "--quiet"], { cwd: "out/server" });
+function ENV_EXAMPLE() {
+  return `# Copy to .env and fill in. Loaded by \`xeres dev\` into the server.
+# Only needed if your app uses the \`db\` capability (hosted PostgreSQL).
+# DATABASE_URL=postgres://user:password@localhost:5432/mydb
 `;
 }
 
@@ -134,14 +110,36 @@ Open http://127.0.0.1:8080
 
 - \`app.xrs\` is your whole app: models, \`server\` functions, \`ui\` screens, and
   \`synced\` local-first collections.
-- \`npm run dev\` compiles it to \`out/server/\` (a self-contained Rust server) plus
-  a tiny browser bundle, then runs it.
+- \`npm run dev\` runs \`xeres dev\` — it compiles \`app.xrs\` to \`out/server/\` (a
+  self-contained Rust server) plus a tiny browser bundle, serves it, and
+  rebuilds on every change.
 - Server functions become typed RPC endpoints. \`secret\` fields can never reach
   the browser — the compiler enforces it.
 
+## Using a database
+
+Server functions can talk to a hosted PostgreSQL via the server-only \`db\`
+capability:
+
+\`\`\`xeres
+server fn get_user(name: String) -> User {
+  return db.query_one("select id, username from users where username = $1", name)
+}
+\`\`\`
+
+Configure the connection in \`.env\` (copy from \`.env.example\`):
+
+\`\`\`
+DATABASE_URL=postgres://user:password@localhost:5432/mydb
+\`\`\`
+
+\`xeres dev\` loads \`.env\` and passes it to the server. The connection string and
+credentials are server-only — they can never reach the browser.
+
 ## Requirements (local)
 
-- The \`xeres\` compiler on PATH (or set \`XERES_BIN=/path/to/xeres\`).
-- \`cargo\` (until prebuilt server runtimes ship).
+- The \`xeres\` compiler on PATH (\`cargo install --path\` from the Xeres repo).
+- \`cargo\` to build the generated server (a full C toolchain is needed once you
+  use \`db\`, for the Postgres driver). Node is used for the client bundle.
 `;
 }

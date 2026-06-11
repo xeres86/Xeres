@@ -20,7 +20,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
   is used.
 
 ## v0.2 — next
-1. **`xeres dev`** — watch + rebuild + serve in one command.
+1. ~~**`xeres dev`** — watch + rebuild + serve in one command.~~ ✅ done
+   (also: `.env` config loaded into the server; `create-xeres` scaffolds it).
 2. **Verify the db path end-to-end** — full toolchain (binutils/MSVC) + a live
    Postgres; `Optional<Model>` return for `query_one` misses.
 3. **Sync hardening** — field-level merge (CRDT / cr-sqlite) instead of

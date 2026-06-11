@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased (0.2-dev)
+- **`xeres dev`** — one command to compile, bundle the client, serve on
+  `http://127.0.0.1:8080`, and rebuild + restart on every source change.
+- **`.env` config** — `xeres dev` loads a dotenv-style `.env` into the server
+  (e.g. `DATABASE_URL` for the `db` capability). Connection strings stay
+  server-only.
+- **`create-xeres`** now scaffolds a db-ready project: `npm run dev` uses
+  `xeres dev`, with a `.env.example` and `.env` gitignored.
+
 ## 0.1.0 — 2026-06-11
 
 First versioned release of the Xeres language and compiler.

@@ -70,13 +70,15 @@ Requires the `xeres` compiler (built from this repo) on your `PATH`, plus
 node tooling/create-xeres/index.mjs my-app
 cd my-app
 npm install
-npm run dev          # compile app.xrs -> bundle client -> serve on :8080
+npm run dev          # = `xeres dev app.xrs`
 ```
 
 Open **http://127.0.0.1:8080**.
 
-`npm run dev` runs the pipeline: `xeres build app.xrs` → `out/server/` (a
-self-contained Rust server) + a browser bundle → `cargo run`.
+`xeres dev` compiles `app.xrs` → `out/server/` (a self-contained Rust server) +
+a browser bundle, serves it, and **rebuilds + restarts on every change**. It
+also loads a dotenv-style `.env` into the server — set `DATABASE_URL` there to
+connect the `db` capability to a hosted PostgreSQL.
 
 ---
 
