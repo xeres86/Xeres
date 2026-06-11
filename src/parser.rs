@@ -57,6 +57,8 @@ pub enum Expr {
     Record { name: String, fields: Vec<(String, Expr)> },
     NoneLit,
     ListLit(Vec<Expr>),
+    /// `cond ? then : otherwise` — a conditional (ternary) expression.
+    Ternary { cond: Box<Expr>, then: Box<Expr>, otherwise: Box<Expr> },
 }
 
 #[derive(Debug)]
@@ -97,6 +99,7 @@ pub enum ViewNode {
     Element {
         tag: String,
         arg: Option<Expr>,        // positional arg, e.g. heading "Title", text x.y
+        style: Option<Expr>,      // `style "css..."` — inline CSS (usually a string)
         bind: Option<String>,     // `bind stateVar` — two-way input binding
         event: Option<Handler>,   // `-> handler` or `-> { stmts }`
         children: Vec<ViewNode>,
@@ -110,6 +113,13 @@ pub enum ViewNode {
         cond: Expr,
         then_body: Vec<ViewNode>,
         else_body: Vec<ViewNode>,
+    },
+    /// Invoke a reusable component by name with named args:
+    /// `StatCard { title: "Revenue" value: "$45k" }`.
+    Component {
+        name: String,
+        args: Vec<(String, Expr)>,
+        line: usize,
     },
 }
 
@@ -129,6 +139,9 @@ pub struct ScreenNode {
     pub states: Vec<StateDecl>,
     pub body: Vec<ViewNode>,
     pub line: usize,
+    /// `ui component` (reusable, invoked by name) vs `ui screen` (a page that
+    /// auto-mounts). Both share the same typed-view machinery.
+    pub is_component: bool,
 }
 
 #[derive(Debug)]
@@ -186,8 +199,10 @@ impl<'a> Parser<'a> {
                     if let Some(m) = self.parse_model() { program.models.push(m); }
                 }
                 Token::Ui => {
-                    // `ui screen Name { ... }` vs `ui fn name() { ... }`
-                    if self.peek_token == Token::Identifier("screen".to_string()) {
+                    // `ui screen Name {…}` / `ui component Name(…) {…}` vs `ui fn name() {…}`
+                    if self.peek_token == Token::Identifier("screen".to_string())
+                        || self.peek_token == Token::Identifier("component".to_string())
+                    {
                         if let Some(s) = self.parse_screen() { program.screens.push(s); }
                     } else if let Some(f) = self.parse_function() {
                         program.functions.push(f);
@@ -429,7 +444,23 @@ impl<'a> Parser<'a> {
     // --- Expression parsing (precedence climbing) ---
 
     fn parse_expr(&mut self) -> Option<Expr> {
-        self.parse_expr_bp(0)
+        let cond = self.parse_expr_bp(0)?;
+        // ternary: `cond ? then : otherwise` (lowest precedence, right-assoc).
+        if self.current_token == Token::Question {
+            self.next_token(); // consume '?'
+            let then = self.parse_expr()?;
+            if self.current_token != Token::Colon {
+                return None;
+            }
+            self.next_token(); // consume ':'
+            let otherwise = self.parse_expr()?;
+            return Some(Expr::Ternary {
+                cond: Box::new(cond),
+                then: Box::new(then),
+                otherwise: Box::new(otherwise),
+            });
+        }
+        Some(cond)
     }
 
     /// Returns (operator, binding power) for the current token, if it's infix.
@@ -574,7 +605,8 @@ impl<'a> Parser<'a> {
         self.allow_record = false; // in views, `{` opens a child block, not a record
         let screen_line = self.cur_line;
         self.next_token(); // consume 'ui'
-        self.next_token(); // consume 'screen'
+        let is_component = self.cur_is_kw("component");
+        self.next_token(); // consume 'screen' / 'component'
 
         let name = match &self.current_token {
             Token::Identifier(n) => n.clone(),
@@ -612,7 +644,7 @@ impl<'a> Parser<'a> {
         }
 
         if self.current_token == Token::RBrace { self.next_token(); } // close screen
-        Some(ScreenNode { name, params, states, body, line: screen_line })
+        Some(ScreenNode { name, params, states, body, line: screen_line, is_component })
     }
 
     fn parse_state_decl(&mut self) -> Option<StateDecl> {
@@ -703,9 +735,52 @@ impl<'a> Parser<'a> {
             Token::Identifier(n) => n.clone(),
             _ => return None,
         };
+        let tag_line = self.cur_line;
         self.next_token(); // consume tag
 
-        let arg = if self.expr_starts() { self.parse_expr() } else { None };
+        // A Capitalized tag is a component invocation: `Name { field: expr … }`.
+        // (Lowercase tags are built-in elements; this mirrors how a Capitalized
+        // `Name { … }` is a record literal in expression position.)
+        if tag.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            let mut args = Vec::new();
+            if self.current_token == Token::LBrace {
+                self.next_token(); // consume '{'
+                self.allow_record = true; // arg values may be record literals
+                while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+                    let field = match &self.current_token {
+                        Token::Identifier(f) => f.clone(),
+                        _ => break,
+                    };
+                    self.next_token(); // consume field name
+                    if self.current_token != Token::Colon { break; }
+                    self.next_token(); // consume ':'
+                    let val = match self.parse_expr() {
+                        Some(e) => e,
+                        None => break,
+                    };
+                    args.push((field, val));
+                    if self.current_token == Token::Comma { self.next_token(); }
+                }
+                self.allow_record = false;
+                if self.current_token == Token::RBrace { self.next_token(); }
+            }
+            return Some(ViewNode::Component { name: tag, args, line: tag_line });
+        }
+
+        // positional arg — but `style` is a modifier keyword, not an arg.
+        let arg = if self.expr_starts() && !self.cur_is_kw("style") {
+            self.parse_expr()
+        } else {
+            None
+        };
+
+        // `style "<css>"` — inline styling on this element (may follow an arg).
+        let style = if self.cur_is_kw("style") {
+            self.next_token(); // consume 'style'
+            if self.expr_starts() { self.parse_expr() } else { None }
+        } else {
+            None
+        };
 
         // `bind <stateVar>` — two-way input binding.
         let bind = if self.current_token == Token::Bind {
@@ -750,7 +825,13 @@ impl<'a> Parser<'a> {
             c
         } else { Vec::new() };
 
-        Some(ViewNode::Element { tag, arg, bind, event, children })
+        Some(ViewNode::Element { tag, arg, style, bind, event, children })
+    }
+
+    /// Is the current token a contextual keyword `kw` (an identifier, since
+    /// these aren't reserved at the lexer level)?
+    fn cur_is_kw(&self, kw: &str) -> bool {
+        matches!(&self.current_token, Token::Identifier(s) if s == kw)
     }
 
     fn expr_starts(&self) -> bool {

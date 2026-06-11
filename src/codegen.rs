@@ -72,6 +72,9 @@ fn expr_uses_db(e: &Expr) -> bool {
         Expr::Declassify(i) | Expr::Await(i) => expr_uses_db(i),
         Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_db(v)),
         Expr::ListLit(items) => items.iter().any(expr_uses_db),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_uses_db(cond) || expr_uses_db(then) || expr_uses_db(otherwise)
+        }
         _ => false,
     }
 }
@@ -584,9 +587,18 @@ fn gen_client(program: &XeresProgram) -> String {
         out.push('\n');
     }
 
-    // Screens: state cells + inline handlers + a reactive render function.
+    // Screens + components: state cells, inline handlers, render functions.
+    // (A component compiles to the same render-fn shape as a screen; it's just
+    // invoked by name instead of auto-mounted.)
+    let synced: HashSet<String> = program.states.iter().map(|s| s.name.clone()).collect();
+    let components: HashMap<String, Vec<String>> = program
+        .screens
+        .iter()
+        .filter(|s| s.is_component)
+        .map(|s| (s.name.clone(), s.params.iter().map(|p| p.name.clone()).collect()))
+        .collect();
     for sc in &program.screens {
-        out.push_str(&gen_screen(sc));
+        out.push_str(&gen_screen(sc, &synced, &components));
     }
 
     // Local-first sync: the runtime + one reactive collection per `synced state`.
@@ -617,7 +629,7 @@ fn gen_client(program: &XeresProgram) -> String {
                 name = st.name
             ));
         }
-        if let Some(sc) = program.screens.iter().find(|s| s.params.is_empty()) {
+        if let Some(sc) = program.screens.iter().find(|s| !s.is_component && s.params.is_empty()) {
             out.push_str(&format!(
                 "\nexport function __start(rootId: string): void {{\n\
                  \x20 const el = document.getElementById(rootId);\n\
@@ -633,7 +645,11 @@ fn gen_client(program: &XeresProgram) -> String {
 
 /// Emit one screen: its `state` object, inline click-handler functions, and a
 /// reactive render function (re-reads state each draw).
-fn gen_screen(sc: &crate::parser::ScreenNode) -> String {
+fn gen_screen(
+    sc: &crate::parser::ScreenNode,
+    synced: &HashSet<String>,
+    components: &HashMap<String, Vec<String>>,
+) -> String {
     let mut out = String::new();
     let state_vars: HashSet<String> = sc.states.iter().map(|s| s.name.clone()).collect();
 
@@ -650,6 +666,8 @@ fn gen_screen(sc: &crate::parser::ScreenNode) -> String {
     let mut em = ScreenEmit {
         screen: sc.name.clone(),
         state_vars,
+        synced: synced.clone(),
+        components: components.clone(),
         handlers: String::new(),
         hcount: 0,
         loop_ctx: None,
@@ -681,15 +699,34 @@ fn gen_screen(sc: &crate::parser::ScreenNode) -> String {
     out
 }
 
+/// Where a `for` loop's items live, so per-item handlers can re-look-up the
+/// bound item from its key at click time (event delegation).
+#[derive(Clone)]
+struct LoopCtx {
+    var: String,
+    /// JS expression (in module/handler scope) that yields the backing store:
+    /// a `SyncedCollection` (keyed by `id`) or an array (keyed by index).
+    source: String,
+    synced: bool,
+    /// For an array loop, the index binding name (`for x in arr` -> arr.map((x,
+    /// idx)=>…)); items are re-bound by index, which works for any element type.
+    index: Option<String>,
+}
+
 /// Walks a screen's view, allocating named handlers for inline `-> { ... }`
 /// blocks and rewriting `state` reads/writes to the screen's state object.
 struct ScreenEmit {
     screen: String,
     state_vars: HashSet<String>,
+    /// Names of program-level `synced state` collections (iterate via `.all()`).
+    synced: HashSet<String>,
+    /// Component name -> its param names in declaration order (named args at a
+    /// call site are reordered to this positional order).
+    components: HashMap<String, Vec<String>>,
     handlers: String,
     hcount: usize,
-    /// When inside `for var in coll`, the (var, coll) so handlers can key items.
-    loop_ctx: Option<(String, String)>,
+    /// When inside `for var in <iterable>`, how to re-bind items in handlers.
+    loop_ctx: Option<LoopCtx>,
 }
 
 impl ScreenEmit {
@@ -712,15 +749,43 @@ impl ScreenEmit {
 
     fn node(&mut self, v: &ViewNode) -> String {
         match v {
-            ViewNode::Element { tag, arg, bind, event, children } => {
+            ViewNode::Element { tag, arg, style, bind, event, children } => {
                 let html = map_tag(tag);
                 let void = is_void(html);
                 let mut s = String::from("`<");
                 s.push_str(html);
-                match tag.as_str() {
-                    "row" => s.push_str(" class=\"x-row\""),
-                    "column" => s.push_str(" class=\"x-col\""),
-                    _ => {}
+                // Layout + styling. `row`/`column` are flex containers; an
+                // explicit `style "..."` takes over the element's look (and
+                // drops the default class so global rules don't fight it).
+                let base_layout = match tag.as_str() {
+                    "row" => Some("display:flex;flex-direction:row;"),
+                    "column" => Some("display:flex;flex-direction:column;"),
+                    "grid" => Some("display:grid;"),
+                    _ => None,
+                };
+                match style {
+                    Some(style_expr) => {
+                        s.push_str(" style=\"");
+                        if let Some(base) = base_layout {
+                            s.push_str(base);
+                        }
+                        match style_expr {
+                            // a literal CSS string is inlined (whitespace tidied)
+                            Expr::Str(css) => s.push_str(&inline_css(css)),
+                            // a dynamic style expression is interpolated
+                            e => {
+                                s.push_str("${");
+                                s.push_str(&emit_expr(e, true));
+                                s.push('}');
+                            }
+                        }
+                        s.push('"');
+                    }
+                    None => match tag.as_str() {
+                        "row" => s.push_str(" class=\"x-row\""),
+                        "column" => s.push_str(" class=\"x-col\""),
+                        _ => {}
+                    },
                 }
                 match event {
                     Some(Handler::Call(e)) => {
@@ -737,17 +802,26 @@ impl ScreenEmit {
                             .collect::<Vec<_>>()
                             .join(" ");
                         let kw = if stmts_have_await(stmts) { "async function" } else { "function" };
-                        if let Some((var, coll)) = self.loop_ctx.clone() {
-                            // Inside a `for`: bind the item from its key (event delegation).
+                        if let Some(ctx) = self.loop_ctx.clone() {
+                            // Inside a `for`: re-bind the item from its key at
+                            // click time (event delegation). Synced collections
+                            // key by `id` (`.get`); arrays key by index (`[i]`),
+                            // which works for any element type incl. primitives.
+                            let (lookup, key) = if ctx.synced {
+                                (format!("{}.get(__key)", ctx.source), format!("{}.id", ctx.var))
+                            } else {
+                                let idx = ctx.index.clone().unwrap_or_else(|| "0".to_string());
+                                (format!("{}[__key]", ctx.source), idx)
+                            };
                             self.handlers.push_str(&format!(
-                                "{kw} {h}(__key) {{ const {v} = {c}.get(__key); {b} }}\non(\"{h}\", {h});\n",
-                                kw = kw, h = hname, v = var, c = coll, b = body
+                                "{kw} {h}(__key) {{ const {v} = {lookup}; {b} }}\non(\"{h}\", {h});\n",
+                                kw = kw, h = hname, v = ctx.var, lookup = lookup, b = body
                             ));
                             s.push_str(" data-onclick=\"");
                             s.push_str(&hname);
                             s.push_str("\" data-key=\"${");
-                            s.push_str(&var);
-                            s.push_str(".id}\"");
+                            s.push_str(&key);
+                            s.push_str("}\"");
                         } else {
                             self.handlers.push_str(&format!(
                                 "{kw} {h}() {{ {b} }}\non(\"{h}\", {h});\n",
@@ -811,23 +885,66 @@ impl ScreenEmit {
                 s
             }
             ViewNode::For { var, iter, body } => {
-                // track (var, collection) so handlers in the body can key items
-                let coll = if let Expr::Ident(c) = iter { Some(c.clone()) } else { None };
+                // Is this a `synced` collection (iterate via `.all()`) or a
+                // plain `List<T>` cell / prop (a JS array, iterate directly)?
+                let synced = matches!(iter, Expr::Ident(c) if self.synced.contains(c));
+                // Where handlers in the body re-look-up an item by its key:
+                // synced -> the module-level collection; a screen `state` array
+                // -> `<Screen>_state.<name>`; a prop array -> the prop name.
+                let source = match iter {
+                    Expr::Ident(c) if synced => Some(c.clone()),
+                    Expr::Ident(c) if self.state_vars.contains(c) => {
+                        Some(format!("{}_state.{}", self.screen, c))
+                    }
+                    Expr::Ident(c) => Some(c.clone()),
+                    _ => None,
+                };
+                let index = if synced { None } else { Some(format!("__i_{}", var)) };
                 let prev = self.loop_ctx.take();
-                self.loop_ctx = coll.map(|c| (var.clone(), c));
+                self.loop_ctx = source.map(|src| LoopCtx {
+                    var: var.clone(),
+                    source: src,
+                    synced,
+                    index: index.clone(),
+                });
                 let body_js = self.nodes(body);
                 self.loop_ctx = prev;
-                format!(
-                    "{}.all().map(({}) => {}).join(\"\")",
-                    emit_expr(iter, true),
-                    var,
-                    body_js
-                )
+                if synced {
+                    format!("{}.all().map(({}) => {}).join(\"\")", emit_expr(iter, true), var, body_js)
+                } else {
+                    // Array: bind the index too, so handlers can re-key items.
+                    format!(
+                        "{}.map(({}, {}) => {}).join(\"\")",
+                        emit_expr(iter, true),
+                        var,
+                        index.unwrap_or_else(|| "__i".to_string()),
+                        body_js
+                    )
+                }
             }
             ViewNode::If { cond, then_body, else_body } => {
                 let then_js = self.nodes(then_body);
                 let else_js = self.nodes(else_body);
                 format!("({} ? {} : {})", emit_expr(cond, true), then_js, else_js)
+            }
+            ViewNode::Component { name, args, .. } => {
+                // Invoke the component's render fn with named args reordered to
+                // the component's declared param order.
+                let order = self.components.get(name);
+                let positional: Vec<String> = match order {
+                    Some(params) => params
+                        .iter()
+                        .map(|pname| {
+                            args.iter()
+                                .find(|(f, _)| f == pname)
+                                .map(|(_, v)| emit_expr(v, true))
+                                .unwrap_or_else(|| "undefined".to_string())
+                        })
+                        .collect(),
+                    // Unknown component (checker already errored): emit args as-is.
+                    None => args.iter().map(|(_, v)| emit_expr(v, true)).collect(),
+                };
+                format!("{}({})", name, positional.join(", "))
             }
         }
     }
@@ -908,6 +1025,12 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
             let body = items.iter().map(|x| emit_h_expr(x, screen, sv)).collect::<Vec<_>>().join(", ");
             format!("[{}]", body)
         }
+        Expr::Ternary { cond, then, otherwise } => format!(
+            "({} ? {} : {})",
+            emit_h_expr(cond, screen, sv),
+            emit_h_expr(then, screen, sv),
+            emit_h_expr(otherwise, screen, sv)
+        ),
         // Record in a handler is a client object literal; rewrite state refs.
         Expr::Record { fields, .. } => {
             let body = fields
@@ -944,6 +1067,9 @@ fn expr_has_await(e: &Expr) -> bool {
         }
         Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_has_await(v)),
         Expr::ListLit(items) => items.iter().any(expr_has_await),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_has_await(cond) || expr_has_await(then) || expr_has_await(otherwise)
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
         | Expr::NoneLit => false,
     }
@@ -979,12 +1105,26 @@ export function mount(el: HTMLElement, render: () => string): void {
 
 // ------------------------------------------------------------------ index.html
 
-/// A branded "your app is running" dashboard, with the compiled program's
-/// endpoints + schema baked in, and the first prop-less screen mounted below.
+/// Generate the host page. A screen whose root carries an explicit `style`
+/// "owns the canvas": it renders full-bleed on a neutral page (no centered
+/// card, logo, or purple gradient). Unstyled apps keep the branded shell.
 fn gen_index(program: &XeresProgram) -> String {
     let mut out = String::new();
+    let first = program.screens.iter().find(|s| !s.is_component && s.params.is_empty());
+    let bleed = first.map(screen_is_bleed).unwrap_or(false);
+
+    if bleed {
+        // Full-bleed: just the mount point on a neutral page.
+        out.push_str(INDEX_HEAD_BLEED);
+        out.push_str("<div id=\"app\"></div>");
+        out.push_str(
+            "<script type=\"module\">import { __start } from \"./client.js\"; __start(\"app\");</script>",
+        );
+        out.push_str("</body></html>");
+        return out;
+    }
+
     out.push_str(INDEX_HEAD);
-    let first = program.screens.iter().find(|s| s.params.is_empty());
     if first.is_some() {
         out.push_str("<div id=\"app\"></div>");
     } else {
@@ -999,6 +1139,14 @@ fn gen_index(program: &XeresProgram) -> String {
     }
     out.push_str("</body></html>");
     out
+}
+
+/// A screen "owns the canvas" when one of its top-level view nodes is a styled
+/// element — the dev has taken explicit control of the page's look.
+fn screen_is_bleed(sc: &crate::parser::ScreenNode) -> bool {
+    sc.body
+        .iter()
+        .any(|n| matches!(n, ViewNode::Element { style: Some(_), .. }))
 }
 
 const INDEX_HEAD: &str = r#"<!doctype html>
@@ -1037,6 +1185,30 @@ footer b { color: #a9a9c2; }
 <body>
 <main class="x-app">
 <div class="x-logo">&#9670;</div>
+"#;
+
+// Full-bleed host page for screens that style their own root. No centered card,
+// no logo/footer, no purple gradient — the screen controls the whole viewport.
+// Nested unstyled `row`/`column` still get sensible flex defaults; `button` and
+// `input` get neutral (theme-agnostic) styling that inline `style` can override.
+const INDEX_HEAD_BLEED: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Xeres app</title>
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { min-height: 100vh; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+#app { min-height: 100vh; }
+#app .x-col { display: flex; flex-direction: column; gap: .5rem; }
+#app .x-row { display: flex; gap: .5rem; }
+#app button { font: inherit; padding: .5rem 1rem; border: 0; border-radius: .5rem; cursor: pointer; }
+#app input { font: inherit; padding: .5rem .75rem; border: 1px solid #cbd5e1; border-radius: .5rem; }
+</style>
+</head>
+<body>
 "#;
 
 const UID_FN: &str = r#"function uid(): string {
@@ -1235,6 +1407,14 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                 format!("vec![{}]", body)
             }
         }
+        // Ternary: TS keeps `?:`; Rust spells it as an if-else expression.
+        Expr::Ternary { cond, then, otherwise } => {
+            if ts {
+                format!("({} ? {} : {})", emit_expr(cond, ts), emit_expr(then, ts), emit_expr(otherwise, ts))
+            } else {
+                format!("(if {} {{ {} }} else {{ {} }})", emit_expr(cond, ts), emit_expr(then, ts), emit_expr(otherwise, ts))
+            }
+        }
         // Record literal. TS: a plain object. Rust: fields pass through
         // `.into()` (covers T -> T and the T -> Option<T> coercion) and any
         // omitted Optional/List fields are filled by struct update.
@@ -1411,6 +1591,13 @@ fn map_ts_type(name: &str) -> String {
     }
 }
 
+/// Tidy a literal `style "..."` string into a single-line CSS attribute value:
+/// collapse the (often multi-line, indented) source whitespace to single spaces
+/// and escape `"` so it can't terminate the HTML attribute.
+fn inline_css(css: &str) -> String {
+    css.split_whitespace().collect::<Vec<_>>().join(" ").replace('"', "&quot;")
+}
+
 /// HTML void elements have no children/closing tag.
 fn is_void(html_tag: &str) -> bool {
     matches!(html_tag, "input" | "br" | "img" | "hr")
@@ -1420,8 +1607,13 @@ fn map_tag(tag: &str) -> &str {
     match tag {
         "column" => "div",
         "row" => "div",
+        "box" => "div",       // neutral container — no layout opinion
+        "grid" => "div",      // CSS grid container (display:grid added by codegen)
         "heading" => "h1",
+        "subheading" => "h2",
+        "title" => "h3",      // smaller section title
         "text" => "span",
+        "paragraph" => "p",
         "button" => "button",
         "password" => "input",
         other => other,

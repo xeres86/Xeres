@@ -1,0 +1,18 @@
+// a reusable `ui component` invoked by name with typed args
+ui component Card(label: String, n: Int) {
+  view {
+    column style "padding:8px" {
+      text label
+      text n
+    }
+  }
+}
+ui screen S {
+  state name: String = "hi"
+  view {
+    column {
+      Card { label: name  n: 1 }
+      Card { label: "static"  n: 2 }
+    }
+  }
+}

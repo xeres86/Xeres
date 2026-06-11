@@ -1,11 +1,38 @@
 # Changelog
 
+## 0.2.0 — view & component layer
+
+A larger, still tier-safe view vocabulary. The server/client boundary is
+unchanged: every new construct is browser-tier and goes through the same
+checker, so secrets and `db` still physically cannot reach the client.
+
+- **View & component layer** — a bigger, still tier-safe view vocabulary:
+  - **`style "<css>"`** on any element. `row`/`column` stay flex containers (the
+    compiler prepends `display:flex`); your CSS wins otherwise. A screen that
+    styles its **root** renders **full-bleed** on a neutral page (no card, logo,
+    or gradient); unstyled screens keep the branded shell.
+  - **`for` over a plain `List<T>` state** (not just synced `Collection<T>`) —
+    *lifts a v0.1 limitation*. Array loops key per-item handlers by index;
+    synced collections still key by `id`.
+  - **Conditional expression `cond ? a : b`** (TS `?:` / Rust `if-else` /
+    interpreted), with **R14** extended to ternary conditions and a new
+    **R18 conditional-branch** rule: both branches must share one type (no
+    silent `String`/`Int` mixing).
+  - **Layout & text primitives** — `grid` (CSS grid), `box` (neutral container),
+    `subheading`, `title`, `paragraph`.
+  - **Reusable `ui component`s** — presentational, parameterized views invoked by
+    a Capitalized tag (`StatCard { title: … }`). Browser-tier only; args checked
+    against params and the secret/scope rules (R3/R8) apply inside the view, so a
+    component never widens the tier boundary. New **R17 component** rule
+    (Capitalized name + known component + matching args); **R2** broadened to
+    screen/component names.
+  - Reference apps: [`examples/dashboard.xrs`](examples/dashboard.xrs) and a full
+    admin dashboard [`examples/acme.xrs`](examples/acme.xrs).
+
 ## 0.1.1 — distribution & self-contained runtime
 
-First release with prebuilt binaries + the no-toolchain run path. Everything
-under "0.2-dev" below ships in this tag:
+First release with prebuilt binaries + the no-toolchain run path:
 
-## Unreleased (0.2-dev)
 - **Self-contained runtime (`xeres serve`)** — the compiler binary can now run
   an app directly: an interpreter executes `server` functions and an in-process
   HTTP server handles static, RPC (secret-stripped responses) and sync. **No

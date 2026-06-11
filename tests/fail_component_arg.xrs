@@ -1,0 +1,11 @@
+// a component arg with the wrong type must be rejected (R17)
+ui component Card(label: String) {
+  view { text label }
+}
+ui screen S {
+  view {
+    column {
+      Card { label: 5 }
+    }
+  }
+}

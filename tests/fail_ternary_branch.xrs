@@ -1,0 +1,9 @@
+// the two branches of `?:` must have one type — String vs Int is rejected (R18)
+ui screen S {
+  state on: Bool = true
+  view {
+    column {
+      text on ? "yes" : 5
+    }
+  }
+}

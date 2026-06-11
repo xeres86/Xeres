@@ -39,6 +39,7 @@ pub enum Token {
     NotEq,  // !=
     Bang,   // !
     Colon,  // :
+    Question, // ?  (ternary: cond ? a : b)
     Comma,  // ,
     Dot,    // .
     Arrow,  // ->

@@ -27,6 +27,8 @@ struct SymbolTable<'a> {
     models: HashMap<String, &'a ModelNode>,
     fns: HashMap<String, FnSig>,
     states: HashMap<String, &'a SyncedStateNode>,
+    /// Reusable `ui component`s, keyed by name (for invocation checking).
+    components: HashMap<String, &'a ScreenNode>,
 }
 
 /// Inner type of a one-level generic, e.g. `("List", "List<User>") -> "User"`.
@@ -34,6 +36,12 @@ fn generic_inner<'a>(base: &str, ty: &'a str) -> Option<&'a str> {
     ty.strip_prefix(base)
         .and_then(|r| r.strip_prefix('<'))
         .and_then(|r| r.strip_suffix('>'))
+}
+
+/// A component name (and thus its invocation tag) must begin with an uppercase
+/// letter, the same convention that distinguishes types from value identifiers.
+fn starts_uppercase(name: &str) -> bool {
+    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 fn is_known_type(name: &str, table: &SymbolTable) -> bool {
@@ -118,6 +126,10 @@ fn resolve_type(
             let elem = items.first().and_then(|e| resolve_type(e, locals, table))?;
             Some(format!("List<{}>", elem))
         }
+        // A ternary's type is its then-branch (both branches should agree).
+        Expr::Ternary { then, otherwise, .. } => {
+            resolve_type(then, locals, table).or_else(|| resolve_type(otherwise, locals, table))
+        }
     }
 }
 
@@ -162,6 +174,12 @@ fn is_tainted(
         Expr::Record { fields, .. } => fields
             .iter()
             .any(|(_, v)| is_tainted(v, locals, table, returns_secret)),
+        // A ternary is tainted if its condition or either branch is.
+        Expr::Ternary { cond, then, otherwise } => {
+            is_tainted(cond, locals, table, returns_secret)
+                || is_tainted(then, locals, table, returns_secret)
+                || is_tainted(otherwise, locals, table, returns_secret)
+        }
     }
 }
 
@@ -421,7 +439,7 @@ fn check_view(
         ViewNode::For { var, iter, body } => {
             check_screen_expr(iter, locals, sname, sline, table, errors);
             // bind the loop variable to the collection's element type when known.
-            let elem = element_type_of(iter, table);
+            let elem = element_type_of(iter, locals, table);
             let mut inner = locals.clone();
             inner.insert(var.clone(), (elem, false));
             for c in body {
@@ -446,6 +464,89 @@ fn check_view(
             for c in else_body {
                 check_view(c, locals, states, sname, sline, table, errors);
             }
+        }
+        ViewNode::Component { name, args, line } => {
+            check_component(name, args, *line, locals, sname, table, errors);
+        }
+    }
+}
+
+/// R17 — validate a component invocation `Name { field: expr … }`: the component
+/// must exist, each arg is boundary/scope-checked in the caller's (Ui) context,
+/// and the args must match the component's params (each once, type-compatible,
+/// required ones present). Because args are checked here as ordinary Ui
+/// expressions, secret-containment (R3) and scope (R8) apply — a component
+/// cannot be a back door around the tier boundary.
+fn check_component(
+    name: &str,
+    args: &[(String, Expr)],
+    line: usize,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    sname: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
+    // Arg expressions are checked in the caller's (Ui) context.
+    for (_, v) in args {
+        check_screen_expr(v, locals, sname, line, table, errors);
+    }
+
+    let comp = match table.components.get(name) {
+        Some(c) => c,
+        None => {
+            errors.push(SemanticError {
+                rule: "R17 component",
+                message: format!(
+                    "`{}` is not a known component. Declare it with `ui component {}(...) {{ view {{ … }} }}`.",
+                    name, name
+                ),
+                line,
+            });
+            return;
+        }
+    };
+
+    let mut provided: HashSet<&str> = HashSet::new();
+    for (field, value) in args {
+        match comp.params.iter().find(|p| &p.name == field) {
+            None => errors.push(SemanticError {
+                rule: "R17 component",
+                message: format!("component `{}` has no param `{}`.", name, field),
+                line,
+            }),
+            Some(param) => {
+                if !provided.insert(field.as_str()) {
+                    errors.push(SemanticError {
+                        rule: "R17 component",
+                        message: format!("param `{}` is set more than once for `{}`.", field, name),
+                        line,
+                    });
+                }
+                if let Some(actual) = resolve_type(value, locals, table) {
+                    if !type_compatible(&actual, &param.type_name) {
+                        errors.push(SemanticError {
+                            rule: "R17 component",
+                            message: format!(
+                                "param `{}.{}` expects `{}`, but got `{}`.",
+                                name, field, param.type_name, actual
+                            ),
+                            line,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    for p in &comp.params {
+        let omittable = generic_inner("Optional", &p.type_name).is_some()
+            || generic_inner("List", &p.type_name).is_some();
+        if !provided.contains(p.name.as_str()) && !omittable {
+            errors.push(SemanticError {
+                rule: "R17 component",
+                message: format!("missing param `{}` when invoking `{}`.", p.name, name),
+                line,
+            });
         }
     }
 }
@@ -577,18 +678,32 @@ fn check_bindings(
                 check_bindings(it, locals, sname, sline, table, errors);
             }
         }
+        Expr::Ternary { cond, then, otherwise } => {
+            check_bindings(cond, locals, sname, sline, table, errors);
+            check_bindings(then, locals, sname, sline, table, errors);
+            check_bindings(otherwise, locals, sname, sline, table, errors);
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::NoneLit => {}
     }
 }
 
-/// Element type of an iterable: today, only `for x in <synced state>` resolves.
-fn element_type_of(iter: &Expr, table: &SymbolTable) -> Option<String> {
+/// Element type of an iterable. Resolves `for x in <synced collection>` and
+/// `for x in <List<T> state/prop>` to the element type `T`.
+fn element_type_of(
+    iter: &Expr,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+) -> Option<String> {
     if let Expr::Ident(name) = iter {
         if let Some(state) = table.states.get(name) {
             return Some(state.collection_type.clone());
         }
     }
-    None
+    // A plain `List<T>` cell (screen state or prop) iterates its element type.
+    resolve_type(iter, locals, table)
+        .as_deref()
+        .and_then(|t| generic_inner("List", t))
+        .map(str::to_string)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -694,6 +809,39 @@ fn check_expr(
         Expr::ListLit(items) => {
             for it in items {
                 check_expr(it, locals, fn_env, fn_name, fn_line, table, errors);
+            }
+        }
+        Expr::Ternary { cond, then, otherwise } => {
+            check_expr(cond, locals, fn_env, fn_name, fn_line, table, errors);
+            // R14 — the condition must be Bool (when resolvable).
+            if let Some(t) = resolve_type(cond, locals, table) {
+                if t != "Bool" {
+                    errors.push(SemanticError {
+                        rule: "R14 if-condition",
+                        message: format!("ternary condition in `{}` must be Bool, got `{}`.", fn_name, t),
+                        line: fn_line,
+                    });
+                }
+            }
+            check_expr(then, locals, fn_env, fn_name, fn_line, table, errors);
+            check_expr(otherwise, locals, fn_env, fn_name, fn_line, table, errors);
+            // R18 — both branches must yield one type, so `cond ? a : b` has a
+            // single static type (no silent String/Int mixing). Only flagged
+            // when both branches resolve, matching R7's "resolvable" policy.
+            if let (Some(a), Some(b)) = (
+                resolve_type(then, locals, table),
+                resolve_type(otherwise, locals, table),
+            ) {
+                if !type_compatible(&a, &b) && !type_compatible(&b, &a) {
+                    errors.push(SemanticError {
+                        rule: "R18 conditional-branch",
+                        message: format!(
+                            "the branches of `?:` in `{}` have incompatible types `{}` and `{}`.",
+                            fn_name, a, b
+                        ),
+                        line: fn_line,
+                    });
+                }
             }
         }
         Expr::Record { name, fields } => {
@@ -871,6 +1019,11 @@ fn check_await(
                 check_await(it, false, in_browser, fn_name, line, table, errors);
             }
         }
+        Expr::Ternary { cond, then, otherwise } => {
+            check_await(cond, false, in_browser, fn_name, line, table, errors);
+            check_await(then, false, in_browser, fn_name, line, table, errors);
+            check_await(otherwise, false, in_browser, fn_name, line, table, errors);
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
         | Expr::NoneLit => {}
     }
@@ -958,7 +1111,40 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         models: HashMap::new(),
         fns: HashMap::new(),
         states: HashMap::new(),
+        components: HashMap::new(),
     };
+
+    // Screens and components compile to render functions in one namespace and
+    // are mounted/invoked by name — so names must be unique (R2), and a
+    // component must be Capitalized so a view can tell `StatCard { … }`
+    // (invocation) from a lowercase built-in element (R17).
+    let mut screen_names: HashSet<&str> = HashSet::new();
+    for s in &program.screens {
+        if !screen_names.insert(s.name.as_str()) {
+            errors.push(SemanticError {
+                rule: "R2 duplicate-decl",
+                message: format!(
+                    "{} `{}` is declared more than once.",
+                    if s.is_component { "component" } else { "screen" },
+                    s.name
+                ),
+                line: s.line,
+            });
+        }
+        if s.is_component {
+            if !starts_uppercase(&s.name) {
+                errors.push(SemanticError {
+                    rule: "R17 component",
+                    message: format!(
+                        "component `{}` must start with an uppercase letter — components are invoked as a Capitalized tag in views (e.g. `{}` vs a lowercase built-in element).",
+                        s.name, s.name
+                    ),
+                    line: s.line,
+                });
+            }
+            table.components.insert(s.name.clone(), s);
+        }
+    }
 
     for m in &program.models {
         if table.models.insert(m.name.clone(), m).is_some() {

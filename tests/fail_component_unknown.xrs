@@ -1,0 +1,8 @@
+// invoking a component that was never declared must be rejected (R17)
+ui screen S {
+  view {
+    column {
+      Nope { x: "y" }
+    }
+  }
+}

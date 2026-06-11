@@ -26,7 +26,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
    Postgres; `Optional<Model>` return for `query_one` misses.
 3. **Sync hardening** — field-level merge (CRDT / cr-sqlite) instead of
    row-level last-write-wins.
-4. **`for` over `List<T>`** in views (not just synced collections).
+4. ~~**`for` over `List<T>`** in views (not just synced collections).~~ ✅ done
+   (array loops key per-item handlers by index; synced collections by `id`).
 5. **List/Optional inside RPC arguments** (currently default server-side).
 6. **Auth primitives** — session tokens (a `declassify`d secret), TLS story
    for the app server.
@@ -37,6 +38,15 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
    interpreter + in-process server, no `cargo`. (`xeres build` remains for
    eject/max-perf.) Together with (7), a dev needs only Node + the `xeres`
    binary — no git, no Rust.
+9. ~~**View & component layer**~~ ✅ done — inline `style "<css>"` (full-bleed
+   when a screen styles its root), conditional expression `cond ? a : b`,
+   layout/text primitives (`grid`, `box`, `subheading`, `title`, `paragraph`),
+   and reusable **`ui component`s** invoked by a Capitalized tag. New
+   compiler-enforced rules: **R17** (component) and **R18** (conditional-branch
+   type agreement); **R2** broadened to screen/component names. Components are
+   browser-tier only and the secret/scope rules apply inside their views, so
+   they don't widen the tier boundary. Drove the `dashboard` + `acme` reference
+   apps (dogfooding).
 
 ## Later
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword

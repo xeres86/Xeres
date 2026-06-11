@@ -136,6 +136,13 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Value::List(vs))
             }
+            Expr::Ternary { cond, then, otherwise } => {
+                match self.eval(cond, env)? {
+                    Value::Bool(true) => self.eval(then, env),
+                    Value::Bool(false) => self.eval(otherwise, env),
+                    _ => Err("ternary condition must be a boolean".into()),
+                }
+            }
             Expr::MethodCall { receiver, method, args } => {
                 if is_db(receiver) && method == "exec" {
                     return self.db_exec(args, env);

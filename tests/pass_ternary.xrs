@@ -1,0 +1,10 @@
+// conditional (ternary) expression in a view, with a Bool condition
+ui screen S {
+  state on: Bool = true
+  view {
+    column {
+      text on ? "yes" : "no"
+      text "x" style (on ? "color:green" : "color:red")
+    }
+  }
+}
