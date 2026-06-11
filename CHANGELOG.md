@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased (0.2-dev)
+- **Distribution (no-git install)** — an npm `xeres` package (`tooling/npm/xeres`)
+  whose `postinstall` downloads a prebuilt compiler binary for the platform, and
+  a `release.yml` workflow that builds those binaries per-platform on a tag.
+  Goal: `npm i -g xeres` + `npm create xeres@latest` with no repo clone. See
+  [RELEASING.md](RELEASING.md). (Publishing requires npm/GitHub accounts.)
 - **`xeres dev`** — one command to compile, bundle the client, serve on
   `http://127.0.0.1:8080`, and rebuild + restart on every source change.
 - **`.env` config** — `xeres dev` loads a dotenv-style `.env` into the server

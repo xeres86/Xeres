@@ -1,0 +1,16 @@
+{
+  "name": "xeres",
+  "version": "0.1.0",
+  "description": "The Xeres compiler CLI — installs a prebuilt binary for your platform.",
+  "type": "module",
+  "bin": {
+    "xeres": "bin/xeres.mjs"
+  },
+  "scripts": {
+    "postinstall": "node install.mjs"
+  },
+  "files": ["bin/xeres.mjs", "install.mjs"],
+  "repository": "https://github.com/xeres86/Xeres",
+  "license": "MIT",
+  "engines": { "node": ">=18" }
+}

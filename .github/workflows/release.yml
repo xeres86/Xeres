@@ -1,0 +1,34 @@
+name: release
+
+# On a version tag, build the `xeres` compiler for each platform and attach the
+# binaries to the GitHub Release. The npm `xeres` package downloads these.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: ".exe" }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, ext: "" }
+          - { os: macos-latest,   target: x86_64-apple-darwin, ext: "" }
+          - { os: macos-latest,   target: aarch64-apple-darwin, ext: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Stage binary
+        shell: bash
+        run: cp "target/${{ matrix.target }}/release/xeres${{ matrix.ext }}" "xeres-${{ matrix.target }}${{ matrix.ext }}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: xeres-${{ matrix.target }}${{ matrix.ext }}

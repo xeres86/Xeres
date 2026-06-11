@@ -1,0 +1,4 @@
+# the downloaded/copied platform binary (fetched on install, not committed)
+bin/xeres-bin
+bin/xeres-bin.exe
+node_modules/

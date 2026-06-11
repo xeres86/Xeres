@@ -30,9 +30,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
 5. **List/Optional inside RPC arguments** (currently default server-side).
 6. **Auth primitives** — session tokens (a `declassify`d secret), TLS story
    for the app server.
-7. **Distribution** — publish `create-xeres` to npm; prebuilt `xeres` binaries
-   (the esbuild model); start on the self-contained runtime so generated apps
-   don't need `cargo`.
+7. **Distribution** — machinery built (npm `xeres` wrapper + per-platform
+   release workflow, see [RELEASING.md](RELEASING.md)); remaining: actually
+   publish to npm + cut a tagged release, then the self-contained runtime so
+   generated apps don't need `cargo`.
 
 ## Later
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword
