@@ -1,0 +1,17 @@
+// db.query_one with an Optional<Model> return: a no-row result is None, not an
+// error (the graceful "miss" form)
+model User { id: String  username: String  secret password_hash: String }
+
+server fn find_user(name: String) -> Optional<User> {
+  return db.query_one("select id, username, password_hash from users where username = $1", name)
+}
+
+ui screen S {
+  state name: String = ""
+  view {
+    column {
+      input "username" bind name
+      button "find" -> { let u = await find_user(name)  name = "" }
+    }
+  }
+}

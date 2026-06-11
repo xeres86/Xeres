@@ -288,9 +288,14 @@ server fn add_user(id: String, username: String, password_hash: String) -> Int {
 }
 ```
 
-`db.query_one` maps a row onto the function's return model; `db.exec` returns the
-affected-row count. The `postgres` driver is added to the generated server **only
-when an app uses `db`** — db-free apps stay a zero-dependency `std` crate.
+`db.query_one` maps a row onto the function's return model — or onto
+`Optional<Model>`, in which case a **no-row result is `none`** rather than an
+error (the graceful "miss" form). `db.query` returns `List<Model>`; `db.exec`
+returns the affected-row count. `uid()` works server-side too (e.g. to mint a row
+id on insert). The `postgres` driver is added to the generated server **only when
+an app uses `db`** — db-free apps stay a zero-dependency `std` crate. See
+[`examples/users.xrs`](examples/users.xrs) for the full read / lookup / write
+round-trip.
 
 ---
 

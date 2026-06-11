@@ -22,13 +22,18 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
 ## v0.2 — next
 1. ~~**`xeres dev`** — watch + rebuild + serve in one command.~~ ✅ done
    (also: `.env` config loaded into the server; `create-xeres` scaffolds it).
-2. **Verify the db path end-to-end** — full toolchain (binutils/MSVC) + a live
-   Postgres; `Optional<Model>` return for `query_one` misses.
+2. **Verify the db path end-to-end** — `Optional<Model>` return for `query_one`
+   misses ✅ done; the db-feature build compiles (Windows uses `schannel`, no
+   OpenSSL); `uid()` now works in `server fn`s (server-side builtin) ✅.
+   Remaining: a run against a **live** Postgres (read + write) as the final
+   smoke test (needs a `DATABASE_URL`). See [`examples/users.xrs`](examples/users.xrs).
 3. **Sync hardening** — field-level merge (CRDT / cr-sqlite) instead of
    row-level last-write-wins.
 4. ~~**`for` over `List<T>`** in views (not just synced collections).~~ ✅ done
    (array loops key per-item handlers by index; synced collections by `id`).
-5. **List/Optional inside RPC arguments** (currently default server-side).
+5. ~~**List/Optional inside RPC arguments**~~ ✅ done — a recursive JSON decoder
+   handles `List<T>`, `Optional<T>`, nested models and any nesting, in both the
+   generated Rust and the `xeres serve` interpreter.
 6. **Auth primitives** — session tokens (a `declassify`d secret), TLS story
    for the app server.
 7. **Distribution** — npm `xeres` wrapper + per-platform release workflow built

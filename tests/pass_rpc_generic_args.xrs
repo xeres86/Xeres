@@ -1,0 +1,22 @@
+// List<Model> and Optional<T> as RPC arguments decode correctly server-side
+model Item { id: String  n: Int }
+
+server fn echo_items(items: List<Item>) -> List<Item> {
+  return items
+}
+server fn echo_opt(x: Optional<Int>) -> Optional<Int> {
+  return x
+}
+
+ui screen S {
+  state msg: String = ""
+  view {
+    column {
+      button "go" -> {
+        let a = await echo_items([ Item { id: "1" n: 5 } ])
+        let b = await echo_opt(7)
+        msg = "ok"
+      }
+    }
+  }
+}

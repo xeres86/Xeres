@@ -28,6 +28,16 @@ checker, so secrets and `db` still physically cannot reach the client.
     screen/component names.
   - Reference apps: [`examples/dashboard.xrs`](examples/dashboard.xrs) and a full
     admin dashboard [`examples/acme.xrs`](examples/acme.xrs).
+- **Full-grammar RPC arguments** — `List<T>`, `Optional<T>`, nested models, and
+  any nesting now decode correctly server-side (both the generated Rust and the
+  `xeres serve` interpreter), *lifting a v0.1 limitation* where they defaulted.
+  A recursive JSON→value decoder replaces the flat scalar/model one.
+- **Database** — `db.query_one` may return **`Optional<Model>`**: a no-row result
+  is `none` instead of an error (the graceful "miss" form; a bare `Model` return
+  still requires the row). `uid()` is now also a **server-side** builtin, so it
+  works inside a `server fn` (e.g. minting a row id on `db.exec` insert) — it
+  previously only existed client-side. See [`examples/users.xrs`](examples/users.xrs)
+  for the full read/lookup/write round-trip.
 
 ## 0.1.1 — distribution & self-contained runtime
 

@@ -96,7 +96,25 @@ fn rpc(program: &XeresProgram, fname: &str, body: &str) -> Result<String, String
 }
 
 /// Decode a JSON value into a runtime Value, guided by the declared type.
+/// Handles scalars, models, `List<T>`, `Optional<T>`, and any nesting — the
+/// interpreter half of full-grammar RPC arguments.
 fn decode_arg(j: Option<&J>, ty: &str, program: &XeresProgram) -> Value {
+    // `List<T>` — a JSON array, each element decoded as `T` (absent ⇒ empty).
+    if let Some(inner) = generic_inner("List", ty) {
+        return match j {
+            Some(J::Arr(items)) => {
+                Value::List(items.iter().map(|e| decode_arg(Some(e), inner, program)).collect())
+            }
+            _ => Value::List(Vec::new()),
+        };
+    }
+    // `Optional<T>` — JSON null / absent ⇒ Null, otherwise the inner value.
+    if let Some(inner) = generic_inner("Optional", ty) {
+        return match j {
+            None | Some(J::Null) => Value::Null,
+            Some(v) => decode_arg(Some(v), inner, program),
+        };
+    }
     let j = match j {
         Some(j) => j,
         None => return Value::Null,
@@ -119,6 +137,13 @@ fn decode_arg(j: Option<&J>, ty: &str, program: &XeresProgram) -> Value {
             }
         }
     }
+}
+
+/// Inner type of a one-level generic, e.g. `("List", "List<User>") -> "User"`.
+fn generic_inner<'a>(base: &str, ty: &'a str) -> Option<&'a str> {
+    ty.strip_prefix(base)
+        .and_then(|r| r.strip_prefix('<'))
+        .and_then(|r| r.strip_suffix('>'))
 }
 
 fn reason(code: u16) -> &'static str {

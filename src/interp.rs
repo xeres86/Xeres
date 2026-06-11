@@ -214,9 +214,14 @@ impl<'a> Interp<'a> {
         let rows = client
             .query(sql.as_str(), &refs)
             .map_err(|e| format!("db query failed: {}", e))?;
+        // `query` -> List<Model>; `query_one` -> Model or Optional<Model>.
+        // An `Optional<Model>` return makes a no-row result `Null` rather than
+        // an error (the graceful "miss" form).
+        let optional = method == "query_one"
+            && ret_model.map(|t| generic_inner("Optional", t).is_some()).unwrap_or(false);
         let model_name = match method {
             "query" => ret_model.and_then(|t| generic_inner("List", t)),
-            _ => ret_model,
+            _ => ret_model.and_then(|t| generic_inner("Optional", t)).or(ret_model),
         };
         let model = model_name
             .and_then(|n| self.program.models.iter().find(|m| m.name == n))
@@ -233,7 +238,11 @@ impl<'a> Interp<'a> {
             }
         }
         if method == "query_one" {
-            out.into_iter().next().ok_or_else(|| "query_one: no rows".into())
+            match out.into_iter().next() {
+                Some(v) => Ok(v),
+                None if optional => Ok(Value::Null),
+                None => Err("query_one: no rows".into()),
+            }
         } else {
             Ok(Value::List(out))
         }
