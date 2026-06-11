@@ -10,7 +10,7 @@
     "postinstall": "node install.mjs"
   },
   "files": ["bin/xeres.mjs", "install.mjs"],
-  "repository": "https://github.com/xeres86/Xeres",
+  "repository": { "type": "git", "url": "git+https://github.com/xeres86/Xeres.git" },
   "license": "MIT",
   "engines": { "node": ">=18" }
 }

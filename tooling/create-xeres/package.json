@@ -7,7 +7,7 @@
     "create-xeres": "index.mjs"
   },
   "files": ["index.mjs"],
-  "repository": "https://github.com/xeres86/Xeres",
+  "repository": { "type": "git", "url": "git+https://github.com/xeres86/Xeres.git" },
   "license": "MIT",
   "engines": { "node": ">=18" }
 }
