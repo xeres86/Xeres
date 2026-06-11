@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 — distribution & self-contained runtime
+
+First release with prebuilt binaries + the no-toolchain run path. Everything
+under "0.2-dev" below ships in this tag:
+
 ## Unreleased (0.2-dev)
 - **Self-contained runtime (`xeres serve`)** — the compiler binary can now run
   an app directly: an interpreter executes `server` functions and an in-process

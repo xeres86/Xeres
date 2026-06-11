@@ -79,6 +79,10 @@ function PKG_JSON(app) {
         build:
           "xeres build app.xrs && npx --yes esbuild out/server/static/client.ts --bundle --format=esm --outfile=out/server/static/client.js && cargo build --release --manifest-path out/server/Cargo.toml",
       },
+      // pulls the prebuilt compiler binary so `npm run dev` needs no global install
+      devDependencies: {
+        "xeres-cli": "^0.1.1",
+      },
     },
     null,
     2

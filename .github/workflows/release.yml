@@ -25,9 +25,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # --features db bakes the Postgres driver into the released binary, so
-      # `xeres serve` supports databases with no toolchain on the user's machine.
-      - run: cargo build --release --features db --target ${{ matrix.target }}
+      # First releases ship db-free (guaranteed to build everywhere). Once the
+      # `db` feature build is green in CI, switch to `--features db` so released
+      # binaries support Postgres with no toolchain on the user's machine.
+      - run: cargo build --release --target ${{ matrix.target }}
       - name: Stage binary
         shell: bash
         run: cp "target/${{ matrix.target }}/release/xeres${{ matrix.ext }}" "xeres-${{ matrix.target }}${{ matrix.ext }}"
