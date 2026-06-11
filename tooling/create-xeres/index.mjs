@@ -44,7 +44,8 @@ console.log(`
 
   Then open http://127.0.0.1:8080
 
-  Needs: the \`xeres\` compiler on your PATH, plus cargo and node.
+  Needs: the \`xeres\` compiler on your PATH, plus node. (No cargo for dev —
+  it runs in-process. cargo is only needed for \`npm run build\`.)
 `);
 
 // ---------------------------------------------------------------- templates
@@ -110,9 +111,10 @@ Open http://127.0.0.1:8080
 
 - \`app.xrs\` is your whole app: models, \`server\` functions, \`ui\` screens, and
   \`synced\` local-first collections.
-- \`npm run dev\` runs \`xeres dev\` — it compiles \`app.xrs\` to \`out/server/\` (a
-  self-contained Rust server) plus a tiny browser bundle, serves it, and
-  rebuilds on every change.
+- \`npm run dev\` runs \`xeres dev\` — it compiles \`app.xrs\`, serves it, and
+  rebuilds on every change. The app runs **in-process** (no cargo / Rust
+  toolchain needed). \`npm run build\` emits a standalone Rust server crate to
+  compile with cargo, for an eject / production deployment.
 - Server functions become typed RPC endpoints. \`secret\` fields can never reach
   the browser — the compiler enforces it.
 

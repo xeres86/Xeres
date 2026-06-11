@@ -10,5 +10,16 @@ repository = "https://github.com/xeres86/Xeres"
 name = "xeres"
 path = "src/main.rs"
 
+[features]
+default = []
+# Database support for `xeres serve` (the Postgres driver). Released binaries
+# are built with this on; local dev builds default off (no C toolchain needed).
+db = ["dep:postgres", "dep:postgres-native-tls", "dep:native-tls"]
+
+[dependencies]
+postgres = { version = "0.19", optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
+native-tls = { version = "0.2", optional = true }
+
 [profile.release]
 opt-level = 3

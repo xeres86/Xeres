@@ -75,10 +75,15 @@ npm run dev          # = `xeres dev app.xrs`
 
 Open **http://127.0.0.1:8080**.
 
-`xeres dev` compiles `app.xrs` → `out/server/` (a self-contained Rust server) +
-a browser bundle, serves it, and **rebuilds + restarts on every change**. It
-also loads a dotenv-style `.env` into the server — set `DATABASE_URL` there to
-connect the `db` capability to a hosted PostgreSQL.
+`xeres dev` compiles `app.xrs`, serves it on `:8080`, and **rebuilds on every
+change** — running the app **in-process** (an interpreter + built-in HTTP
+server), so it needs **no cargo / Rust toolchain**. It loads a dotenv-style
+`.env` — set `DATABASE_URL` to connect the `db` capability to hosted PostgreSQL.
+
+Two run modes:
+- **`xeres serve` / `xeres dev`** — run the app directly (no cargo). Default.
+- **`xeres build`** — emit a standalone Rust server crate (`out/server/`) to
+  compile with cargo, for an eject / max-performance deployment.
 
 ---
 

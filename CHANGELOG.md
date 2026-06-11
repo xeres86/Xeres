@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased (0.2-dev)
+- **Self-contained runtime (`xeres serve`)** — the compiler binary can now run
+  an app directly: an interpreter executes `server` functions and an in-process
+  HTTP server handles static, RPC (secret-stripped responses) and sync. **No
+  cargo, no generated-Rust compile.** `xeres dev` now (re)spawns `xeres serve`,
+  so the dev loop needs no Rust toolchain. The Postgres driver is feature-gated
+  (`--features db`); released binaries are built with it, so DB apps work with
+  no toolchain on the user's machine. `xeres build` still emits a standalone
+  Rust crate for an eject / max-performance path.
 - **Distribution (no-git install)** — an npm `xeres` package (`tooling/npm/xeres`)
   whose `postinstall` downloads a prebuilt compiler binary for the platform, and
   a `release.yml` workflow that builds those binaries per-platform on a tag.

@@ -30,10 +30,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
 5. **List/Optional inside RPC arguments** (currently default server-side).
 6. **Auth primitives** — session tokens (a `declassify`d secret), TLS story
    for the app server.
-7. **Distribution** — machinery built (npm `xeres` wrapper + per-platform
-   release workflow, see [RELEASING.md](RELEASING.md)); remaining: actually
-   publish to npm + cut a tagged release, then the self-contained runtime so
-   generated apps don't need `cargo`.
+7. **Distribution** — npm `xeres` wrapper + per-platform release workflow built
+   (see [RELEASING.md](RELEASING.md)); remaining: actually publish to npm + cut
+   a tagged release.
+8. ~~**Self-contained runtime**~~ ✅ done — `xeres serve` runs apps via an
+   interpreter + in-process server, no `cargo`. (`xeres build` remains for
+   eject/max-perf.) Together with (7), a dev needs only Node + the `xeres`
+   binary — no git, no Rust.
 
 ## Later
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword
