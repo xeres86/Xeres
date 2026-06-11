@@ -1,0 +1,73 @@
+// Xeres reference app — an auth'd, local-first notes app.
+//
+// Demonstrates most of v0.1 in one file:
+//   - the secret boundary (a `secret` field that can never reach the browser)
+//   - server-side auth via an `await`-ed RPC, with `try`/`catch` error handling
+//   - conditional rendering (`if`) used as navigation: login view vs notes view
+//   - a local-first `synced` collection with add / list / per-item delete
+//   - two-way input binding and reactive client `state`
+//
+// Auth is a stub: a real build would query `db` and compare against the stored
+// hash here, server-side. The notes themselves work fully offline-first today.
+
+model User {
+  id: String
+  username: String
+  secret password_hash: String      // server-only — stripped from the wire
+}
+
+model Note {
+  id: String
+  body: String
+}
+
+synced state notes: Collection<Note>
+
+server fn login(username: String, password: String) -> String {
+  return username                    // stub session name; real auth lives here
+}
+
+ui screen App {
+  state username: String = ""
+  state password: String = ""
+  state who: String = ""
+  state error: String = ""
+  state draft: String = ""
+  state loggedIn: Bool = false
+
+  view {
+    column {
+      heading "Xeres Notes"
+
+      if loggedIn {
+        text "Signed in as " + who
+        row {
+          input "New note" bind draft
+          button "Add" -> { notes.add(Note { id: uid(), body: draft }) draft = "" }
+        }
+        for note in notes {
+          row {
+            text note.body
+            button "x" -> { notes.remove(note.id) }
+          }
+        }
+        button "Sign out" -> { loggedIn = false }
+      } else {
+        text "Sign in to your notes."
+        input "Username" bind username
+        password "Password" bind password
+        button "Sign in" -> {
+          try {
+            let name = await login(username, password)
+            who = name
+            error = ""
+            loggedIn = true
+          } catch {
+            error = "Sign in failed - check your connection"
+          }
+        }
+        text error
+      }
+    }
+  }
+}
