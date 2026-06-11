@@ -1,0 +1,17 @@
+# Rust build output
+/target
+**/target
+
+# Generated app output (regenerated from .xrs on every build)
+/out
+**/out
+
+# Node / scaffolded deps and bundles
+node_modules/
+package-lock.json
+**/client.js
+
+# Local tooling / scratch
+.claude/
+_*/
+*.log

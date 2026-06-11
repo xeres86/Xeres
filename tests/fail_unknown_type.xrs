@@ -1,0 +1,5 @@
+// EXPECT: FAIL [R1 unknown-type] — field references a type that does not exist.
+model Account {
+  id: String
+  owner: Persn
+}

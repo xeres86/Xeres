@@ -1,0 +1,12 @@
+// EXPECT: FAIL [R14 if-condition] — the condition is a String, not Bool.
+ui screen Bad {
+  state name: String = ""
+
+  view {
+    column {
+      if name {
+        text "hi"
+      }
+    }
+  }
+}

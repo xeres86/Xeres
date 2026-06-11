@@ -1,0 +1,13 @@
+// EXPECT: PASS — a server fn returns a model containing a secret field.
+// This is SAFE: the generated `Session::to_wire_json` in out/server.rs omits
+// `server_key`, and the client interface omits it too. The secret is physically
+// absent from the RPC response — the runtime half of R3/R5.
+model Session {
+  token: String
+  user_id: String
+  secret server_key: String
+}
+
+server fn open_session(uid: String, key: String) -> Session {
+  return Session { token: uid, user_id: uid, server_key: key }
+}

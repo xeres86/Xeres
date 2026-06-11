@@ -1,0 +1,9 @@
+// EXPECT: FAIL [R9 record-construction] — field `y` expects Int but got String.
+model Point {
+  x: Int
+  y: Int
+}
+
+server fn bad() -> Point {
+  return Point { x: 0, y: "nope" }
+}

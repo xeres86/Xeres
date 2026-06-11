@@ -1,0 +1,4 @@
+// EXPECT: FAIL [R15 db-capability] — `db` is server-only, can't be used in ui code.
+ui fn wipe() -> Int {
+  return db.exec("delete from users", "x")
+}

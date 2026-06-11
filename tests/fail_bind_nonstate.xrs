@@ -1,0 +1,6 @@
+// EXPECT: FAIL [R13 input-binding] — `bind draft` but there is no `state draft: String`.
+ui screen Bad {
+  view {
+    input "type here" bind draft
+  }
+}

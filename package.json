@@ -1,0 +1,26 @@
+{
+  "name": "xeres",
+  "displayName": "Xeres",
+  "description": "Language support for Xeres (.xrs / .xer)",
+  "version": "0.0.1",
+  "publisher": "xeres-lang",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "xeres",
+        "aliases": ["Xeres", "xeres"],
+        "extensions": [".xrs", ".xer"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "xeres",
+        "scopeName": "source.xeres",
+        "path": "./syntaxes/xeres.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,4 @@
+// EXPECT: PASS — an unscoped (shared) fn using only Wire types runs anywhere.
+fn double(n: Int) -> Int {
+  return n + n
+}

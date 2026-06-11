@@ -1,0 +1,16 @@
+// EXPECT: PASS — conditional rendering with if/else over a Bool state cell.
+ui screen Gate {
+  state loggedIn: Bool = false
+
+  view {
+    column {
+      heading "Gate"
+      if loggedIn {
+        text "Welcome back!"
+      } else {
+        text "Please sign in."
+        button "Sign in" -> { loggedIn = true }
+      }
+    }
+  }
+}

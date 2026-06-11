@@ -1,0 +1,28 @@
+// EXPECT: PASS — a per-row delete button references the `for` loop variable.
+model Task {
+  id: String
+  title: String
+  done: Bool
+}
+
+synced state tasks: Collection<Task>
+
+ui screen App {
+  state draft: String = ""
+
+  view {
+    column {
+      heading "Xeres App"
+      row {
+        input "What needs doing?" bind draft
+        button "add" -> { tasks.add(Task { id: uid(), title: draft, done: false }) draft = "" }
+      }
+      for task in tasks {
+        row {
+          text task.title
+          button "x" -> { tasks.remove(task.id) }
+        }
+      }
+    }
+  }
+}

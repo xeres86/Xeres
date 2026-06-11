@@ -1,0 +1,6 @@
+// EXPECT: FAIL [R10 sync-key] — a synced collection's model needs `id: String`.
+model Note {
+  body: String
+}
+
+synced state notes: Collection<Note>

@@ -1,0 +1,15 @@
+// Interactive client-side state — no server, no framework.
+ui screen Counter {
+  state count: Int = 0
+
+  view {
+    column {
+      heading "Xeres Counter"
+      text count
+      row {
+        button "−" -> { count = count - 1 }
+        button "+" -> { count = count + 1 }
+      }
+    }
+  }
+}

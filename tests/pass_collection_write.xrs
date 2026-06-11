@@ -1,0 +1,22 @@
+// EXPECT: PASS — a handler adds to a synced collection; the list renders it.
+model Task {
+  id: String
+  title: String
+  done: Bool
+}
+
+synced state tasks: Collection<Task>
+
+ui screen Todo {
+  view {
+    column {
+      heading "Todo"
+      button "add a task" -> { tasks.add(Task { id: uid(), title: "New task", done: false }) }
+      for task in tasks {
+        row {
+          text task.title
+        }
+      }
+    }
+  }
+}

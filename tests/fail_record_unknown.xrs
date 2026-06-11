@@ -1,0 +1,9 @@
+// EXPECT: FAIL [R9 record-construction] — `z` is not a field of Point.
+model Point {
+  x: Int
+  y: Int
+}
+
+server fn bad() -> Point {
+  return Point { x: 0, y: 0, z: 9 }
+}

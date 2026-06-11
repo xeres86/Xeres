@@ -1,0 +1,14 @@
+// EXPECT: PASS — ui handler calls a server fn via `await` and stores the result.
+server fn greet(name: String) -> String {
+  return name
+}
+
+ui screen Hello {
+  state message: String = ""
+  view {
+    column {
+      text message
+      button "greet" -> { let g = await greet("world") message = g }
+    }
+  }
+}

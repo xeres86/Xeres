@@ -1,0 +1,9 @@
+// EXPECT: FAIL [R9 record-construction] — `y` is required but not supplied.
+model Point {
+  x: Int
+  y: Int
+}
+
+server fn bad() -> Point {
+  return Point { x: 0 }
+}

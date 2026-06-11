@@ -1,0 +1,21 @@
+// EXPECT: PASS — plain data crosses freely; non-secret field read in UI is fine.
+// (Model + screen exercise codegen: the User interface and a render fn.)
+model User {
+  id: String
+  username: String
+  age: Int
+  secret password_hash: String
+}
+
+server fn get_username(id: String) -> String {
+  return id
+}
+
+ui screen Profile(user: User) {
+  view {
+    column {
+      heading "Profile"
+      text user.username
+    }
+  }
+}

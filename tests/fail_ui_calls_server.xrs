@@ -1,0 +1,8 @@
+// EXPECT: FAIL [R4 env-call-discipline] — ui calls a server fn directly (must be RPC).
+server fn add(a: Int, b: Int) -> Int {
+  return a + b
+}
+
+ui fn render() -> Int {
+  return add(1, 2)
+}

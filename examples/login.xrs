@@ -1,0 +1,44 @@
+// A login screen in Xeres.
+//
+// No database yet, so `login` is a stub — but this is the real shape: typed
+// fields bound to client state, a server-side auth call via `await`, and the
+// secret boundary. The password hash lives ONLY on the server (a `secret`
+// field), so it can never reach the browser — the compiler enforces that.
+
+model User {
+  id: String
+  username: String
+  secret password_hash: String      // never crosses to the UI
+}
+
+// Real auth (later) will look up the user and compare the password to the
+// stored hash here, server-side. For now it just echoes the username back.
+server fn login(username: String, password: String) -> String {
+  return username
+}
+
+ui screen Login {
+  state username: String = ""
+  state password: String = ""
+  state who: String = ""
+  state loggedIn: Bool = false
+
+  view {
+    column {
+      heading "Sign in"
+      if loggedIn {
+        text "Welcome back, " + who
+        button "Sign out" -> { loggedIn = false }
+      } else {
+        text "Welcome back to Xeres."
+        input "Username" bind username
+        password "Password" bind password
+        button "Sign in" -> {
+          let name = await login(username, password)
+          who = name
+          loggedIn = true
+        }
+      }
+    }
+  }
+}

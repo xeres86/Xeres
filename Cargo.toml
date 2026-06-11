@@ -1,0 +1,12 @@
+[package]
+name = "xeres"
+version = "0.0.1"
+edition = "2021"
+description = "The Xeres compiler — tier-safe (server/ui) web language with a typed boundary."
+
+[[bin]]
+name = "xeres"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,11 @@
+// EXPECT: FAIL [R8 unknown-binding] — `user` is referenced but never declared as a prop.
+model User {
+  id: String
+  username: String
+}
+
+ui screen Profile {
+  view {
+    text user.username
+  }
+}

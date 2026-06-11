@@ -1,0 +1,19 @@
+// EXPECT: PASS — `for` over a synced collection binds the element type (Task),
+// so task.title resolves; the state name `tasks` is in scope.
+model Task {
+  id: String
+  title: String
+}
+
+synced state tasks: Collection<Task>
+
+ui screen TaskList {
+  view {
+    column {
+      heading "Tasks"
+      for task in tasks {
+        text task.title
+      }
+    }
+  }
+}

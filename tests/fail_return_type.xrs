@@ -1,0 +1,4 @@
+// EXPECT: FAIL [R7 return-type] — declared Int, returns a String.
+server fn wrong() -> Int {
+  return "not a number"
+}

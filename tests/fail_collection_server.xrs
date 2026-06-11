@@ -1,0 +1,12 @@
+// EXPECT: FAIL [R12 collection-method] — synced collections are client-side only.
+model Task {
+  id: String
+  title: String
+}
+
+synced state tasks: Collection<Task>
+
+server fn bad() -> Int {
+  tasks.add(Task { id: "1", title: "x" })
+  return 0
+}

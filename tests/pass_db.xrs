@@ -1,0 +1,15 @@
+// EXPECT: PASS — server fns use the `db` capability (query_one maps to the
+// return model; exec returns rows-affected). `db` is server-only.
+model User {
+  id: String
+  username: String
+  secret password_hash: String
+}
+
+server fn get_user(name: String) -> User {
+  return db.query_one("select id, username, password_hash from users where username = $1", name)
+}
+
+server fn add_user(id: String, username: String, password_hash: String) -> Int {
+  return db.exec("insert into users (id, username, password_hash) values ($1, $2, $3)", id, username, password_hash)
+}

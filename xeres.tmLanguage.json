@@ -1,0 +1,50 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Xeres",
+  "scopeName": "source.xeres",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#boundary" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#declarations" }
+  ],
+  "repository": {
+    "comments": {
+      "name": "comment.line.double-slash.xeres",
+      "match": "//.*$"
+    },
+    "strings": {
+      "name": "string.quoted.double.xeres",
+      "begin": "\"",
+      "end": "\""
+    },
+    "boundary": {
+      "name": "keyword.control.boundary.xeres",
+      "match": "\\b(server|ui|secret|synced|local|declassify)\\b"
+    },
+    "keywords": {
+      "name": "keyword.control.xeres",
+      "match": "\\b(fn|let|return|model|state|screen|view|mutation|for|in|on)\\b"
+    },
+    "types": {
+      "name": "support.type.xeres",
+      "match": "\\b(String|Int|Float|Bool|Collection)\\b"
+    },
+    "constants": {
+      "name": "constant.language.xeres",
+      "match": "\\b(true|false)\\b"
+    },
+    "numbers": {
+      "name": "constant.numeric.xeres",
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+    },
+    "declarations": {
+      "match": "\\b(fn|model|screen|mutation)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": { "2": { "name": "entity.name.function.xeres" } }
+    }
+  }
+}

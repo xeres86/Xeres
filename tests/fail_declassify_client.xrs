@@ -1,0 +1,9 @@
+// EXPECT: FAIL [R6 declassify-context] — declassify used outside the server.
+model User {
+  id: String
+  secret password_hash: String
+}
+
+ui fn bad(user: User) -> Bool {
+  return declassify(user.password_hash == "x")
+}

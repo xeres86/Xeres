@@ -1,0 +1,9 @@
+// EXPECT: PASS — secret compared server-side, released via the audited declassify.
+model User {
+  id: String
+  secret password_hash: String
+}
+
+server fn verify(user: User, attempt: String) -> Bool {
+  return declassify(user.password_hash == attempt)
+}

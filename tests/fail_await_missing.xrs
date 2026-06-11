@@ -1,0 +1,11 @@
+// EXPECT: FAIL [R4 async-call-discipline] — server fn called from the browser without `await`.
+server fn greet(name: String) -> String {
+  return name
+}
+
+ui screen Bad {
+  state message: String = ""
+  view {
+    button "greet" -> { message = greet("world") }
+  }
+}

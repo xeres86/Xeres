@@ -1,0 +1,10 @@
+// EXPECT: PASS — a server fn takes a model object as an RPC argument.
+model User {
+  id: String
+  username: String
+  age: Int
+}
+
+server fn save(user: User) -> Bool {
+  return true
+}

@@ -1,0 +1,289 @@
+# Xeres
+
+**A tier-safe web language.** You write one `.xrs` file; the Xeres compiler
+splits it into two tiers — a **Rust server** and a **browser bundle** — under a
+single type system. The server/client boundary is enforced by the **compiler**,
+not by convention: secrets and server capabilities *physically cannot* reach the
+browser. Local-first by default. Zero framework runtime in the browser.
+
+> Status: **pre-v0.1**, in active development. See [ROADMAP.md](ROADMAP.md).
+
+---
+
+## Why Xeres exists
+
+Modern web stacks make the most security-critical thing in the app — the line
+between **server** and **client** — a matter of *discipline*:
+
+- In Next.js you must remember `"use client"` / `"use server"` and never let a
+  DB handle or secret drift into a client component.
+- In React + a backend you hand-write an API, duplicate types across the wire,
+  and remember to `select` only safe columns.
+- A leaked password hash or API key is a **code-review item**, not a build error.
+
+Xeres makes that boundary a **type**. A secret reaching the browser isn't a bug
+you hunt for — it's a program that **doesn't compile**.
+
+**Goals (in priority order):**
+1. **Security** — the server/client boundary is compiler-enforced.
+2. **Speed** — a small native server, a tiny browser bundle, no framework runtime.
+3. **Familiar, low-friction syntax** — one file, declarative views, no boilerplate.
+4. **A small dependency tree** — the browser tier ships **zero** dependencies; the
+   server adds a dependency only when you actually use one (e.g. a DB driver).
+
+See [COMPARISON.md](COMPARISON.md) for the same app written in Xeres vs
+React/Vue/Svelte/Next/Angular.
+
+---
+
+## The core idea: two tiers, one type system
+
+Every function and screen declares **where it runs**:
+
+| Placement | Runs | Compiles to |
+|---|---|---|
+| `server fn` | the server | Rust |
+| `ui screen` / `ui fn` | the browser | TypeScript → JS |
+| `fn` (unscoped) | either (shared) | both |
+
+Two orthogonal properties make the boundary safe:
+
+- **Placement** — where code executes (above).
+- **Transport** — whether a *value* may cross the wire. Ordinary data crosses
+  freely; `secret` fields and the `db` capability are **`Located`** — they have
+  no wire representation and cannot be serialized to the browser.
+
+A `ui` call to a `server fn` is automatically an **`await`-ed RPC**: the compiler
+generates the fetch, serializes arguments, and **strips `secret` fields from the
+response** — so the wire payload physically lacks them.
+
+---
+
+## Quickstart
+
+Requires the `xeres` compiler (built from this repo) on your `PATH`, plus
+[esbuild](https://esbuild.github.io/) (via `npx`) and a Rust toolchain.
+
+```bash
+# scaffold (until create-xeres is published to npm)
+node tooling/create-xeres/index.mjs my-app
+cd my-app
+npm install
+npm run dev          # compile app.xrs -> bundle client -> serve on :8080
+```
+
+Open **http://127.0.0.1:8080**.
+
+`npm run dev` runs the pipeline: `xeres build app.xrs` → `out/server/` (a
+self-contained Rust server) + a browser bundle → `cargo run`.
+
+---
+
+## A tour of the language
+
+### Hello, Xeres (the default app)
+
+```xeres
+ui screen App {
+  state count: Int = 0
+
+  view {
+    column {
+      heading "Hello, Xeres!"
+      text "Welcome to your new tier-safe app."
+      button "count is " + count -> { count = count + 1 }
+    }
+  }
+}
+```
+
+No `useState`, no JSX, no `main`/mount boilerplate (the compiler auto-mounts the
+first prop-less screen), no CSS file, zero browser-runtime dependencies.
+
+### Models and the secret boundary
+
+```xeres
+model User {
+  id: String
+  username: String
+  secret password_hash: String      // Located — can never reach the browser
+}
+```
+
+`secret` fields are stripped from the generated client interface *and* from the
+RPC wire payload. Reading one in a `ui` context is a compile error.
+
+### Server functions, called from the UI via `await`
+
+```xeres
+server fn greet(name: String) -> String {
+  return name                       // body never ships to the browser
+}
+
+ui screen Hello {
+  state msg: String = ""
+  view {
+    column {
+      text msg
+      button "greet" -> {
+        let g = await greet("world")   // compiler-generated, typed RPC
+        msg = g
+      }
+    }
+  }
+}
+```
+
+### Views: state, binding, lists, conditionals
+
+```xeres
+ui screen Login(  ) {
+  state username: String = ""
+  state password: String = ""
+  state loggedIn: Bool = false
+
+  view {
+    column {
+      if loggedIn {
+        text "Welcome back!"
+        button "Sign out" -> { loggedIn = false }
+      } else {
+        input "Username" bind username
+        password "Password" bind password
+        button "Sign in" -> { loggedIn = true }
+      }
+    }
+  }
+}
+```
+
+View primitives: `column`, `row`, `heading`, `text`, `button`, `input`,
+`password`. Control flow: `for x in collection { ... }`, `if cond { ... } else { ... }`.
+Inputs use `bind <stateCell>` for two-way binding.
+
+### Local-first synced collections
+
+```xeres
+model Task { id: String  title: String  done: Bool }
+
+synced state tasks: Collection<Task>     // SQLite-style local store + sync
+
+ui screen Todo {
+  state draft: String = ""
+  view {
+    column {
+      input "What needs doing?" bind draft
+      button "add" -> { tasks.add(Task { id: uid(), title: draft, done: false }) draft = "" }
+      for task in tasks {
+        row { text task.title  button "x" -> { tasks.remove(task.id) } }
+      }
+    }
+  }
+}
+```
+
+A `synced state` is an offline-first collection: it persists locally and a
+background **trawler** syncs changes to the server (last-write-wins by a Lamport
+counter; the server merge is generic). Local writes re-render immediately;
+pulled changes re-render reactively.
+
+### The database (server-only)
+
+```xeres
+server fn get_user(name: String) -> User {
+  // `db` is a Located capability — server-only, connects to a hosted Postgres
+  // via DATABASE_URL. The connection + credentials can never reach the browser.
+  return db.query_one("select id, username, password_hash from users where username = $1", name)
+}
+
+server fn add_user(id: String, username: String, password_hash: String) -> Int {
+  return db.exec("insert into users (id, username, password_hash) values ($1, $2, $3)",
+                 id, username, password_hash)
+}
+```
+
+`db.query_one` maps a row onto the function's return model; `db.exec` returns the
+affected-row count. The `postgres` driver is added to the generated server **only
+when an app uses `db`** — db-free apps stay a zero-dependency `std` crate.
+
+---
+
+## The rules (what the compiler guarantees)
+
+Every program is checked against these. A violation is a compile error.
+
+| Rule | Guarantee |
+|---|---|
+| **R1** unknown-type | every referenced type exists |
+| **R2** duplicate-decl | no duplicate model/field/function names |
+| **R3** secret-containment | a `secret` field can only be read server-side |
+| **R4** async-call-discipline | a browser→server call must be `await`-ed; `await` is browser-only |
+| **R5** secret-leak-via-return | only `server` functions may return secret-derived data |
+| **R6** declassify-context | `declassify(...)` is server-only |
+| **R7** return-type | a `return` must match the declared return type |
+| **R8** unknown-binding | a screen identifier must be a prop, `state`, `for`-binding, fn, or collection |
+| **R9** record-construction | a model literal supplies each field once, type-compatible |
+| **R10** sync-key | a `synced` collection's model needs an `id: String` merge key |
+| **R11** state-init / assign | `state` initializers and assignments are type-compatible |
+| **R12** collection-method | `add`/`remove`/`get`/`all` only on synced collections, client-side |
+| **R13** input-binding | `bind x` requires a `String` `state` cell |
+| **R14** if-condition | an `if` condition must be `Bool` |
+| **R15** db-capability | `db` is server-only; methods are `query_one`/`query`/`exec` |
+
+`secret` data that legitimately must be released (e.g. an auth result, not the
+hash itself) passes through a single audited keyword: **`declassify(...)`**,
+valid only server-side.
+
+---
+
+## How it compiles
+
+```
+app.xrs ──► lexer ──► parser ──► checker (R1–R15) ──► codegen
+                                                       ├─► out/server/         a self-contained Rust crate
+                                                       │     ├─ src/main.rs      std-only HTTP server: router,
+                                                       │     │                   RPC, secret-stripping, sync
+                                                       │     ├─ Cargo.toml       (postgres added only if `db` used)
+                                                       │     └─ static/
+                                                       │         ├─ index.html   generated default page
+                                                       │         └─ client.ts     screens, state, RPC stubs, sync
+                                                       └─ esbuild client.ts ──► static/client.js   (~1 kb, no framework)
+```
+
+- The **server** is a `std`-only HTTP server (thread-per-connection) with a
+  generated router, a hand-rolled JSON codec, per-model wire serialization that
+  omits `secret` fields, and a generic local-first sync endpoint.
+- The **client** is a small reactive runtime: a render-on-change mount, typed RPC
+  stubs (`await`), two-way input binding, and the synced-collection store.
+
+You never edit `out/` — it's regenerated from `.xrs` on every build.
+
+---
+
+## Repository layout
+
+```
+src/                     the Xeres compiler (Rust)
+  token.rs  lexer.rs  parser.rs  checker.rs  codegen.rs  main.rs
+tests/                   .xrs fixtures + run.sh — the spec / regression suite
+examples/                reference apps (counter, todo, login)
+tooling/create-xeres/    project scaffolder (the `npm create xeres` CLI)
+package.json,            VS Code language extension (syntax highlighting)
+  language-configuration.json, xeres.tmLanguage.json
+ROADMAP.md               v0.1 plan + what's deferred
+COMPARISON.md            Xeres vs React/Vue/Svelte/Next/Angular
+```
+
+### Building the compiler
+
+```bash
+cargo build --release          # produces target/release/xeres
+cargo install --path .         # installs `xeres` to ~/.cargo/bin
+bash tests/run.sh              # runs the fixture suite (BIN=./target/release/xeres)
+```
+
+---
+
+## License
+
+MIT OR Apache-2.0 (intended; see headers).

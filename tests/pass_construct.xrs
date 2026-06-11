@@ -1,0 +1,10 @@
+// EXPECT: PASS — a server fn constructs and returns a real model value.
+// This is what R7 previously made impossible (no way to produce a model).
+model Point {
+  x: Int
+  y: Int
+}
+
+server fn origin() -> Point {
+  return Point { x: 0, y: 0 }
+}
