@@ -26,6 +26,7 @@ pub enum Token {
     Try,        // try   (handle a failed await/RPC, browser-side only)
     Catch,      // catch
     Bind,       // bind  (two-way bind an input to a state cell)
+    NoneLit,    // none  (the empty Optional)
     Fn,         // fn
     Let,        // let
     Return,     // return
@@ -51,10 +52,12 @@ pub enum Token {
     GtEq,   // >=
     And,    // &&
     Or,     // ||
-    LBrace, // {
-    RBrace, // }
-    LParen, // (
-    RParen, // )
+    LBrace,   // {
+    RBrace,   // }
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
 
     // --- control ---
     Illegal,

@@ -71,6 +71,7 @@ fn expr_uses_db(e: &Expr) -> bool {
         Expr::Binary { left, right, .. } => expr_uses_db(left) || expr_uses_db(right),
         Expr::Declassify(i) | Expr::Await(i) => expr_uses_db(i),
         Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_db(v)),
+        Expr::ListLit(items) => items.iter().any(expr_uses_db),
         _ => false,
     }
 }
@@ -230,8 +231,10 @@ fn arg_extractor(i: usize, ty: &str, program: &XeresProgram) -> String {
             .iter()
             .map(|p| {
                 let acc = json_accessor(&p.data_type);
-                if program.models.iter().any(|m| m.name == p.data_type) {
-                    // nested model — recurse would need the sub-object; default for v0.1
+                let is_generic = generic_inner("List", &p.data_type).is_some()
+                    || generic_inner("Optional", &p.data_type).is_some();
+                if is_generic || program.models.iter().any(|m| m.name == p.data_type) {
+                    // nested model / generic — defaults for v0.1
                     format!("{}: Default::default()", p.name)
                 } else {
                     format!(
@@ -250,8 +253,23 @@ fn arg_extractor(i: usize, ty: &str, program: &XeresProgram) -> String {
 }
 
 /// Rust expression (evaluating to `String`) that serializes `path` of type `ty`
-/// for the wire. Models recurse through their own secret-stripping codec.
+/// for the wire. Models recurse through their own secret-stripping codec;
+/// List -> JSON array, Optional -> value or null.
 fn wire_serialize(path: &str, ty: &str, models: &HashSet<&str>) -> String {
+    if let Some(inner) = generic_inner("List", ty) {
+        let item = wire_serialize("__it", inner, models);
+        return format!(
+            "{{ let __v: Vec<String> = {}.iter().map(|__it| {}).collect(); format!(\"[{{}}]\", __v.join(\",\")) }}",
+            path, item
+        );
+    }
+    if let Some(inner) = generic_inner("Optional", ty) {
+        let item = wire_serialize("__o", inner, models);
+        return format!(
+            "match &{} {{ Some(__o) => {}, None => String::from(\"null\") }}",
+            path, item
+        );
+    }
     if models.contains(ty) {
         format!("{}.to_wire_json()", path)
     } else if ty == "String" {
@@ -875,8 +893,20 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
         Expr::Declassify(inner) => emit_h_expr(inner, screen, sv),
         Expr::Await(inner) => format!("await {}", emit_h_expr(inner, screen, sv)),
         Expr::MethodCall { receiver, method, args } => {
+            if method == "or" && args.len() == 1 {
+                return format!(
+                    "({} ?? {})",
+                    emit_h_expr(receiver, screen, sv),
+                    emit_h_expr(&args[0], screen, sv)
+                );
+            }
             let a = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect::<Vec<_>>().join(", ");
             format!("{}.{}({})", emit_h_expr(receiver, screen, sv), method, a)
+        }
+        Expr::NoneLit => "null".to_string(),
+        Expr::ListLit(items) => {
+            let body = items.iter().map(|x| emit_h_expr(x, screen, sv)).collect::<Vec<_>>().join(", ");
+            format!("[{}]", body)
         }
         // Record in a handler is a client object literal; rewrite state refs.
         Expr::Record { fields, .. } => {
@@ -913,7 +943,9 @@ fn expr_has_await(e: &Expr) -> bool {
             expr_has_await(receiver) || args.iter().any(expr_has_await)
         }
         Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_has_await(v)),
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => false,
+        Expr::ListLit(items) => items.iter().any(expr_has_await),
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
+        | Expr::NoneLit => false,
     }
 }
 
@@ -1148,7 +1180,8 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
     match e {
         Expr::Int(n) => n.to_string(),
         Expr::Float(f) => format!("{:?}", f),
-        Expr::Str(s) => format!("{:?}", s),
+        // Rust strings are owned end-to-end (fields, lists, returns all expect String).
+        Expr::Str(s) => if ts { format!("{:?}", s) } else { format!("String::from({:?})", s) },
         Expr::Bool(b) => b.to_string(),
         Expr::Ident(v) => v.clone(),
         Expr::Field { base, field } => format!("{}.{}", emit_expr(base, ts), field),
@@ -1180,20 +1213,46 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     format!("db_query({}, {})", sql, params)
                 };
             }
+            // `optional.or(default)` — TS `??`, Rust `unwrap_or`.
+            if method == "or" && args.len() == 1 {
+                let r = emit_expr(receiver, ts);
+                let d = emit_expr(&args[0], ts);
+                return if ts {
+                    format!("({} ?? {})", r, d)
+                } else {
+                    format!("{}.clone().unwrap_or({})", r, d)
+                };
+            }
             let a = args.iter().map(|x| emit_expr(x, ts)).collect::<Vec<_>>().join(", ");
             format!("{}.{}({})", emit_expr(receiver, ts), method, a)
         }
-        // Record literal: Rust needs the type name prefix, TS uses a plain object.
-        Expr::Record { name, fields } => {
-            let body = fields
-                .iter()
-                .map(|(f, v)| format!("{}: {}", f, emit_expr(v, ts)))
-                .collect::<Vec<_>>()
-                .join(", ");
+        Expr::NoneLit => if ts { "null".to_string() } else { "None".to_string() },
+        Expr::ListLit(items) => {
+            let body = items.iter().map(|x| emit_expr(x, ts)).collect::<Vec<_>>().join(", ");
             if ts {
+                format!("[{}]", body)
+            } else {
+                format!("vec![{}]", body)
+            }
+        }
+        // Record literal. TS: a plain object. Rust: fields pass through
+        // `.into()` (covers T -> T and the T -> Option<T> coercion) and any
+        // omitted Optional/List fields are filled by struct update.
+        Expr::Record { name, fields } => {
+            if ts {
+                let body = fields
+                    .iter()
+                    .map(|(f, v)| format!("{}: {}", f, emit_expr(v, ts)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("{{ {} }}", body)
             } else {
-                format!("{} {{ {} }}", name, body)
+                let body = fields
+                    .iter()
+                    .map(|(f, v)| format!("{}: ({}).into()", f, emit_expr(v, ts)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{} {{ {}, ..Default::default() }}", name, body)
             }
         }
     }
@@ -1287,7 +1346,20 @@ fn binop_sym(op: BinOp) -> &'static str {
     }
 }
 
+/// Inner type of a one-level generic, e.g. `("List", "List<User>") -> "User"`.
+fn generic_inner<'a>(base: &str, ty: &'a str) -> Option<&'a str> {
+    ty.strip_prefix(base)
+        .and_then(|r| r.strip_prefix('<'))
+        .and_then(|r| r.strip_suffix('>'))
+}
+
 fn map_rust_type(name: &str) -> String {
+    if let Some(inner) = generic_inner("List", name) {
+        return format!("Vec<{}>", map_rust_type(inner));
+    }
+    if let Some(inner) = generic_inner("Optional", name) {
+        return format!("Option<{}>", map_rust_type(inner));
+    }
     match name {
         "String" => "String".to_string(),
         "Int" => "i64".to_string(),
@@ -1298,6 +1370,12 @@ fn map_rust_type(name: &str) -> String {
 }
 
 fn map_ts_type(name: &str) -> String {
+    if let Some(inner) = generic_inner("List", name) {
+        return format!("{}[]", map_ts_type(inner));
+    }
+    if let Some(inner) = generic_inner("Optional", name) {
+        return format!("({} | null)", map_ts_type(inner));
+    }
     match name {
         "String" => "string".to_string(),
         "Int" | "Float" => "number".to_string(),

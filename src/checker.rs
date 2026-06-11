@@ -29,7 +29,17 @@ struct SymbolTable<'a> {
     states: HashMap<String, &'a SyncedStateNode>,
 }
 
+/// Inner type of a one-level generic, e.g. `("List", "List<User>") -> "User"`.
+fn generic_inner<'a>(base: &str, ty: &'a str) -> Option<&'a str> {
+    ty.strip_prefix(base)
+        .and_then(|r| r.strip_prefix('<'))
+        .and_then(|r| r.strip_suffix('>'))
+}
+
 fn is_known_type(name: &str, table: &SymbolTable) -> bool {
+    if let Some(inner) = generic_inner("List", name).or_else(|| generic_inner("Optional", name)) {
+        return is_known_type(inner, table);
+    }
     BUILTINS.contains(&name) || table.models.contains_key(name)
 }
 
@@ -78,7 +88,7 @@ fn resolve_type(
         }
         Expr::Declassify(inner) => resolve_type(inner, locals, table),
         Expr::Await(inner) => resolve_type(inner, locals, table),
-        Expr::MethodCall { receiver, method, .. } => {
+        Expr::MethodCall { receiver, method, args: _ } => {
             if let Expr::Ident(name) = receiver.as_ref() {
                 // `db.exec` returns affected-row count; `db.query_one` is typed
                 // by the surrounding fn's return model (resolved in codegen).
@@ -92,9 +102,22 @@ fn resolve_type(
                     }
                 }
             }
+            // `optional.or(default)` unwraps to the inner type.
+            if method == "or" {
+                if let Some(rt) = resolve_type(receiver, locals, table) {
+                    if let Some(inner) = generic_inner("Optional", &rt) {
+                        return Some(inner.to_string());
+                    }
+                }
+            }
             None
         }
         Expr::Record { name, .. } => Some(name.clone()),
+        Expr::NoneLit => Some("None".into()),
+        Expr::ListLit(items) => {
+            let elem = items.first().and_then(|e| resolve_type(e, locals, table))?;
+            Some(format!("List<{}>", elem))
+        }
     }
 }
 
@@ -130,6 +153,10 @@ fn is_tainted(
         // An awaited value crossed the wire (secrets stripped) — it is clean.
         Expr::Await(_) => false,
         Expr::MethodCall { .. } => false,
+        Expr::NoneLit => false,
+        Expr::ListLit(items) => items
+            .iter()
+            .any(|e| is_tainted(e, locals, table, returns_secret)),
         // A constructed record is tainted if any field value is tainted —
         // secret-derived data does not become clean by being wrapped.
         Expr::Record { fields, .. } => fields
@@ -283,9 +310,16 @@ fn check_return_type(
     }
 }
 
-/// Type assignability. Exact match, plus the one numeric widening Int -> Float.
+/// Type assignability. Exact match, the numeric widening Int -> Float, and
+/// Optional coercion: `none` and a bare `T` both fit an `Optional<T>`.
 fn type_compatible(actual: &str, declared: &str) -> bool {
-    actual == declared || (actual == "Int" && declared == "Float")
+    if actual == declared || (actual == "Int" && declared == "Float") {
+        return true;
+    }
+    if let Some(inner) = generic_inner("Optional", declared) {
+        return actual == "None" || type_compatible(actual, inner);
+    }
+    false
 }
 
 // ---------------------------------------------------------------- screens
@@ -538,7 +572,12 @@ fn check_bindings(
                 check_bindings(v, locals, sname, sline, table, errors);
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) => {}
+        Expr::ListLit(items) => {
+            for it in items {
+                check_bindings(it, locals, sname, sline, table, errors);
+            }
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::NoneLit => {}
     }
 }
 
@@ -621,8 +660,40 @@ fn check_expr(
             }
             if is_db {
                 check_db_method(method, fn_env, fn_name, fn_line, errors);
+            } else if method == "or"
+                && resolve_type(receiver, locals, table)
+                    .as_deref()
+                    .and_then(|t| generic_inner("Optional", t))
+                    .is_some()
+            {
+                // optional.or(default) — default must fit the inner type
+                let inner = resolve_type(receiver, locals, table)
+                    .as_deref()
+                    .and_then(|t| generic_inner("Optional", t).map(str::to_string))
+                    .unwrap_or_default();
+                if args.len() != 1 {
+                    errors.push(SemanticError {
+                        rule: "R9 record-construction",
+                        message: "`or` takes exactly one default value.".into(),
+                        line: fn_line,
+                    });
+                } else if let Some(actual) = resolve_type(&args[0], locals, table) {
+                    if !type_compatible(&actual, &inner) {
+                        errors.push(SemanticError {
+                            rule: "R9 record-construction",
+                            message: format!("`or` default must be `{}`, got `{}`.", inner, actual),
+                            line: fn_line,
+                        });
+                    }
+                }
             } else {
                 check_collection_method(receiver, method, args, locals, fn_env, fn_name, fn_line, table, errors);
+            }
+        }
+        Expr::NoneLit => {}
+        Expr::ListLit(items) => {
+            for it in items {
+                check_expr(it, locals, fn_env, fn_name, fn_line, table, errors);
             }
         }
         Expr::Record { name, fields } => {
@@ -795,7 +866,13 @@ fn check_await(
                 check_await(v, false, in_browser, fn_name, line, table, errors);
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => {}
+        Expr::ListLit(items) => {
+            for it in items {
+                check_await(it, false, in_browser, fn_name, line, table, errors);
+            }
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
+        | Expr::NoneLit => {}
     }
 }
 
@@ -854,7 +931,10 @@ fn check_record(
     }
 
     for p in &model.properties {
-        if !provided.contains(p.name.as_str()) {
+        // Optional<T> and List<T> fields may be omitted (default to none / []).
+        let omittable = generic_inner("Optional", &p.data_type).is_some()
+            || generic_inner("List", &p.data_type).is_some();
+        if !provided.contains(p.name.as_str()) && !omittable {
             errors.push(SemanticError {
                 rule: "R9 record-construction",
                 message: format!("missing field `{}` when constructing `{}`.", p.name, name),

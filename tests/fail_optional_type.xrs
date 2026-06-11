@@ -1,0 +1,9 @@
+// EXPECT: FAIL [R9 record-construction] — Optional<Int> given a String.
+model Thing {
+  id: String
+  rank: Optional<Int>
+}
+
+server fn bad() -> Thing {
+  return Thing { id: "t1", rank: "first" }
+}

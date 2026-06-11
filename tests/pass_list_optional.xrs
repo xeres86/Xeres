@@ -1,0 +1,30 @@
+// EXPECT: PASS — List<T> and Optional<T> end to end: list literals, optional
+// omission, bare-T coercion into Optional, `none`, and `.or(default)`.
+model Profile {
+  id: String
+  name: String
+  nickname: Optional<String>
+  tags: List<String>
+}
+
+server fn anon() -> Profile {
+  // nickname + tags omitted: default to none / []
+  return Profile { id: "p0", name: "Anonymous" }
+}
+
+server fn sample() -> Profile {
+  return Profile {
+    id: "p1",
+    name: "Ada",
+    nickname: "The Countess",      // bare T coerces into Optional<T>
+    tags: ["math", "pioneer"]
+  }
+}
+
+server fn tags() -> List<String> {
+  return ["alpha", "beta"]
+}
+
+ui fn display_name(p: Profile) -> String {
+  return p.nickname.or(p.name)     // unwrap with a default
+}

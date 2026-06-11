@@ -55,6 +55,8 @@ pub enum Expr {
     Await(Box<Expr>),
     MethodCall { receiver: Box<Expr>, method: String, args: Vec<Expr> },
     Record { name: String, fields: Vec<(String, Expr)> },
+    NoneLit,
+    ListLit(Vec<Expr>),
 }
 
 #[derive(Debug)]
@@ -232,13 +234,12 @@ impl<'a> Parser<'a> {
             self.next_token(); // move to ':'
             self.next_token(); // consume ':'
 
-            let data_type = match &self.current_token {
-                Token::Identifier(t) => t.clone(),
-                _ => break,
+            let data_type = match self.parse_type() {
+                Some(t) => t,
+                None => break,
             };
 
             properties.push(ModelProperty { name: prop_name, data_type, is_secret, line: prop_line });
-            self.next_token();
         }
 
         if self.current_token == Token::RBrace { self.next_token(); }
@@ -269,10 +270,7 @@ impl<'a> Parser<'a> {
         let mut return_type = None;
         if self.current_token == Token::Arrow {
             self.next_token(); // consume '->'
-            if let Token::Identifier(t) = &self.current_token {
-                return_type = Some(t.clone());
-                self.next_token();
-            }
+            return_type = self.parse_type();
         }
 
         // --- body: { stmt* } ---
@@ -292,6 +290,29 @@ impl<'a> Parser<'a> {
         Some(FunctionNode { env, name, params, return_type, body, line: fn_line })
     }
 
+    /// Parse a type name: `Ident` or a one-level generic `Ident<Ident>`
+    /// (e.g. `List<User>`, `Optional<String>`). Returned in string form.
+    fn parse_type(&mut self) -> Option<String> {
+        let base = match &self.current_token {
+            Token::Identifier(t) => t.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume base
+        if self.current_token == Token::LAngle {
+            self.next_token(); // consume '<'
+            let inner = match &self.current_token {
+                Token::Identifier(t) => t.clone(),
+                _ => return None,
+            };
+            self.next_token(); // consume inner
+            if self.current_token != Token::RAngle { return None; }
+            self.next_token(); // consume '>'
+            Some(format!("{}<{}>", base, inner))
+        } else {
+            Some(base)
+        }
+    }
+
     /// Parse an optional `( name: Type, ... )` parameter list. Returns empty
     /// if there is no opening paren. Shared by functions and screens.
     fn parse_params(&mut self) -> Vec<Param> {
@@ -306,11 +327,10 @@ impl<'a> Parser<'a> {
                 self.next_token(); // consume name
                 if self.current_token != Token::Colon { break; }
                 self.next_token(); // consume ':'
-                let ptype = match &self.current_token {
-                    Token::Identifier(t) => t.clone(),
-                    _ => break,
+                let ptype = match self.parse_type() {
+                    Some(t) => t,
+                    None => break,
                 };
-                self.next_token(); // consume type
                 params.push(Param { name: pname, type_name: ptype });
                 if self.current_token == Token::Comma { self.next_token(); }
             }
@@ -505,6 +525,20 @@ impl<'a> Parser<'a> {
                 self.next_token(); // consume ')'
                 Some(Expr::Declassify(Box::new(inner)))
             }
+            Token::NoneLit => {
+                self.next_token();
+                Some(Expr::NoneLit)
+            }
+            Token::LBracket => {
+                self.next_token(); // consume '['
+                let mut items = Vec::new();
+                while self.current_token != Token::RBracket && self.current_token != Token::EOF {
+                    if let Some(e) = self.parse_expr() { items.push(e); } else { break; }
+                    if self.current_token == Token::Comma { self.next_token(); }
+                }
+                if self.current_token == Token::RBracket { self.next_token(); }
+                Some(Expr::ListLit(items))
+            }
             Token::LParen => {
                 self.next_token(); // consume '('
                 let inner = self.parse_expr()?;
@@ -591,11 +625,7 @@ impl<'a> Parser<'a> {
         self.next_token(); // consume name
         if self.current_token != Token::Colon { return None; }
         self.next_token(); // consume ':'
-        let type_name = match &self.current_token {
-            Token::Identifier(t) => t.clone(),
-            _ => return None,
-        };
-        self.next_token(); // consume type
+        let type_name = self.parse_type()?;
         if self.current_token != Token::Assign { return None; }
         self.next_token(); // consume '='
         self.allow_record = true;

@@ -70,6 +70,8 @@ impl Lexer {
             '}' => Token::RBrace,
             '(' => Token::LParen,
             ')' => Token::RParen,
+            '[' => Token::LBracket,
+            ']' => Token::RBracket,
             '+' => Token::Plus,
             '*' => Token::Star,
             '<' => {
@@ -171,6 +173,7 @@ impl Lexer {
             "try" => Token::Try,
             "catch" => Token::Catch,
             "bind" => Token::Bind,
+            "none" => Token::NoneLit,
             "fn" => Token::Fn,
             "let" => Token::Let,
             "return" => Token::Return,
