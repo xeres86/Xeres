@@ -1,0 +1,105 @@
+// A Postgres-backed login — a genuine frontend system-design flow:
+//
+//   browser (Login screen)  ──await login()──►  server fn  ──db.query_one──►  Postgres
+//                           ◄── Optional<User> ──           ◄── row / none ──
+//
+// The auth check happens IN THE DATABASE (username + password_hash match). The
+// `password_hash` column is `secret`: it is stripped from the client interface
+// AND from the RPC wire payload, so it can never reach the browser (R3/R5). The
+// DB connection string is a Located capability — server-only (R15).
+//
+// Matches the table created in examples/users.xrs / the login_flow harness:
+//   create table users (id text primary key, username text not null unique,
+//                       password_hash text not null);
+//
+// Run (needs a db-capable build + DATABASE_URL in .env):
+//   ./target/release/xeres dev examples/login_db.xrs
+//
+// NOTE: this demo compares the submitted password against the stored value
+// directly. Real server-side password hashing (argon2/bcrypt) is roadmap #6,
+// "auth primitives" — the missing piece is a server `hash()`/`verify()` builtin.
+
+model User {
+  id: String
+  username: String
+  secret password_hash: String       // never crosses the wire
+}
+
+// Returns the matching user, or `none` if credentials don't match a row.
+server fn login(username: String, password: String) -> Optional<User> {
+  return db.query_one(
+    "select id, username, password_hash from users where username = $1 and password_hash = $2",
+    username, password
+  )
+}
+
+// Create an account (write path); returns the inserted-row count.
+server fn register(username: String, password: String) -> Int {
+  return db.exec(
+    "insert into users (id, username, password_hash) values ($1, $2, $3)",
+    uid(), username, password
+  )
+}
+
+ui screen Login {
+  state username: String = ""
+  state password: String = ""
+  state who: String = ""
+  state error: String = ""
+  state loggedIn: Bool = false
+
+  view {
+    column style "
+      min-height:100vh; display:flex; align-items:center; justify-content:center;
+      background:#0f172a; font-family:Inter,system-ui,sans-serif; color:#e2e8f0;
+    " {
+      column style "
+        width:340px; gap:12px; padding:32px; border-radius:14px;
+        background:#1e293b; box-shadow:0 10px 30px rgba(0,0,0,0.35);
+      " {
+        if loggedIn {
+          heading "Welcome, " + who
+          text "You are signed in." style "color:#94a3b8;"
+          button "Sign out" style "
+            padding:10px; border-radius:8px; border:0; background:#334155;
+            color:#e2e8f0; cursor:pointer;
+          " -> { loggedIn = false  who = ""  error = "" }
+        } else {
+          heading "Sign in"
+          input "Username" bind username style "
+            padding:10px 12px; border-radius:8px; border:1px solid #334155;
+            background:#0f172a; color:#e2e8f0;
+          "
+          password "Password" bind password style "
+            padding:10px 12px; border-radius:8px; border:1px solid #334155;
+            background:#0f172a; color:#e2e8f0;
+          "
+
+          button "Sign in" style "
+            padding:10px; border-radius:8px; border:0; background:#2563eb;
+            color:white; font-weight:600; cursor:pointer;
+          " -> {
+            let u = await login(username, password)
+            loggedIn = (u == none ? false : true)
+            who      = (u == none ? "" : username)
+            error    = (u == none ? "Invalid username or password" : "")
+          }
+
+          button "Create account" style "
+            padding:10px; border-radius:8px; border:1px solid #334155;
+            background:transparent; color:#93c5fd; cursor:pointer;
+          " -> {
+            try {
+              let n = await register(username, password)
+              error = "Account created — now sign in"
+            } catch {
+              error = "That username is taken"
+            }
+          }
+
+          text error style "color:#f87171; font-size:13px; min-height:18px;"
+        }
+      }
+    }
+  }
+}

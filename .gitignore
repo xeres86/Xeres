@@ -15,3 +15,8 @@ package-lock.json
 .claude/
 _*/
 *.log
+
+# Secrets / local config — never commit connection strings
+.env
+.env.*
+!.env.example

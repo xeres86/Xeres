@@ -360,7 +360,8 @@ You never edit `out/` — it's regenerated from `.xrs` on every build.
 src/                     the Xeres compiler (Rust)
   token.rs  lexer.rs  parser.rs  checker.rs  codegen.rs  main.rs
 tests/                   .xrs fixtures + run.sh — the spec / regression suite
-examples/                reference apps (counter, todo, login, dashboard, acme)
+examples/                reference apps (counter, todo, login, dashboard, acme,
+                           users + login_db — Postgres read/write/auth)
 tooling/create-xeres/    project scaffolder (the `npm create xeres` CLI)
 package.json,            VS Code language extension (syntax highlighting)
   language-configuration.json, xeres.tmLanguage.json

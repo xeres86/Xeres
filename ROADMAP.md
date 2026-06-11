@@ -25,8 +25,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
 2. **Verify the db path end-to-end** — `Optional<Model>` return for `query_one`
    misses ✅ done; the db-feature build compiles (Windows uses `schannel`, no
    OpenSSL); `uid()` now works in `server fn`s (server-side builtin) ✅.
-   Remaining: a run against a **live** Postgres (read + write) as the final
-   smoke test (needs a `DATABASE_URL`). See [`examples/users.xrs`](examples/users.xrs).
+   The login round-trip was confirmed against a **live Neon Postgres** (table
+   create + seed + the `db.query_one` auth query for valid/invalid/no-user
+   cases) by running the exact SQL the server fns compile to. Remaining: run the
+   compiled `xeres` **binary** itself against a live DB — blocked only by the
+   local toolchain (the GNU target needs MinGW `dlltool`, or switch to MSVC);
+   the CI release binaries already build with db. See
+   [`examples/users.xrs`](examples/users.xrs), [`examples/login_db.xrs`](examples/login_db.xrs).
 3. **Sync hardening** — field-level merge (CRDT / cr-sqlite) instead of
    row-level last-write-wins.
 4. ~~**`for` over `List<T>`** in views (not just synced collections).~~ ✅ done
