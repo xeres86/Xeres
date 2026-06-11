@@ -6,6 +6,8 @@
   "bin": {
     "create-xeres": "index.mjs"
   },
-  "files": ["index.mjs", "templates"],
+  "files": ["index.mjs"],
+  "repository": "https://github.com/xeres86/Xeres",
+  "license": "MIT",
   "engines": { "node": ">=18" }
 }
