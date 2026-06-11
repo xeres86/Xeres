@@ -33,7 +33,8 @@ you hunt for — it's a program that **doesn't compile**.
    server adds a dependency only when you actually use one (e.g. a DB driver).
 
 See [COMPARISON.md](COMPARISON.md) for the same app written in Xeres vs
-React/Vue/Svelte/Next/Angular.
+React/Vue/Svelte/Next/Angular, and the [cookbook](docs/cookbook.md) for
+copy-pasteable recipes.
 
 ---
 
