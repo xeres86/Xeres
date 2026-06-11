@@ -23,6 +23,8 @@ pub enum Token {
     State,      // state
     Declassify, // declassify  (reserved: the single audited downgrade)
     Await,      // await  (suspend on a server-fn RPC, browser-side only)
+    Try,        // try   (handle a failed await/RPC, browser-side only)
+    Catch,      // catch
     Bind,       // bind  (two-way bind an input to a state cell)
     Fn,         // fn
     Let,        // let

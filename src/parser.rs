@@ -63,6 +63,7 @@ pub enum Stmt {
     Assign { name: String, value: Expr },
     Return(Expr),
     Expr(Expr),
+    Try { body: Vec<Stmt>, handler: Vec<Stmt> },
 }
 
 #[derive(Debug)]
@@ -339,8 +340,34 @@ impl<'a> Parser<'a> {
         Some(Expr::Record { name, fields })
     }
 
+    /// Parse a brace-delimited statement block: `{ stmt* }`. The caller is at `{`.
+    fn parse_stmt_block(&mut self) -> Vec<Stmt> {
+        let mut stmts = Vec::new();
+        if self.current_token != Token::LBrace { return stmts; }
+        self.next_token(); // consume '{'
+        while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+            if let Some(s) = self.parse_statement() {
+                stmts.push(s);
+            } else {
+                self.next_token(); // skip unparseable token (prevents infinite loop)
+            }
+        }
+        if self.current_token == Token::RBrace { self.next_token(); }
+        stmts
+    }
+
     fn parse_statement(&mut self) -> Option<Stmt> {
         self.allow_record = true; // statements may construct records
+
+        // try { ... } catch { ... }
+        if self.current_token == Token::Try {
+            self.next_token(); // consume 'try'
+            let body = self.parse_stmt_block();
+            if self.current_token != Token::Catch { return None; }
+            self.next_token(); // consume 'catch'
+            let handler = self.parse_stmt_block();
+            return Some(Stmt::Try { body, handler });
+        }
 
         // assignment: <ident> = <expr>
         if matches!(self.current_token, Token::Identifier(_)) && self.peek_token == Token::Assign {

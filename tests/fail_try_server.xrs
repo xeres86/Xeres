@@ -1,0 +1,9 @@
+// EXPECT: FAIL [R16 try-context] — try is browser-only; server code compiles
+// to Rust (no exceptions) and failures surface to the caller as a failed await.
+server fn risky() -> Int {
+  try {
+    return 1
+  } catch {
+    return 0
+  }
+}

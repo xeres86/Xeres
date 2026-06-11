@@ -1,0 +1,28 @@
+// EXPECT: PASS — a handler wraps an awaited RPC in try/catch; failure picks
+// the catch branch instead of silently breaking the UI.
+server fn login(username: String, password: String) -> String {
+  return username
+}
+
+ui screen Login {
+  state username: String = ""
+  state password: String = ""
+  state message: String = ""
+
+  view {
+    column {
+      heading "Sign in"
+      input "Username" bind username
+      password "Password" bind password
+      button "Sign in" -> {
+        try {
+          let who = await login(username, password)
+          message = "Welcome, " + who
+        } catch {
+          message = "Login failed - check your connection"
+        }
+      }
+      text message
+    }
+  }
+}

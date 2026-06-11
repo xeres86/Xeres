@@ -147,18 +147,35 @@ fn function_returns_secret(
     for p in &f.params {
         locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
     }
+    taint_scan(&f.body, &mut locals, table, returns_secret)
+}
+
+/// Walk statements (recursing into `try`/`catch` blocks) looking for a return
+/// of secret-derived data.
+fn taint_scan(
+    stmts: &[Stmt],
+    locals: &mut HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+    returns_secret: &HashMap<String, bool>,
+) -> bool {
     let mut tainted_return = false;
-    for stmt in &f.body {
+    for stmt in stmts {
         match stmt {
             Stmt::Let { name, value } => {
-                let t = is_tainted(value, &locals, table, returns_secret);
-                let ty = resolve_type(value, &locals, table);
+                let t = is_tainted(value, locals, table, returns_secret);
+                let ty = resolve_type(value, locals, table);
                 locals.insert(name.clone(), (ty, t));
             }
             Stmt::Return(e) => {
-                if is_tainted(e, &locals, table, returns_secret) {
+                if is_tainted(e, locals, table, returns_secret) {
                     tainted_return = true;
                 }
+            }
+            Stmt::Try { body, handler } => {
+                let mut b = locals.clone();
+                let mut h = locals.clone();
+                tainted_return |= taint_scan(body, &mut b, table, returns_secret);
+                tainted_return |= taint_scan(handler, &mut h, table, returns_secret);
             }
             Stmt::Assign { .. } | Stmt::Expr(_) => {}
         }
@@ -171,27 +188,56 @@ fn check_flow(f: &FunctionNode, table: &SymbolTable, errors: &mut Vec<SemanticEr
     for p in &f.params {
         locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
     }
+    check_flow_stmts(&f.body, &mut locals, f, table, errors);
+}
+
+fn check_flow_stmts(
+    stmts: &[Stmt],
+    locals: &mut HashMap<String, (Option<String>, bool)>,
+    f: &FunctionNode,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
     let in_browser = f.env != EnvModifier::Server;
-    for stmt in &f.body {
+    for stmt in stmts {
         match stmt {
             Stmt::Let { name, value } => {
-                check_expr(value, &locals, f.env, &f.name, f.line, table, errors);
+                check_expr(value, locals, f.env, &f.name, f.line, table, errors);
                 check_await(value, false, in_browser, &f.name, f.line, table, errors);
-                let ty = resolve_type(value, &locals, table);
+                let ty = resolve_type(value, locals, table);
                 locals.insert(name.clone(), (ty, false));
             }
             Stmt::Return(e) => {
-                check_expr(e, &locals, f.env, &f.name, f.line, table, errors);
+                check_expr(e, locals, f.env, &f.name, f.line, table, errors);
                 check_await(e, false, in_browser, &f.name, f.line, table, errors);
-                check_return_type(f, e, &locals, table, errors);
+                check_return_type(f, e, locals, table, errors);
             }
             Stmt::Expr(e) => {
-                check_expr(e, &locals, f.env, &f.name, f.line, table, errors);
+                check_expr(e, locals, f.env, &f.name, f.line, table, errors);
                 check_await(e, false, in_browser, &f.name, f.line, table, errors);
             }
             Stmt::Assign { value, .. } => {
-                check_expr(value, &locals, f.env, &f.name, f.line, table, errors);
+                check_expr(value, locals, f.env, &f.name, f.line, table, errors);
                 check_await(value, false, in_browser, &f.name, f.line, table, errors);
+            }
+            Stmt::Try { body, handler } => {
+                // R16 — try is browser-only: server/shared tiers compile to
+                // Rust (no exceptions); server failures surface to the client
+                // as a failed RPC, which the client's `try` catches.
+                if f.env != EnvModifier::Ui {
+                    errors.push(SemanticError {
+                        rule: "R16 try-context",
+                        message: format!(
+                            "`try` in `{}` is only valid in ui code; a server failure surfaces to the caller as a failed `await`.",
+                            f.name
+                        ),
+                        line: f.line,
+                    });
+                }
+                let mut b = locals.clone();
+                check_flow_stmts(body, &mut b, f, table, errors);
+                let mut h = locals.clone();
+                check_flow_stmts(handler, &mut h, f, table, errors);
             }
         }
     }
@@ -418,6 +464,11 @@ fn check_handler_block(
             }
             Stmt::Return(e) | Stmt::Expr(e) => {
                 check_screen_expr(e, &local, sname, sline, table, errors)
+            }
+            Stmt::Try { body, handler } => {
+                // handlers run in the browser, so try is always valid here
+                check_handler_block(body, &local, sname, sline, table, errors);
+                check_handler_block(handler, &local, sname, sline, table, errors);
             }
         }
     }

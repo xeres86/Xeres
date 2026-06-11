@@ -168,6 +168,8 @@ impl Lexer {
             "state" => Token::State,
             "declassify" => Token::Declassify,
             "await" => Token::Await,
+            "try" => Token::Try,
+            "catch" => Token::Catch,
             "bind" => Token::Bind,
             "fn" => Token::Fn,
             "let" => Token::Let,

@@ -53,6 +53,9 @@ fn stmt_uses_db(s: &Stmt) -> bool {
         | Stmt::Assign { value, .. }
         | Stmt::Return(value)
         | Stmt::Expr(value) => expr_uses_db(value),
+        Stmt::Try { body, handler } => {
+            body.iter().any(stmt_uses_db) || handler.iter().any(stmt_uses_db)
+        }
     }
 }
 fn expr_uses_db(e: &Expr) -> bool {
@@ -826,6 +829,11 @@ fn emit_h_stmt(s: &Stmt, screen: &str, sv: &HashSet<String>) -> String {
         Stmt::Let { name, value } => format!("let {} = {};", name, emit_h_expr(value, screen, sv)),
         Stmt::Return(e) => format!("return {};", emit_h_expr(e, screen, sv)),
         Stmt::Expr(e) => format!("{};", emit_h_expr(e, screen, sv)),
+        Stmt::Try { body, handler } => {
+            let b = body.iter().map(|x| emit_h_stmt(x, screen, sv)).collect::<Vec<_>>().join(" ");
+            let h = handler.iter().map(|x| emit_h_stmt(x, screen, sv)).collect::<Vec<_>>().join(" ");
+            format!("try {{ {} }} catch (_e) {{ {} }}", b, h)
+        }
     }
 }
 
@@ -889,6 +897,7 @@ fn stmts_have_await(stmts: &[Stmt]) -> bool {
         | Stmt::Assign { value, .. }
         | Stmt::Return(value)
         | Stmt::Expr(value) => expr_has_await(value),
+        Stmt::Try { body, handler } => stmts_have_await(body) || stmts_have_await(handler),
     })
 }
 
@@ -1196,6 +1205,12 @@ fn emit_stmt(s: &Stmt, let_kw: &str, ts: bool) -> String {
         Stmt::Assign { name, value } => format!("{} = {};", name, emit_expr(value, ts)),
         Stmt::Return(e) => format!("return {};", emit_expr(e, ts)),
         Stmt::Expr(e) => format!("{};", emit_expr(e, ts)),
+        // browser-only (checker R16); the Rust tier never sees a Try.
+        Stmt::Try { body, handler } => {
+            let b = body.iter().map(|x| emit_stmt(x, let_kw, ts)).collect::<Vec<_>>().join(" ");
+            let h = handler.iter().map(|x| emit_stmt(x, let_kw, ts)).collect::<Vec<_>>().join(" ");
+            format!("try {{ {} }} catch (_e) {{ {} }}", b, h)
+        }
     }
 }
 
