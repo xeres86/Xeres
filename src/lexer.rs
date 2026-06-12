@@ -64,8 +64,11 @@ impl Lexer {
                 if self.peek_char() == '=' { self.read_char(); Token::Eq } else { Token::Assign }
             }
             ':' => Token::Colon,
+            '?' => Token::Question,
             ',' => Token::Comma,
-            '.' => Token::Dot,
+            '.' => {
+                if self.peek_char() == '.' { self.read_char(); Token::DotDot } else { Token::Dot }
+            }
             '{' => Token::LBrace,
             '}' => Token::RBrace,
             '(' => Token::LParen,

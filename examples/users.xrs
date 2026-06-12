@@ -1,0 +1,81 @@
+// A Postgres-backed user list — the full db round-trip in one file:
+//   read   →  db.query       (List<User>)
+//   lookup →  db.query_one    (Optional<User>, graceful miss → none)
+//   write  →  db.exec         (affected-row count)
+//
+// The connection + credentials and the `secret password_hash` are Located: they
+// physically cannot reach the browser. The client interface for `User` omits
+// `password_hash`, and the RPC wire payload strips it by construction.
+//
+// ── Run it ──────────────────────────────────────────────────────────────────
+//   1. Have a Postgres (local or hosted: Supabase/Neon/RDS). Create the table:
+//        create table users (
+//          id            text primary key,
+//          username      text not null unique,
+//          password_hash text not null
+//        );
+//   2. Put the connection string in a dotenv-style `.env` next to the app:
+//        DATABASE_URL=postgres://user:pass@host:5432/dbname?sslmode=require
+//   3. Build a db-capable compiler once (the released binaries already are):
+//        cargo build --release --features db
+//   4. Run:  ./target/release/xeres dev examples/users.xrs   → :8080
+
+model User {
+  id: String
+  username: String
+  secret password_hash: String      // Located — never crosses the wire (R3/R5)
+}
+
+server fn all_users() -> List<User> {
+  return db.query("select id, username, password_hash from users order by username")
+}
+
+server fn find_user(name: String) -> Optional<User> {
+  // no such row → none (not an error), because the return is Optional<User>
+  return db.query_one("select id, username, password_hash from users where username = $1", name)
+}
+
+server fn add_user(username: String, password_hash: String) -> Int {
+  // demo: a real app would hash server-side before storing
+  return db.exec(
+    "insert into users (id, username, password_hash) values ($1, $2, $3)",
+    uid(), username, password_hash
+  )
+}
+
+ui screen Users {
+  state draftUser: String = ""
+  state draftPass: String = ""
+  state status: String = ""
+  state users: List<User> = []
+
+  view {
+    column style "max-width:600px; margin:40px auto; padding:0 16px; font-family:Inter,system-ui,sans-serif;" {
+      heading "Users"
+
+      row style "gap:8px; margin:16px 0;" {
+        input "username" bind draftUser
+        password "password" bind draftPass
+        button "Add" -> {
+          let n = await add_user(draftUser, draftPass)
+          status = "inserted " + n + " row(s)"
+          draftUser = ""
+          draftPass = ""
+          users = await all_users()
+        }
+        button "Refresh" -> { users = await all_users() }
+      }
+
+      text status style "color:#16a34a; font-size:13px;"
+
+      column style "border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;" {
+        for u in users {
+          row style "padding:10px 14px; border-bottom:1px solid #f1f5f9; justify-content:space-between;" {
+            text u.username style "font-weight:600;"
+            text u.id style "color:#94a3b8; font-size:12px;"
+          }
+        }
+      }
+    }
+  }
+}

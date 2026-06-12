@@ -57,15 +57,31 @@ pub enum Expr {
     Record { name: String, fields: Vec<(String, Expr)> },
     NoneLit,
     ListLit(Vec<Expr>),
+    /// `cond ? then : otherwise` — a conditional (ternary) expression.
+    Ternary { cond: Box<Expr>, then: Box<Expr>, otherwise: Box<Expr> },
+    /// `start..end` — a half-open integer range (used by `for i in 0..n`).
+    Range { start: Box<Expr>, end: Box<Expr> },
 }
 
 #[derive(Debug)]
 pub enum Stmt {
-    Let { name: String, value: Expr },
+    /// `let name = expr`, or `let name: Type = expr`. The annotation lets a
+    /// server-side `db.query_one(...)` bind its row onto a model (it's the only
+    /// place the target model is otherwise unknown).
+    Let { name: String, type_ann: Option<String>, value: Expr },
     Assign { name: String, value: Expr },
     Return(Expr),
     Expr(Expr),
     Try { body: Vec<Stmt>, handler: Vec<Stmt> },
+    /// `if cond { ... } else { ... }` — statement form (the ternary is the
+    /// expression form). `else_body` is empty when there's no `else`.
+    If { cond: Expr, then_body: Vec<Stmt>, else_body: Vec<Stmt> },
+    /// `for var in iter { ... }` — iterate a `List<T>` or a `start..end` range.
+    For { var: String, iter: Expr, body: Vec<Stmt> },
+    /// `while cond { ... }`.
+    While { cond: Expr, body: Vec<Stmt> },
+    Break,
+    Continue,
 }
 
 #[derive(Debug)]
@@ -97,6 +113,7 @@ pub enum ViewNode {
     Element {
         tag: String,
         arg: Option<Expr>,        // positional arg, e.g. heading "Title", text x.y
+        style: Option<Expr>,      // `style "css..."` — inline CSS (usually a string)
         bind: Option<String>,     // `bind stateVar` — two-way input binding
         event: Option<Handler>,   // `-> handler` or `-> { stmts }`
         children: Vec<ViewNode>,
@@ -110,6 +127,13 @@ pub enum ViewNode {
         cond: Expr,
         then_body: Vec<ViewNode>,
         else_body: Vec<ViewNode>,
+    },
+    /// Invoke a reusable component by name with named args:
+    /// `StatCard { title: "Revenue" value: "$45k" }`.
+    Component {
+        name: String,
+        args: Vec<(String, Expr)>,
+        line: usize,
     },
 }
 
@@ -129,6 +153,9 @@ pub struct ScreenNode {
     pub states: Vec<StateDecl>,
     pub body: Vec<ViewNode>,
     pub line: usize,
+    /// `ui component` (reusable, invoked by name) vs `ui screen` (a page that
+    /// auto-mounts). Both share the same typed-view machinery.
+    pub is_component: bool,
 }
 
 #[derive(Debug)]
@@ -186,8 +213,10 @@ impl<'a> Parser<'a> {
                     if let Some(m) = self.parse_model() { program.models.push(m); }
                 }
                 Token::Ui => {
-                    // `ui screen Name { ... }` vs `ui fn name() { ... }`
-                    if self.peek_token == Token::Identifier("screen".to_string()) {
+                    // `ui screen Name {…}` / `ui component Name(…) {…}` vs `ui fn name() {…}`
+                    if self.peek_token == Token::Identifier("screen".to_string())
+                        || self.peek_token == Token::Identifier("component".to_string())
+                    {
                         if let Some(s) = self.parse_screen() { program.screens.push(s); }
                     } else if let Some(f) = self.parse_function() {
                         program.functions.push(f);
@@ -376,8 +405,73 @@ impl<'a> Parser<'a> {
         stmts
     }
 
+    /// `if cond { ... } [else { ... } | else if ...]` in statement position.
+    fn parse_if_stmt(&mut self) -> Option<Stmt> {
+        self.next_token(); // consume 'if'
+        self.allow_record = false; // the `{` after the cond opens a block
+        let cond = self.parse_expr()?;
+        let then_body = self.parse_stmt_block();
+        let mut else_body = Vec::new();
+        if matches!(&self.current_token, Token::Identifier(k) if k == "else") {
+            self.next_token(); // consume 'else'
+            if matches!(&self.current_token, Token::Identifier(k) if k == "if") {
+                if let Some(s) = self.parse_if_stmt() {
+                    else_body.push(s);
+                }
+            } else {
+                else_body = self.parse_stmt_block();
+            }
+        }
+        Some(Stmt::If { cond, then_body, else_body })
+    }
+
+    /// `for var in iter { ... }` in statement position (`iter` may be a range).
+    fn parse_for_stmt(&mut self) -> Option<Stmt> {
+        self.next_token(); // consume 'for'
+        let var = match &self.current_token {
+            Token::Identifier(n) => n.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume var
+        match &self.current_token {
+            Token::Identifier(i) if i == "in" => self.next_token(),
+            _ => return None,
+        }
+        self.allow_record = false;
+        let iter = self.parse_expr()?;
+        let body = self.parse_stmt_block();
+        Some(Stmt::For { var, iter, body })
+    }
+
+    /// `while cond { ... }` in statement position.
+    fn parse_while_stmt(&mut self) -> Option<Stmt> {
+        self.next_token(); // consume 'while'
+        self.allow_record = false;
+        let cond = self.parse_expr()?;
+        let body = self.parse_stmt_block();
+        Some(Stmt::While { cond, body })
+    }
+
     fn parse_statement(&mut self) -> Option<Stmt> {
         self.allow_record = true; // statements may construct records
+
+        // control flow (contextual keywords, like the view parser)
+        if let Token::Identifier(kw) = &self.current_token {
+            match kw.as_str() {
+                "if" => return self.parse_if_stmt(),
+                "for" => return self.parse_for_stmt(),
+                "while" => return self.parse_while_stmt(),
+                "break" => {
+                    self.next_token();
+                    return Some(Stmt::Break);
+                }
+                "continue" => {
+                    self.next_token();
+                    return Some(Stmt::Continue);
+                }
+                _ => {}
+            }
+        }
 
         // try { ... } catch { ... }
         if self.current_token == Token::Try {
@@ -414,10 +508,17 @@ impl<'a> Parser<'a> {
                     _ => return None,
                 };
                 self.next_token(); // consume name
+                // optional `: Type` annotation
+                let type_ann = if self.current_token == Token::Colon {
+                    self.next_token(); // consume ':'
+                    self.parse_type()
+                } else {
+                    None
+                };
                 if self.current_token != Token::Assign { return None; }
                 self.next_token(); // consume '='
                 let value = self.parse_expr()?;
-                Some(Stmt::Let { name, value })
+                Some(Stmt::Let { name, type_ann, value })
             }
             _ => {
                 let e = self.parse_expr()?;
@@ -429,7 +530,31 @@ impl<'a> Parser<'a> {
     // --- Expression parsing (precedence climbing) ---
 
     fn parse_expr(&mut self) -> Option<Expr> {
-        self.parse_expr_bp(0)
+        let cond = self.parse_expr_bp(0)?;
+        // ternary: `cond ? then : otherwise` (lowest precedence, right-assoc).
+        let e = if self.current_token == Token::Question {
+            self.next_token(); // consume '?'
+            let then = self.parse_expr()?;
+            if self.current_token != Token::Colon {
+                return None;
+            }
+            self.next_token(); // consume ':'
+            let otherwise = self.parse_expr()?;
+            Expr::Ternary {
+                cond: Box::new(cond),
+                then: Box::new(then),
+                otherwise: Box::new(otherwise),
+            }
+        } else {
+            cond
+        };
+        // range: `start..end` (half-open). Lowest precedence.
+        if self.current_token == Token::DotDot {
+            self.next_token(); // consume '..'
+            let end = self.parse_expr_bp(0)?;
+            return Some(Expr::Range { start: Box::new(e), end: Box::new(end) });
+        }
+        Some(e)
     }
 
     /// Returns (operator, binding power) for the current token, if it's infix.
@@ -574,7 +699,8 @@ impl<'a> Parser<'a> {
         self.allow_record = false; // in views, `{` opens a child block, not a record
         let screen_line = self.cur_line;
         self.next_token(); // consume 'ui'
-        self.next_token(); // consume 'screen'
+        let is_component = self.cur_is_kw("component");
+        self.next_token(); // consume 'screen' / 'component'
 
         let name = match &self.current_token {
             Token::Identifier(n) => n.clone(),
@@ -612,7 +738,7 @@ impl<'a> Parser<'a> {
         }
 
         if self.current_token == Token::RBrace { self.next_token(); } // close screen
-        Some(ScreenNode { name, params, states, body, line: screen_line })
+        Some(ScreenNode { name, params, states, body, line: screen_line, is_component })
     }
 
     fn parse_state_decl(&mut self) -> Option<StateDecl> {
@@ -703,9 +829,52 @@ impl<'a> Parser<'a> {
             Token::Identifier(n) => n.clone(),
             _ => return None,
         };
+        let tag_line = self.cur_line;
         self.next_token(); // consume tag
 
-        let arg = if self.expr_starts() { self.parse_expr() } else { None };
+        // A Capitalized tag is a component invocation: `Name { field: expr … }`.
+        // (Lowercase tags are built-in elements; this mirrors how a Capitalized
+        // `Name { … }` is a record literal in expression position.)
+        if tag.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            let mut args = Vec::new();
+            if self.current_token == Token::LBrace {
+                self.next_token(); // consume '{'
+                self.allow_record = true; // arg values may be record literals
+                while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+                    let field = match &self.current_token {
+                        Token::Identifier(f) => f.clone(),
+                        _ => break,
+                    };
+                    self.next_token(); // consume field name
+                    if self.current_token != Token::Colon { break; }
+                    self.next_token(); // consume ':'
+                    let val = match self.parse_expr() {
+                        Some(e) => e,
+                        None => break,
+                    };
+                    args.push((field, val));
+                    if self.current_token == Token::Comma { self.next_token(); }
+                }
+                self.allow_record = false;
+                if self.current_token == Token::RBrace { self.next_token(); }
+            }
+            return Some(ViewNode::Component { name: tag, args, line: tag_line });
+        }
+
+        // positional arg — but `style` is a modifier keyword, not an arg.
+        let arg = if self.expr_starts() && !self.cur_is_kw("style") {
+            self.parse_expr()
+        } else {
+            None
+        };
+
+        // `style "<css>"` — inline styling on this element (may follow an arg).
+        let style = if self.cur_is_kw("style") {
+            self.next_token(); // consume 'style'
+            if self.expr_starts() { self.parse_expr() } else { None }
+        } else {
+            None
+        };
 
         // `bind <stateVar>` — two-way input binding.
         let bind = if self.current_token == Token::Bind {
@@ -750,7 +919,13 @@ impl<'a> Parser<'a> {
             c
         } else { Vec::new() };
 
-        Some(ViewNode::Element { tag, arg, bind, event, children })
+        Some(ViewNode::Element { tag, arg, style, bind, event, children })
+    }
+
+    /// Is the current token a contextual keyword `kw` (an identifier, since
+    /// these aren't reserved at the lexer level)?
+    fn cur_is_kw(&self, kw: &str) -> bool {
+        matches!(&self.current_token, Token::Identifier(s) if s == kw)
     }
 
     fn expr_starts(&self) -> bool {

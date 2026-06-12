@@ -1,0 +1,159 @@
+// An asset-management dashboard — a self-contained `ui screen` driven by a
+// `List<Asset>` state, styled with inline `style "..."`. No server, no db.
+//
+//   xeres dev examples/dashboard.xrs   →  http://127.0.0.1:8080
+//
+// Demonstrates: `style "<css>"` on view elements, `for` over a `List<T>` state
+// cell (not just synced collections), Int/String rendering, and `if`/`else`.
+
+model Asset {
+  id: String
+  name: String
+  symbol: String
+  quantity: Int
+  value: Int
+  change: Int
+}
+
+ui screen Dashboard {
+
+  state assets: List<Asset> = [
+    Asset {
+      id: "1"
+      name: "Acme Technologies"
+      symbol: "ACME"
+      quantity: 120
+      value: 18450
+      change: 12
+    },
+    Asset {
+      id: "2"
+      name: "Global Energy"
+      symbol: "GEN"
+      quantity: 75
+      value: 9200
+      change: -4
+    },
+    Asset {
+      id: "3"
+      name: "Blue Ocean Capital"
+      symbol: "BOC"
+      quantity: 300
+      value: 33100
+      change: 8
+    },
+    Asset {
+      id: "4"
+      name: "Quantum Logistics"
+      symbol: "QLX"
+      quantity: 40
+      value: 6100
+      change: -2
+    }
+  ]
+
+  view {
+
+    column style "
+      background:#0f172a;
+      min-height:100vh;
+      padding:32px;
+      color:white;
+      font-family:Inter,sans-serif;
+    " {
+
+      heading "Asset Management Dashboard"
+
+      row style "
+        gap:16px;
+        margin-top:24px;
+        margin-bottom:32px;
+      " {
+
+        column style "
+          background:#1e293b;
+          padding:16px;
+          border-radius:12px;
+          min-width:220px;
+        " {
+          text "Portfolio Value"
+          heading "$66,850"
+        }
+
+        column style "
+          background:#1e293b;
+          padding:16px;
+          border-radius:12px;
+          min-width:220px;
+        " {
+          text "Assets"
+          heading "4"
+        }
+
+        column style "
+          background:#1e293b;
+          padding:16px;
+          border-radius:12px;
+          min-width:220px;
+        " {
+          text "Daily P/L"
+          heading "+$1,280"
+        }
+      }
+
+      column style "
+        background:#1e293b;
+        border-radius:12px;
+        overflow:hidden;
+      " {
+
+        row style "
+          padding:16px;
+          font-weight:bold;
+          border-bottom:1px solid #334155;
+        " {
+          text "Asset"
+          text "Symbol"
+          text "Qty"
+          text "Value"
+          text "24h"
+        }
+
+        for asset in assets {
+
+          row style "
+            padding:16px;
+            border-bottom:1px solid #334155;
+          " {
+
+            text asset.name
+            text asset.symbol
+            text asset.quantity
+            text "$" + asset.value
+
+            if asset.change >= 0 {
+              text "+" + asset.change + "%"
+            } else {
+              text asset.change + "%"
+            }
+          }
+        }
+      }
+
+      column style "
+        margin-top:24px;
+        background:#1e293b;
+        padding:20px;
+        border-radius:12px;
+      " {
+
+        heading "Recent Activity"
+
+        text "Bought 50 ACME"
+        text "Sold 20 GEN"
+        text "Dividend payment received"
+        text "Portfolio rebalanced"
+      }
+    }
+  }
+}

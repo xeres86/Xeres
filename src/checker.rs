@@ -27,6 +27,8 @@ struct SymbolTable<'a> {
     models: HashMap<String, &'a ModelNode>,
     fns: HashMap<String, FnSig>,
     states: HashMap<String, &'a SyncedStateNode>,
+    /// Reusable `ui component`s, keyed by name (for invocation checking).
+    components: HashMap<String, &'a ScreenNode>,
 }
 
 /// Inner type of a one-level generic, e.g. `("List", "List<User>") -> "User"`.
@@ -34,6 +36,12 @@ fn generic_inner<'a>(base: &str, ty: &'a str) -> Option<&'a str> {
     ty.strip_prefix(base)
         .and_then(|r| r.strip_prefix('<'))
         .and_then(|r| r.strip_suffix('>'))
+}
+
+/// A component name (and thus its invocation tag) must begin with an uppercase
+/// letter, the same convention that distinguishes types from value identifiers.
+fn starts_uppercase(name: &str) -> bool {
+    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
 fn is_known_type(name: &str, table: &SymbolTable) -> bool {
@@ -63,13 +71,12 @@ fn resolve_type(
             let model = table.models.get(&base_ty)?;
             model.field(field).map(|p| p.data_type.clone())
         }
-        Expr::Call { callee, .. } => {
-            if callee == "uid" {
-                Some("String".into()) // builtin: unique id generator
-            } else {
-                table.fns.get(callee).and_then(|s| s.ret.clone())
-            }
-        }
+        Expr::Call { callee, .. } => match callee.as_str() {
+            // builtins: uid() unique id, hash() password hash, verify() check
+            "uid" | "hash" => Some("String".into()),
+            "verify" => Some("Bool".into()),
+            _ => table.fns.get(callee).and_then(|s| s.ret.clone()),
+        },
         Expr::Unary { op, expr } => match op {
             crate::parser::UnOp::Not => Some("Bool".into()),
             crate::parser::UnOp::Neg => resolve_type(expr, locals, table),
@@ -118,6 +125,12 @@ fn resolve_type(
             let elem = items.first().and_then(|e| resolve_type(e, locals, table))?;
             Some(format!("List<{}>", elem))
         }
+        // A ternary's type is its then-branch (both branches should agree).
+        Expr::Ternary { then, otherwise, .. } => {
+            resolve_type(then, locals, table).or_else(|| resolve_type(otherwise, locals, table))
+        }
+        // `a..b` yields a sequence of Int (so `for i in 0..n` binds `i: Int`).
+        Expr::Range { .. } => Some("List<Int>".into()),
     }
 }
 
@@ -162,6 +175,16 @@ fn is_tainted(
         Expr::Record { fields, .. } => fields
             .iter()
             .any(|(_, v)| is_tainted(v, locals, table, returns_secret)),
+        // A ternary is tainted if its condition or either branch is.
+        Expr::Ternary { cond, then, otherwise } => {
+            is_tainted(cond, locals, table, returns_secret)
+                || is_tainted(then, locals, table, returns_secret)
+                || is_tainted(otherwise, locals, table, returns_secret)
+        }
+        Expr::Range { start, end } => {
+            is_tainted(start, locals, table, returns_secret)
+                || is_tainted(end, locals, table, returns_secret)
+        }
     }
 }
 
@@ -188,9 +211,9 @@ fn taint_scan(
     let mut tainted_return = false;
     for stmt in stmts {
         match stmt {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, type_ann, value } => {
                 let t = is_tainted(value, locals, table, returns_secret);
-                let ty = resolve_type(value, locals, table);
+                let ty = type_ann.clone().or_else(|| resolve_type(value, locals, table));
                 locals.insert(name.clone(), (ty, t));
             }
             Stmt::Return(e) => {
@@ -204,7 +227,26 @@ fn taint_scan(
                 tainted_return |= taint_scan(body, &mut b, table, returns_secret);
                 tainted_return |= taint_scan(handler, &mut h, table, returns_secret);
             }
-            Stmt::Assign { .. } | Stmt::Expr(_) => {}
+            Stmt::If { cond: _, then_body, else_body } => {
+                let mut t = locals.clone();
+                let mut e = locals.clone();
+                tainted_return |= taint_scan(then_body, &mut t, table, returns_secret);
+                tainted_return |= taint_scan(else_body, &mut e, table, returns_secret);
+            }
+            Stmt::For { var, iter, body } => {
+                let mut inner = locals.clone();
+                let elem = resolve_type(iter, locals, table)
+                    .as_deref()
+                    .and_then(|t| generic_inner("List", t))
+                    .map(str::to_string);
+                inner.insert(var.clone(), (elem, false));
+                tainted_return |= taint_scan(body, &mut inner, table, returns_secret);
+            }
+            Stmt::While { cond: _, body } => {
+                let mut inner = locals.clone();
+                tainted_return |= taint_scan(body, &mut inner, table, returns_secret);
+            }
+            Stmt::Assign { .. } | Stmt::Expr(_) | Stmt::Break | Stmt::Continue => {}
         }
     }
     tainted_return
@@ -228,10 +270,12 @@ fn check_flow_stmts(
     let in_browser = f.env != EnvModifier::Server;
     for stmt in stmts {
         match stmt {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, type_ann, value } => {
                 check_expr(value, locals, f.env, &f.name, f.line, table, errors);
                 check_await(value, false, in_browser, &f.name, f.line, table, errors);
-                let ty = resolve_type(value, locals, table);
+                // an explicit `: Type` wins (it's what lets `db.query_one`
+                // bind onto a model); otherwise infer from the initializer.
+                let ty = type_ann.clone().or_else(|| resolve_type(value, locals, table));
                 locals.insert(name.clone(), (ty, false));
             }
             Stmt::Return(e) => {
@@ -266,6 +310,48 @@ fn check_flow_stmts(
                 let mut h = locals.clone();
                 check_flow_stmts(handler, &mut h, f, table, errors);
             }
+            Stmt::If { cond, then_body, else_body } => {
+                check_expr(cond, locals, f.env, &f.name, f.line, table, errors);
+                check_await(cond, false, in_browser, &f.name, f.line, table, errors);
+                // R14 — the condition must be Bool (when resolvable).
+                if let Some(t) = resolve_type(cond, locals, table) {
+                    if t != "Bool" {
+                        errors.push(SemanticError {
+                            rule: "R14 if-condition",
+                            message: format!("`if` condition in `{}` must be Bool, got `{}`.", f.name, t),
+                            line: f.line,
+                        });
+                    }
+                }
+                let mut t = locals.clone();
+                check_flow_stmts(then_body, &mut t, f, table, errors);
+                let mut e = locals.clone();
+                check_flow_stmts(else_body, &mut e, f, table, errors);
+            }
+            Stmt::For { var, iter, body } => {
+                check_expr(iter, locals, f.env, &f.name, f.line, table, errors);
+                check_await(iter, false, in_browser, &f.name, f.line, table, errors);
+                let elem = element_type_of(iter, locals, table);
+                let mut inner = locals.clone();
+                inner.insert(var.clone(), (elem, false));
+                check_flow_stmts(body, &mut inner, f, table, errors);
+            }
+            Stmt::While { cond, body } => {
+                check_expr(cond, locals, f.env, &f.name, f.line, table, errors);
+                check_await(cond, false, in_browser, &f.name, f.line, table, errors);
+                if let Some(t) = resolve_type(cond, locals, table) {
+                    if t != "Bool" {
+                        errors.push(SemanticError {
+                            rule: "R14 if-condition",
+                            message: format!("`while` condition in `{}` must be Bool, got `{}`.", f.name, t),
+                            line: f.line,
+                        });
+                    }
+                }
+                let mut inner = locals.clone();
+                check_flow_stmts(body, &mut inner, f, table, errors);
+            }
+            Stmt::Break | Stmt::Continue => {}
         }
     }
 }
@@ -421,7 +507,7 @@ fn check_view(
         ViewNode::For { var, iter, body } => {
             check_screen_expr(iter, locals, sname, sline, table, errors);
             // bind the loop variable to the collection's element type when known.
-            let elem = element_type_of(iter, table);
+            let elem = element_type_of(iter, locals, table);
             let mut inner = locals.clone();
             inner.insert(var.clone(), (elem, false));
             for c in body {
@@ -447,6 +533,89 @@ fn check_view(
                 check_view(c, locals, states, sname, sline, table, errors);
             }
         }
+        ViewNode::Component { name, args, line } => {
+            check_component(name, args, *line, locals, sname, table, errors);
+        }
+    }
+}
+
+/// R17 — validate a component invocation `Name { field: expr … }`: the component
+/// must exist, each arg is boundary/scope-checked in the caller's (Ui) context,
+/// and the args must match the component's params (each once, type-compatible,
+/// required ones present). Because args are checked here as ordinary Ui
+/// expressions, secret-containment (R3) and scope (R8) apply — a component
+/// cannot be a back door around the tier boundary.
+fn check_component(
+    name: &str,
+    args: &[(String, Expr)],
+    line: usize,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    sname: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
+    // Arg expressions are checked in the caller's (Ui) context.
+    for (_, v) in args {
+        check_screen_expr(v, locals, sname, line, table, errors);
+    }
+
+    let comp = match table.components.get(name) {
+        Some(c) => c,
+        None => {
+            errors.push(SemanticError {
+                rule: "R17 component",
+                message: format!(
+                    "`{}` is not a known component. Declare it with `ui component {}(...) {{ view {{ … }} }}`.",
+                    name, name
+                ),
+                line,
+            });
+            return;
+        }
+    };
+
+    let mut provided: HashSet<&str> = HashSet::new();
+    for (field, value) in args {
+        match comp.params.iter().find(|p| &p.name == field) {
+            None => errors.push(SemanticError {
+                rule: "R17 component",
+                message: format!("component `{}` has no param `{}`.", name, field),
+                line,
+            }),
+            Some(param) => {
+                if !provided.insert(field.as_str()) {
+                    errors.push(SemanticError {
+                        rule: "R17 component",
+                        message: format!("param `{}` is set more than once for `{}`.", field, name),
+                        line,
+                    });
+                }
+                if let Some(actual) = resolve_type(value, locals, table) {
+                    if !type_compatible(&actual, &param.type_name) {
+                        errors.push(SemanticError {
+                            rule: "R17 component",
+                            message: format!(
+                                "param `{}.{}` expects `{}`, but got `{}`.",
+                                name, field, param.type_name, actual
+                            ),
+                            line,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    for p in &comp.params {
+        let omittable = generic_inner("Optional", &p.type_name).is_some()
+            || generic_inner("List", &p.type_name).is_some();
+        if !provided.contains(p.name.as_str()) && !omittable {
+            errors.push(SemanticError {
+                rule: "R17 component",
+                message: format!("missing param `{}` when invoking `{}`.", p.name, name),
+                line,
+            });
+        }
     }
 }
 
@@ -463,9 +632,9 @@ fn check_handler_block(
     let mut local = locals.clone();
     for s in stmts {
         match s {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, type_ann, value } => {
                 check_screen_expr(value, &local, sname, sline, table, errors);
-                let ty = resolve_type(value, &local, table);
+                let ty = type_ann.clone().or_else(|| resolve_type(value, &local, table));
                 local.insert(name.clone(), (ty, false));
             }
             Stmt::Assign { name, value } => {
@@ -504,6 +673,32 @@ fn check_handler_block(
                 check_handler_block(body, &local, sname, sline, table, errors);
                 check_handler_block(handler, &local, sname, sline, table, errors);
             }
+            Stmt::If { cond, then_body, else_body } => {
+                check_screen_expr(cond, &local, sname, sline, table, errors);
+                if let Some(t) = resolve_type(cond, &local, table) {
+                    if t != "Bool" {
+                        errors.push(SemanticError {
+                            rule: "R14 if-condition",
+                            message: format!("`if` condition in screen `{}` must be Bool, got `{}`.", sname, t),
+                            line: sline,
+                        });
+                    }
+                }
+                check_handler_block(then_body, &local, sname, sline, table, errors);
+                check_handler_block(else_body, &local, sname, sline, table, errors);
+            }
+            Stmt::For { var, iter, body } => {
+                check_screen_expr(iter, &local, sname, sline, table, errors);
+                let elem = element_type_of(iter, &local, table);
+                let mut inner = local.clone();
+                inner.insert(var.clone(), (elem, false));
+                check_handler_block(body, &inner, sname, sline, table, errors);
+            }
+            Stmt::While { cond, body } => {
+                check_screen_expr(cond, &local, sname, sline, table, errors);
+                check_handler_block(body, &local, sname, sline, table, errors);
+            }
+            Stmt::Break | Stmt::Continue => {}
         }
     }
 }
@@ -577,18 +772,36 @@ fn check_bindings(
                 check_bindings(it, locals, sname, sline, table, errors);
             }
         }
+        Expr::Ternary { cond, then, otherwise } => {
+            check_bindings(cond, locals, sname, sline, table, errors);
+            check_bindings(then, locals, sname, sline, table, errors);
+            check_bindings(otherwise, locals, sname, sline, table, errors);
+        }
+        Expr::Range { start, end } => {
+            check_bindings(start, locals, sname, sline, table, errors);
+            check_bindings(end, locals, sname, sline, table, errors);
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::NoneLit => {}
     }
 }
 
-/// Element type of an iterable: today, only `for x in <synced state>` resolves.
-fn element_type_of(iter: &Expr, table: &SymbolTable) -> Option<String> {
+/// Element type of an iterable. Resolves `for x in <synced collection>` and
+/// `for x in <List<T> state/prop>` to the element type `T`.
+fn element_type_of(
+    iter: &Expr,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+) -> Option<String> {
     if let Expr::Ident(name) = iter {
         if let Some(state) = table.states.get(name) {
             return Some(state.collection_type.clone());
         }
     }
-    None
+    // A plain `List<T>` cell (screen state or prop) iterates its element type.
+    resolve_type(iter, locals, table)
+        .as_deref()
+        .and_then(|t| generic_inner("List", t))
+        .map(str::to_string)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -622,7 +835,35 @@ fn check_expr(
                 }
             }
         }
-        Expr::Call { args, .. } => {
+        Expr::Call { callee, args } => {
+            // R19 — hash()/verify() are server-only crypto builtins: a password
+            // hash must be computed (and a secret hash compared) on the server,
+            // never in the browser. (Reading the stored `secret` hash is already
+            // R3-blocked client-side; this also stops a pointless client hash.)
+            if (callee == "hash" || callee == "verify") && fn_env != EnvModifier::Server {
+                errors.push(SemanticError {
+                    rule: "R19 auth-builtin",
+                    message: format!(
+                        "`{}(...)` is a server-only builtin; `{}` runs {}. Do password hashing/verification in a `server fn`.",
+                        callee, fn_name, env_label(fn_env)
+                    ),
+                    line: fn_line,
+                });
+            }
+            let want = match callee.as_str() {
+                "hash" => Some(1),
+                "verify" => Some(2),
+                _ => None,
+            };
+            if let Some(n) = want {
+                if args.len() != n {
+                    errors.push(SemanticError {
+                        rule: "R19 auth-builtin",
+                        message: format!("`{}` takes exactly {} argument(s).", callee, n),
+                        line: fn_line,
+                    });
+                }
+            }
             // UI->server calls are allowed now; the `await` requirement is
             // enforced separately by check_await (R4).
             for a in args {
@@ -696,12 +937,49 @@ fn check_expr(
                 check_expr(it, locals, fn_env, fn_name, fn_line, table, errors);
             }
         }
+        Expr::Ternary { cond, then, otherwise } => {
+            check_expr(cond, locals, fn_env, fn_name, fn_line, table, errors);
+            // R14 — the condition must be Bool (when resolvable).
+            if let Some(t) = resolve_type(cond, locals, table) {
+                if t != "Bool" {
+                    errors.push(SemanticError {
+                        rule: "R14 if-condition",
+                        message: format!("ternary condition in `{}` must be Bool, got `{}`.", fn_name, t),
+                        line: fn_line,
+                    });
+                }
+            }
+            check_expr(then, locals, fn_env, fn_name, fn_line, table, errors);
+            check_expr(otherwise, locals, fn_env, fn_name, fn_line, table, errors);
+            // R18 — both branches must yield one type, so `cond ? a : b` has a
+            // single static type (no silent String/Int mixing). Only flagged
+            // when both branches resolve, matching R7's "resolvable" policy.
+            if let (Some(a), Some(b)) = (
+                resolve_type(then, locals, table),
+                resolve_type(otherwise, locals, table),
+            ) {
+                if !type_compatible(&a, &b) && !type_compatible(&b, &a) {
+                    errors.push(SemanticError {
+                        rule: "R18 conditional-branch",
+                        message: format!(
+                            "the branches of `?:` in `{}` have incompatible types `{}` and `{}`.",
+                            fn_name, a, b
+                        ),
+                        line: fn_line,
+                    });
+                }
+            }
+        }
         Expr::Record { name, fields } => {
             // boundary rules still apply to each field value
             for (_, v) in fields {
                 check_expr(v, locals, fn_env, fn_name, fn_line, table, errors);
             }
             check_record(name, fields, locals, fn_line, table, errors);
+        }
+        Expr::Range { start, end } => {
+            check_expr(start, locals, fn_env, fn_name, fn_line, table, errors);
+            check_expr(end, locals, fn_env, fn_name, fn_line, table, errors);
         }
     }
 }
@@ -871,6 +1149,15 @@ fn check_await(
                 check_await(it, false, in_browser, fn_name, line, table, errors);
             }
         }
+        Expr::Ternary { cond, then, otherwise } => {
+            check_await(cond, false, in_browser, fn_name, line, table, errors);
+            check_await(then, false, in_browser, fn_name, line, table, errors);
+            check_await(otherwise, false, in_browser, fn_name, line, table, errors);
+        }
+        Expr::Range { start, end } => {
+            check_await(start, false, in_browser, fn_name, line, table, errors);
+            check_await(end, false, in_browser, fn_name, line, table, errors);
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
         | Expr::NoneLit => {}
     }
@@ -958,7 +1245,40 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         models: HashMap::new(),
         fns: HashMap::new(),
         states: HashMap::new(),
+        components: HashMap::new(),
     };
+
+    // Screens and components compile to render functions in one namespace and
+    // are mounted/invoked by name — so names must be unique (R2), and a
+    // component must be Capitalized so a view can tell `StatCard { … }`
+    // (invocation) from a lowercase built-in element (R17).
+    let mut screen_names: HashSet<&str> = HashSet::new();
+    for s in &program.screens {
+        if !screen_names.insert(s.name.as_str()) {
+            errors.push(SemanticError {
+                rule: "R2 duplicate-decl",
+                message: format!(
+                    "{} `{}` is declared more than once.",
+                    if s.is_component { "component" } else { "screen" },
+                    s.name
+                ),
+                line: s.line,
+            });
+        }
+        if s.is_component {
+            if !starts_uppercase(&s.name) {
+                errors.push(SemanticError {
+                    rule: "R17 component",
+                    message: format!(
+                        "component `{}` must start with an uppercase letter — components are invoked as a Capitalized tag in views (e.g. `{}` vs a lowercase built-in element).",
+                        s.name, s.name
+                    ),
+                    line: s.line,
+                });
+            }
+            table.components.insert(s.name.clone(), s);
+        }
+    }
 
     for m in &program.models {
         if table.models.insert(m.name.clone(), m).is_some() {

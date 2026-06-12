@@ -1,0 +1,7 @@
+// two screens (or components) with the same name are rejected (R2)
+ui screen Dup {
+  view { column { text "a" } }
+}
+ui screen Dup {
+  view { column { text "b" } }
+}

@@ -11,7 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
+      - name: Build (default — zero-dependency std build)
         run: cargo build --verbose
+      - name: Build (full — db + auth features)
+        run: cargo build --verbose --features full
       - name: Fixture suite
         run: cargo test --verbose

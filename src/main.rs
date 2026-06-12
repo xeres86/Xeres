@@ -94,14 +94,23 @@ fn build(path: &str) -> bool {
     let _ = fs::write(static_dir.join("client.ts"), &client_ts);
     let _ = fs::write(static_dir.join("index.html"), &index_html);
 
+    let (screens, components) = screen_component_counts(&program);
     println!(
-        "xeres: compiled {} -> out/server/ ({} model(s), {} fn(s), {} screen(s))",
+        "xeres: compiled {} -> out/server/ ({} model(s), {} fn(s), {} screen(s), {} component(s))",
         path,
         program.models.len(),
         program.functions.len(),
-        program.screens.len()
+        screens,
+        components
     );
     true
+}
+
+/// Split `program.screens` into page count vs reusable-component count
+/// (components live in the same Vec, tagged by `is_component`).
+fn screen_component_counts(program: &XeresProgram) -> (usize, usize) {
+    let components = program.screens.iter().filter(|s| s.is_component).count();
+    (program.screens.len() - components, components)
 }
 
 /// `xeres serve` — compile the client, then run the app in-process (no cargo).
@@ -119,11 +128,13 @@ fn serve_once(path: &str) {
         eprintln!("xeres: client bundle failed (is npx/esbuild available?)");
         return;
     }
+    let (screens, components) = screen_component_counts(&program);
     println!(
-        "xeres: serving {} ({} fn(s), {} screen(s))",
+        "xeres: serving {} ({} fn(s), {} screen(s), {} component(s))",
         path,
         program.functions.len(),
-        program.screens.len()
+        screens,
+        components
     );
     serve::serve(&program, STATIC_DIR, PORT);
 }

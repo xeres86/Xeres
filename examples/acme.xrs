@@ -1,0 +1,193 @@
+// Acme Analytics — an admin dashboard built from reusable `ui component`s.
+//
+//   xeres dev examples/acme.xrs   →  http://127.0.0.1:8080
+//
+// Shows off the component model: presentational `ui component`s invoked by name
+// with typed args (`StatCard { title: ... }`), conditional expressions
+// (`cond ? a : b`) for active-nav + status badges, the `grid` container, the
+// neutral `box`, and per-item dynamic styles driven by `List<T>` state.
+
+model Stat { title: String  value: String  change: String  color: String }
+model Tx   { id: String  name: String  email: String  amount: String  status: String }
+model Bar  { height: Int  label: String }
+
+// ---- reusable components ---------------------------------------------------
+
+ui component StatCard(title: String, value: String, change: String, color: String) {
+  view {
+    column style "
+      background:#fff; padding:24px; border-radius:12px; border:1px solid #e9ecef;
+      gap:8px; box-shadow:0 1px 3px rgba(0,0,0,0.04);
+    " {
+      row style "justify-content:space-between; align-items:center;" {
+        text title style "
+          font-size:13px; font-weight:600; color:#6c757d;
+          text-transform:uppercase; letter-spacing:0.5px;
+        "
+        box style "width:8px; height:8px; border-radius:50%; background:" + color
+      }
+      text value  style "font-size:28px; font-weight:700; color:#212529;"
+      text change style "font-size:12px; color:#6c757d;"
+    }
+  }
+}
+
+ui component ChartBar(height: Int, label: String) {
+  view {
+    column style "
+      flex:1; height:100%; align-items:center; justify-content:flex-end; gap:8px;
+    " {
+      box style "
+        width:60%; background:#0d6efd; border-radius:4px 4px 0 0; opacity:0.85;
+        height:" + height + "%"
+      text label style "font-size:11px; color:#6c757d;"
+    }
+  }
+}
+
+ui component TxRow(name: String, email: String, amount: String, status: String) {
+  view {
+    row style "
+      padding:12px 0; border-bottom:1px solid #f1f3f5;
+      align-items:center; justify-content:space-between; gap:12px;
+    " {
+      column style "gap:2px;" {
+        text name  style "font-size:14px; font-weight:500; color:#212529;"
+        text email style "font-size:12px; color:#6c757d;"
+      }
+      text status style "font-size:12px; font-weight:600; padding:3px 10px; border-radius:12px; "
+        + (status == "Success" ? "background:#d4edda; color:#155724;"
+          : (status == "Pending" ? "background:#fff3cd; color:#856404;"
+            : "background:#f8d7da; color:#721c24;"))
+      text amount style "font-size:14px; font-weight:600; color:#212529;"
+    }
+  }
+}
+
+// ---- the page --------------------------------------------------------------
+
+ui screen Dashboard {
+
+  state activeMenu: String = "Overview"
+  state menu: List<String> = ["Overview", "Analytics", "Customers", "Settings"]
+
+  state stats: List<Stat> = [
+    Stat { title: "Total Revenue"         value: "$45,231.89" change: "+20.1% from last month"  color: "#4caf50" },
+    Stat { title: "Active Subscriptions"  value: "+2,350"     change: "+180.1% from last month" color: "#2196f3" },
+    Stat { title: "Sales"                 value: "+12,234"    change: "+19% from last month"    color: "#ff9800" },
+    Stat { title: "Active Now"            value: "+573"       change: "+201 since last hour"    color: "#e91e63" }
+  ]
+
+  state bars: List<Bar> = [
+    Bar { height: 40 label: "J" }  Bar { height: 70 label: "F" }  Bar { height: 55 label: "M" }
+    Bar { height: 90 label: "A" }  Bar { height: 65 label: "M" }  Bar { height: 85 label: "J" }
+    Bar { height: 100 label: "J" } Bar { height: 75 label: "A" }  Bar { height: 95 label: "S" }
+    Bar { height: 60 label: "O" }  Bar { height: 80 label: "N" }  Bar { height: 95 label: "D" }
+  ]
+
+  state txns: List<Tx> = [
+    Tx { id: "1" name: "Olivia Martin"    email: "olivia.martin@email.com"    amount: "+$1,999.00" status: "Success" },
+    Tx { id: "2" name: "Jackson Lee"      email: "jackson.lee@email.com"      amount: "+$39.00"    status: "Success" },
+    Tx { id: "3" name: "Isabella Nguyen"  email: "isabella.nguyen@email.com"  amount: "+$299.00"   status: "Pending" },
+    Tx { id: "4" name: "William Kim"      email: "will@email.com"             amount: "+$99.00"    status: "Success" },
+    Tx { id: "5" name: "Sofia Davis"      email: "sofia.davis@email.com"      amount: "+$39.00"    status: "Failed" }
+  ]
+
+  view {
+    row style "
+      min-height:100vh; background:#f8f9fa; color:#212529;
+      font-family:Inter,-apple-system,'Segoe UI',sans-serif;
+    " {
+
+      // ---- sidebar ----
+      column style "
+        width:260px; background:#fff; border-right:1px solid #e9ecef; padding:24px 16px;
+      " {
+        row style "align-items:center; gap:12px; margin-bottom:32px; padding-left:8px;" {
+          text "Acme" style "font-size:20px;"
+          subheading "Acme Analytics" style "font-size:18px; font-weight:700; margin:0; color:#1a1d20;"
+        }
+        column style "gap:4px;" {
+          for item in menu {
+            button item style "
+              padding:12px 16px; border-radius:8px; border:0; text-align:left;
+              font-size:14px; cursor:pointer; width:100%;
+            " + (activeMenu == item
+                  ? "background:#f1f3f5; color:#0d6efd; font-weight:600;"
+                  : "background:transparent; color:#495057; font-weight:500;")
+              -> { activeMenu = item }
+          }
+        }
+      }
+
+      // ---- main viewport ----
+      column style "flex:1; overflow:hidden;" {
+
+        // top header
+        row style "
+          height:70px; background:#fff; border-bottom:1px solid #e9ecef;
+          align-items:center; justify-content:space-between; padding:0 32px;
+        " {
+          column style "gap:2px;" {
+            heading activeMenu style "font-size:20px; font-weight:700; margin:0; color:#1a1d20;"
+            text "Welcome back, Administrator" style "font-size:12px; color:#6c757d;"
+          }
+          row style "align-items:center; gap:16px;" {
+            input "Search..." style "
+              padding:8px 14px; border-radius:6px; border:1px solid #ced4da;
+              font-size:14px; width:200px;
+            "
+            box style "
+              width:36px; height:36px; border-radius:50%; background:#0d6efd; color:#fff;
+              display:flex; align-items:center; justify-content:center;
+              font-size:13px; font-weight:600;
+            " {
+              text "AD"
+            }
+          }
+        }
+
+        // scrollable content
+        column style "padding:32px; gap:32px;" {
+
+          // stats grid
+          grid style "grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:24px;" {
+            for s in stats {
+              StatCard { title: s.title  value: s.value  change: s.change  color: s.color }
+            }
+          }
+
+          // two-column analytics shelf
+          row style "flex-wrap:wrap; gap:24px; align-items:stretch;" {
+
+            // performance chart
+            column style "
+              background:#fff; padding:24px; border-radius:12px; border:1px solid #e9ecef;
+              flex:1.5; min-width:320px;
+            " {
+              title "Performance Chart" style "font-size:16px; font-weight:600; margin:0 0 20px 0; color:#212529;"
+              row style "align-items:flex-end; justify-content:space-between; gap:6px; height:200px;" {
+                for b in bars {
+                  ChartBar { height: b.height  label: b.label }
+                }
+              }
+            }
+
+            // recent transactions
+            column style "
+              background:#fff; padding:24px; border-radius:12px; border:1px solid #e9ecef;
+              flex:1.2; min-width:320px;
+            " {
+              title "Recent Transactions" style "font-size:16px; font-weight:600; margin:0 0 12px 0; color:#212529;"
+              column {
+                for t in txns {
+                  TxRow { name: t.name  email: t.email  amount: t.amount  status: t.status }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

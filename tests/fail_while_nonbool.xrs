@@ -1,0 +1,6 @@
+// a while condition must be Bool (R14)
+server fn bad() -> Int {
+  while 5 { return 1 }
+  return 0
+}
+ui screen S { view { column { text "x" } } }

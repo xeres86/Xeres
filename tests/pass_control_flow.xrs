@@ -1,0 +1,27 @@
+// if/else, for-range, for-list, while, break, continue in BOTH a server fn and
+// a ui handler
+server fn sum_to(n: Int) -> Int {
+  let total = 0
+  for i in 0..n { total = total + i }
+  return total
+}
+server fn pick(items: List<Int>) -> Int {
+  for x in items {
+    if x == 0 { continue }
+    if x > 10 { break }
+    return x
+  }
+  return 0 - 1
+}
+ui screen S {
+  state msg: String = ""
+  view {
+    column {
+      button "go" -> {
+        let acc = 0
+        for i in 0..3 { acc = acc + i }
+        if acc > 0 { msg = "yes" } else { msg = "no" }
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+// a component name must be Capitalized so views can tell it from a built-in
+// element; a lowercase `ui component` is rejected (R17)
+ui component card(x: String) {
+  view { text x }
+}
+ui screen S {
+  view { column { text "ok" } }
+}

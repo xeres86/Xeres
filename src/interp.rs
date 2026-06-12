@@ -16,6 +16,15 @@ pub enum Value {
     Null,
 }
 
+/// Statement-execution outcome, so loops/`break`/`continue`/`return` propagate
+/// correctly through a tree-walk (distinct from "fell off the end").
+enum Flow {
+    Next,
+    Return(Value),
+    Break,
+    Continue,
+}
+
 pub struct Interp<'a> {
     pub program: &'a XeresProgram,
 }
@@ -30,6 +39,12 @@ impl<'a> Interp<'a> {
         if fn_name == "uid" {
             return Ok(Value::Str(uid()));
         }
+        if fn_name == "hash" {
+            return auth_hash(&args);
+        }
+        if fn_name == "verify" {
+            return auth_verify(&args);
+        }
         let f = self
             .program
             .functions
@@ -40,7 +55,10 @@ impl<'a> Interp<'a> {
         for (p, a) in f.params.iter().zip(args) {
             env.insert(p.name.clone(), a);
         }
-        self.exec_block(&f.body, &mut env, f.return_type.as_deref())
+        match self.exec_block(&f.body, &mut env, f.return_type.as_deref())? {
+            Flow::Return(v) => Ok(v),
+            _ => Ok(Value::Null),
+        }
     }
 
     fn exec_block(
@@ -48,11 +66,20 @@ impl<'a> Interp<'a> {
         stmts: &[Stmt],
         env: &mut HashMap<String, Value>,
         ret_model: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Flow, String> {
         for s in stmts {
             match s {
-                Stmt::Let { name, value } => {
-                    let v = self.eval(value, env)?;
+                Stmt::Let { name, type_ann, value } => {
+                    // `let u: Model = db.query_one(...)` maps the row onto Model,
+                    // exactly like a `return db.query_one(...)` does.
+                    let v = match value {
+                        Expr::MethodCall { receiver, method, args }
+                            if is_db(receiver) && (method == "query_one" || method == "query") =>
+                        {
+                            self.db_query(method, args, env, type_ann.as_deref())?
+                        }
+                        _ => self.eval(value, env)?,
+                    };
                     env.insert(name.clone(), v);
                 }
                 Stmt::Assign { name, value } => {
@@ -63,21 +90,63 @@ impl<'a> Interp<'a> {
                     self.eval(e, env)?;
                 }
                 Stmt::Return(e) => {
-                    // `return db.query_one|query(...)` maps rows onto ret_model
+                    // `return db.query_one|query(...)` maps rows onto ret_model;
+                    // `db.exec` falls through to eval (which runs db_exec).
                     if let Expr::MethodCall { receiver, method, args } = e {
-                        if is_db(receiver) {
-                            return self.db_query(method, args, env, ret_model);
+                        if is_db(receiver) && (method == "query_one" || method == "query") {
+                            return Ok(Flow::Return(self.db_query(method, args, env, ret_model)?));
                         }
                     }
-                    return self.eval(e, env);
+                    return Ok(Flow::Return(self.eval(e, env)?));
                 }
-                // try/catch is browser-only (checker R16); harmless if present.
-                Stmt::Try { body, .. } => {
-                    return self.exec_block(body, env, ret_model);
+                // try/catch is browser-only (checker R16); run the body if present.
+                Stmt::Try { body, .. } => match self.exec_block(body, env, ret_model)? {
+                    Flow::Next => {}
+                    other => return Ok(other),
+                },
+                Stmt::If { cond, then_body, else_body } => {
+                    let branch = if self.truthy(cond, env)? { then_body } else { else_body };
+                    match self.exec_block(branch, env, ret_model)? {
+                        Flow::Next => {}
+                        other => return Ok(other),
+                    }
                 }
+                Stmt::For { var, iter, body } => {
+                    let items = match self.eval(iter, env)? {
+                        Value::List(vs) => vs,
+                        _ => return Err("`for` expects a list or range".into()),
+                    };
+                    for item in items {
+                        env.insert(var.clone(), item);
+                        match self.exec_block(body, env, ret_model)? {
+                            Flow::Next | Flow::Continue => {}
+                            Flow::Break => break,
+                            ret @ Flow::Return(_) => return Ok(ret),
+                        }
+                    }
+                }
+                Stmt::While { cond, body } => {
+                    while self.truthy(cond, env)? {
+                        match self.exec_block(body, env, ret_model)? {
+                            Flow::Next | Flow::Continue => {}
+                            Flow::Break => break,
+                            ret @ Flow::Return(_) => return Ok(ret),
+                        }
+                    }
+                }
+                Stmt::Break => return Ok(Flow::Break),
+                Stmt::Continue => return Ok(Flow::Continue),
             }
         }
-        Ok(Value::Null)
+        Ok(Flow::Next)
+    }
+
+    /// Evaluate a condition expression to a bool (error if it isn't one).
+    fn truthy(&self, e: &Expr, env: &HashMap<String, Value>) -> Result<bool, String> {
+        match self.eval(e, env)? {
+            Value::Bool(b) => Ok(b),
+            _ => Err("condition must be a boolean".into()),
+        }
     }
 
     fn eval(&self, e: &Expr, env: &HashMap<String, Value>) -> Result<Value, String> {
@@ -135,6 +204,24 @@ impl<'a> Interp<'a> {
                     vs.push(self.eval(it, env)?);
                 }
                 Ok(Value::List(vs))
+            }
+            Expr::Ternary { cond, then, otherwise } => {
+                match self.eval(cond, env)? {
+                    Value::Bool(true) => self.eval(then, env),
+                    Value::Bool(false) => self.eval(otherwise, env),
+                    _ => Err("ternary condition must be a boolean".into()),
+                }
+            }
+            Expr::Range { start, end } => {
+                let s = match self.eval(start, env)? {
+                    Value::Int(n) => n,
+                    _ => return Err("range bounds must be Int".into()),
+                };
+                let e = match self.eval(end, env)? {
+                    Value::Int(n) => n,
+                    _ => return Err("range bounds must be Int".into()),
+                };
+                Ok(Value::List((s..e).map(Value::Int).collect()))
             }
             Expr::MethodCall { receiver, method, args } => {
                 if is_db(receiver) && method == "exec" {
@@ -207,9 +294,14 @@ impl<'a> Interp<'a> {
         let rows = client
             .query(sql.as_str(), &refs)
             .map_err(|e| format!("db query failed: {}", e))?;
+        // `query` -> List<Model>; `query_one` -> Model or Optional<Model>.
+        // An `Optional<Model>` return makes a no-row result `Null` rather than
+        // an error (the graceful "miss" form).
+        let optional = method == "query_one"
+            && ret_model.map(|t| generic_inner("Optional", t).is_some()).unwrap_or(false);
         let model_name = match method {
             "query" => ret_model.and_then(|t| generic_inner("List", t)),
-            _ => ret_model,
+            _ => ret_model.and_then(|t| generic_inner("Optional", t)).or(ret_model),
         };
         let model = model_name
             .and_then(|n| self.program.models.iter().find(|m| m.name == n))
@@ -226,7 +318,11 @@ impl<'a> Interp<'a> {
             }
         }
         if method == "query_one" {
-            out.into_iter().next().ok_or_else(|| "query_one: no rows".into())
+            match out.into_iter().next() {
+                Some(v) => Ok(v),
+                None if optional => Ok(Value::Null),
+                None => Err("query_one: no rows".into()),
+            }
         } else {
             Ok(Value::List(out))
         }
@@ -384,6 +480,53 @@ pub fn uid() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("{:x}", nanos)
+}
+
+// ---- auth builtins (feature-gated) ----
+// hash()/verify() use Argon2id; like `db`, they're behind the `auth` feature so
+// the default std-only build stays dependency-free. Released binaries enable it.
+
+#[cfg(feature = "auth")]
+fn auth_hash(args: &[Value]) -> Result<Value, String> {
+    use argon2::password_hash::{rand_core::OsRng, SaltString};
+    use argon2::{Argon2, PasswordHasher};
+    let s = match args.first() {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Err("hash() expects a string".into()),
+    };
+    let salt = SaltString::generate(&mut OsRng);
+    let h = Argon2::default()
+        .hash_password(s.as_bytes(), &salt)
+        .map_err(|e| format!("hash failed: {}", e))?
+        .to_string();
+    Ok(Value::Str(h))
+}
+
+#[cfg(feature = "auth")]
+fn auth_verify(args: &[Value]) -> Result<Value, String> {
+    use argon2::password_hash::PasswordHash;
+    use argon2::{Argon2, PasswordVerifier};
+    let (password, stored) = match (args.first(), args.get(1)) {
+        (Some(Value::Str(p)), Some(Value::Str(h))) => (p.clone(), h.clone()),
+        _ => return Err("verify() expects (password, hash)".into()),
+    };
+    let ok = match PasswordHash::new(&stored) {
+        Ok(parsed) => Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok(),
+        Err(_) => false,
+    };
+    Ok(Value::Bool(ok))
+}
+
+#[cfg(not(feature = "auth"))]
+fn auth_hash(_args: &[Value]) -> Result<Value, String> {
+    Err("this xeres build has no auth support (hash/verify); released binaries do".into())
+}
+
+#[cfg(not(feature = "auth"))]
+fn auth_verify(_args: &[Value]) -> Result<Value, String> {
+    Err("this xeres build has no auth support (hash/verify); released binaries do".into())
 }
 
 // ---- postgres glue (feature-gated) ----

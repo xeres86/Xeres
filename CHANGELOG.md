@@ -1,11 +1,66 @@
 # Changelog
 
+## 0.2.0 — view & component layer
+
+A larger, still tier-safe view vocabulary. The server/client boundary is
+unchanged: every new construct is browser-tier and goes through the same
+checker, so secrets and `db` still physically cannot reach the client.
+
+- **Control flow in functions** — statement-level `if`/`else`, `for x in list`,
+  `for i in 0..n` (ranges), `while`, and `break`/`continue` in `fn` bodies and
+  ui handlers (previously a fn body had only `let`/assign/`return`/`expr`/`try`,
+  so it couldn't loop or branch with statements — only the ternary). Compiles to
+  Rust (server), TypeScript (client), and runs in the interpreter (a `Flow`
+  control-signal). Server bindings are `let mut` so reassignment in loops works.
+  `if`/`while` conditions must be `Bool` (R14).
+- **View & component layer** — a bigger, still tier-safe view vocabulary:
+  - **`style "<css>"`** on any element. `row`/`column` stay flex containers (the
+    compiler prepends `display:flex`); your CSS wins otherwise. A screen that
+    styles its **root** renders **full-bleed** on a neutral page (no card, logo,
+    or gradient); unstyled screens keep the branded shell.
+  - **`for` over a plain `List<T>` state** (not just synced `Collection<T>`) —
+    *lifts a v0.1 limitation*. Array loops key per-item handlers by index;
+    synced collections still key by `id`.
+  - **Conditional expression `cond ? a : b`** (TS `?:` / Rust `if-else` /
+    interpreted), with **R14** extended to ternary conditions and a new
+    **R18 conditional-branch** rule: both branches must share one type (no
+    silent `String`/`Int` mixing).
+  - **Layout & text primitives** — `grid` (CSS grid), `box` (neutral container),
+    `subheading`, `title`, `paragraph`.
+  - **Reusable `ui component`s** — presentational, parameterized views invoked by
+    a Capitalized tag (`StatCard { title: … }`). Browser-tier only; args checked
+    against params and the secret/scope rules (R3/R8) apply inside the view, so a
+    component never widens the tier boundary. New **R17 component** rule
+    (Capitalized name + known component + matching args); **R2** broadened to
+    screen/component names.
+  - Reference apps: [`examples/dashboard.xrs`](examples/dashboard.xrs) and a full
+    admin dashboard [`examples/acme.xrs`](examples/acme.xrs).
+- **Full-grammar RPC arguments** — `List<T>`, `Optional<T>`, nested models, and
+  any nesting now decode correctly server-side (both the generated Rust and the
+  `xeres serve` interpreter), *lifting a v0.1 limitation* where they defaulted.
+  A recursive JSON→value decoder replaces the flat scalar/model one.
+- **Database** — `db.query_one` may return **`Optional<Model>`**: a no-row result
+  is `none` instead of an error (the graceful "miss" form; a bare `Model` return
+  still requires the row). `uid()` is now also a **server-side** builtin, so it
+  works inside a `server fn` (e.g. minting a row id on `db.exec` insert) — it
+  previously only existed client-side. Fixed: `return db.exec(...)` in the
+  interpreter ran the query path (mapping rows) instead of executing; it now
+  routes to exec. Verified end-to-end against a live Postgres (read/lookup/write).
+  See [`examples/users.xrs`](examples/users.xrs).
+- **Auth primitives** — server-only **`hash()` / `verify()`** builtins (Argon2id),
+  enforced by new rule **R19** (no client-side hashing; the secret hash is
+  compared server-side). The `argon2` dep is added to the generated server only
+  when used; in `xeres serve` they're behind an `auth` feature (released binaries
+  build `--features full`). **Typed `let`** (`let u: User = db.query_one(...)`)
+  lets a server fn bind a query row and compute on it — the piece that makes a
+  salted-hash login (fetch row → `verify`) expressible. Full tier-safe login:
+  [`examples/login_db.xrs`](examples/login_db.xrs), proven against live Neon
+  Postgres (register hashes, login fetch+verify, wrong-password + no-user paths).
+
 ## 0.1.1 — distribution & self-contained runtime
 
-First release with prebuilt binaries + the no-toolchain run path. Everything
-under "0.2-dev" below ships in this tag:
+First release with prebuilt binaries + the no-toolchain run path:
 
-## Unreleased (0.2-dev)
 - **Self-contained runtime (`xeres serve`)** — the compiler binary can now run
   an app directly: an interpreter executes `server` functions and an in-process
   HTTP server handles static, RPC (secret-stripped responses) and sync. **No

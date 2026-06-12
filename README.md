@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.1.0**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.2.0**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -143,6 +143,24 @@ ui screen Hello {
 }
 ```
 
+### Logic: control flow in functions
+
+A `fn` body (server, shared, or a ui handler) has statement-level `if`/`else`,
+`for x in list`, `for i in 0..n` (ranges), `while`, and `break`/`continue` —
+not just the ternary expression. It compiles to Rust on the server and
+TypeScript in the browser.
+
+```xeres
+server fn total(items: List<Int>) -> Int {
+  let sum = 0
+  for x in items {
+    if x < 0 { continue }
+    sum = sum + x
+  }
+  return sum
+}
+```
+
 ### Views: state, binding, lists, conditionals
 
 ```xeres
@@ -166,9 +184,86 @@ ui screen Login(  ) {
 }
 ```
 
-View primitives: `column`, `row`, `heading`, `text`, `button`, `input`,
-`password`. Control flow: `for x in collection { ... }`, `if cond { ... } else { ... }`.
-Inputs use `bind <stateCell>` for two-way binding.
+View primitives — **layout**: `column`, `row`, `grid` (CSS grid), `box`
+(unstyled container); **text**: `heading`, `subheading`, `title`, `text`,
+`paragraph`; **controls**: `button`, `input`, `password`. Control flow:
+`for x in items { ... }`, `if cond { ... } else { ... }`, and the conditional
+expression `cond ? a : b`. `for` iterates a synced `Collection<T>` **or** a
+plain `List<T>` state cell. Inputs use `bind <stateCell>` for two-way binding.
+
+### Styling: the `style` modifier
+
+Any element takes an inline `style "<css>"`. `row`/`column` are flex containers
+(the compiler prepends `display:flex`); your CSS wins for everything else. When a
+screen's root element is styled, the page renders **full-bleed** on a neutral
+canvas — no centered card, logo, or default gradient — so the screen owns the
+whole viewport. (Unstyled screens keep the branded centered shell.)
+
+```xeres
+ui screen Dashboard {
+  state assets: List<Asset> = [ /* ... */ ]
+  view {
+    column style "min-height:100vh; padding:32px; background:#0f172a; color:white" {
+      heading "Asset Management Dashboard"
+      for asset in assets {
+        row style "padding:16px; border-bottom:1px solid #334155" {
+          text asset.name
+          text "$" + asset.value
+          if asset.change >= 0 { text "+" + asset.change + "%" }
+          else { text asset.change + "%" }
+        }
+      }
+    }
+  }
+}
+```
+
+See [`examples/dashboard.xrs`](examples/dashboard.xrs) for the full version
+(`xeres dev examples/dashboard.xrs`).
+
+### Reusable components
+
+A `ui component` is a presentational, parameterized view — the same typed-view
+machinery as a screen, but invoked by name instead of auto-mounted. Components
+are **browser-tier only** (there is no `server component`): their args are
+checked against the params (Capitalized name, each arg once, type-compatible,
+required ones present — **R17**), and secret-containment (**R3**) and scope
+(**R8**) apply inside the view, so a component is **not** a back door around the
+tier boundary — reading a `secret` field in one is the same compile error as
+anywhere else in browser code. Conditional expressions keep per-instance styling
+concise.
+
+```xeres
+ui component StatCard(title: String, value: String, color: String) {
+  view {
+    column style "background:#fff; padding:24px; border-radius:12px" {
+      row style "justify-content:space-between" {
+        text title
+        box style "width:8px; height:8px; border-radius:50%; background:" + color
+      }
+      heading value
+    }
+  }
+}
+
+ui screen Dashboard {
+  state stats: List<Stat> = [ /* ... */ ]
+  view {
+    grid style "grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:24px" {
+      for s in stats {
+        StatCard { title: s.title  value: s.value  color: s.color }   // invoke by name
+      }
+    }
+  }
+}
+```
+
+A **Capitalized** tag in a view is a component invocation (`StatCard { … }`),
+mirroring how a Capitalized `Name { … }` is a record literal in expression
+position; lowercase tags are built-in elements. The full admin dashboard —
+sidebar with active-nav highlighting, a stats grid, a bar chart, and a status
+table — is [`examples/acme.xrs`](examples/acme.xrs)
+(`xeres dev examples/acme.xrs`).
 
 ### Local-first synced collections
 
@@ -211,9 +306,38 @@ server fn add_user(id: String, username: String, password_hash: String) -> Int {
 }
 ```
 
-`db.query_one` maps a row onto the function's return model; `db.exec` returns the
-affected-row count. The `postgres` driver is added to the generated server **only
-when an app uses `db`** — db-free apps stay a zero-dependency `std` crate.
+`db.query_one` maps a row onto the function's return model — or onto
+`Optional<Model>`, in which case a **no-row result is `none`** rather than an
+error (the graceful "miss" form). `db.query` returns `List<Model>`; `db.exec`
+returns the affected-row count. `uid()` works server-side too (e.g. to mint a row
+id on insert). The `postgres` driver is added to the generated server **only when
+an app uses `db`** — db-free apps stay a zero-dependency `std` crate. See
+[`examples/users.xrs`](examples/users.xrs) for the full read / lookup / write
+round-trip.
+
+### Auth: `hash` / `verify` + typed `let`
+
+`hash(password)` and `verify(password, stored)` are **server-only** builtins
+(**R19**) backed by Argon2id — hashing and the hash comparison happen on the
+server, never in the browser. Because a salted hash can't be matched in SQL, a
+login *fetches* the row and verifies it; binding a query result needs a type, so
+`let` takes an optional annotation: `let u: User = db.query_one(...)`. The stored
+hash stays a `secret` (stripped from the client + wire).
+
+```xeres
+server fn register(username: String, password: String) -> Int {
+  return db.exec("insert into users (id, username, password_hash) values ($1, $2, $3)",
+                 uid(), username, hash(password))
+}
+server fn login(username: String, password: String) -> Bool {
+  let u: User = db.query_one("select id, username, password_hash from users where username = $1", username)
+  return verify(password, u.password_hash)    // password_hash read server-side only (R3)
+}
+```
+
+`hash`/`verify` add the `argon2` dependency to the generated server **only when
+used**. The full screen is [`examples/login_db.xrs`](examples/login_db.xrs) —
+verified end-to-end against a live Postgres.
 
 ---
 
@@ -224,7 +348,7 @@ Every program is checked against these. A violation is a compile error.
 | Rule | Guarantee |
 |---|---|
 | **R1** unknown-type | every referenced type exists |
-| **R2** duplicate-decl | no duplicate model/field/function names |
+| **R2** duplicate-decl | no duplicate model/field/function/screen/component names |
 | **R3** secret-containment | a `secret` field can only be read server-side |
 | **R4** async-call-discipline | a browser→server call must be `await`-ed; `await` is browser-only |
 | **R5** secret-leak-via-return | only `server` functions may return secret-derived data |
@@ -239,6 +363,9 @@ Every program is checked against these. A violation is a compile error.
 | **R14** if-condition | an `if` condition must be `Bool` |
 | **R15** db-capability | `db` is server-only; methods are `query_one`/`query`/`exec` |
 | **R16** try-context | `try`/`catch` is browser-only; server failures surface as a failed `await` |
+| **R17** component | a `ui component` is Capitalized; an invocation names a known component with args supplied once, type-compatible, required ones present (R3/R8 still apply inside its view) |
+| **R18** conditional-branch | both branches of `cond ? a : b` have one type (no silent mixing) |
+| **R19** auth-builtin | `hash()` / `verify()` are server-only (no client-side hashing; the secret hash is compared on the server) |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,
@@ -249,7 +376,7 @@ valid only server-side.
 ## How it compiles
 
 ```
-app.xrs ──► lexer ──► parser ──► checker (R1–R15) ──► codegen
+app.xrs ──► lexer ──► parser ──► checker (R1–R19) ──► codegen
                                                        ├─► out/server/         a self-contained Rust crate
                                                        │     ├─ src/main.rs      std-only HTTP server: router,
                                                        │     │                   RPC, secret-stripping, sync
@@ -276,7 +403,8 @@ You never edit `out/` — it's regenerated from `.xrs` on every build.
 src/                     the Xeres compiler (Rust)
   token.rs  lexer.rs  parser.rs  checker.rs  codegen.rs  main.rs
 tests/                   .xrs fixtures + run.sh — the spec / regression suite
-examples/                reference apps (counter, todo, login)
+examples/                reference apps (counter, todo, login, dashboard, acme,
+                           users + login_db — Postgres read/write/auth)
 tooling/create-xeres/    project scaffolder (the `npm create xeres` CLI)
 package.json,            VS Code language extension (syntax highlighting)
   language-configuration.json, xeres.tmLanguage.json

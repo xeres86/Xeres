@@ -25,10 +25,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # First releases ship db-free (guaranteed to build everywhere). Once the
-      # `db` feature build is green in CI, switch to `--features db` so released
-      # binaries support Postgres with no toolchain on the user's machine.
-      - run: cargo build --release --target ${{ matrix.target }}
+      # Released binaries are batteries-included (`full` = db + auth) so users
+      # get Postgres + Argon2 with no toolchain on their own machine.
+      - run: cargo build --release --features full --target ${{ matrix.target }}
       - name: Stage binary
         shell: bash
         run: cp "target/${{ matrix.target }}/release/xeres${{ matrix.ext }}" "xeres-${{ matrix.target }}${{ matrix.ext }}"

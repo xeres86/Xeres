@@ -1,0 +1,12 @@
+// style modifier on elements + `for` over a plain List<T> state cell
+model Item { id: String  n: Int }
+ui screen S {
+  state items: List<Item> = [ Item { id: "1" n: 1 } ]
+  view {
+    column style "padding:8px; background:#0f172a" {
+      for it in items {
+        row style "gap:4px" { text it.n }
+      }
+    }
+  }
+}

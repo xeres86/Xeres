@@ -1,0 +1,105 @@
+// A Postgres-backed login with REAL password hashing — a genuine system design:
+//
+//   register:  db.exec  insert with hash(password)        -> salted Argon2id hash
+//   login:     db.query_one fetch the row, then verify()  -> Bool (server-side)
+//
+// Why it's tier-safe:
+//  • `password_hash` is `secret`: stripped from the client interface AND the RPC
+//    wire payload — it cannot reach the browser (R3/R5).
+//  • `hash()` / `verify()` are server-only builtins (R19): hashing and the hash
+//    comparison happen on the server, never client-side.
+//  • A salted hash can't be matched in SQL, so login *fetches* the row into a
+//    typed `let u: User` and verifies server-side — the password hash is read
+//    only inside the `server fn`.
+//
+// Table (see examples/users.xrs for the DDL):
+//   create table users (id text primary key, username text not null unique,
+//                       password_hash text not null);
+//
+// Run (needs a db+auth build + DATABASE_URL in .env):
+//   ./target/release/xeres dev examples/login_db.xrs
+
+model User {
+  id: String
+  username: String
+  secret password_hash: String      // never crosses the wire
+}
+
+server fn register(username: String, password: String) -> Int {
+  return db.exec(
+    "insert into users (id, username, password_hash) values ($1, $2, $3)",
+    uid(), username, hash(password)
+  )
+}
+
+server fn login(username: String, password: String) -> Bool {
+  // a missing user makes query_one fail -> surfaces to the client as a failed
+  // await (caught below); a wrong password returns false.
+  let u: User = db.query_one("select id, username, password_hash from users where username = $1", username)
+  return verify(password, u.password_hash)
+}
+
+ui screen Login {
+  state username: String = ""
+  state password: String = ""
+  state error: String = ""
+  state loggedIn: Bool = false
+
+  view {
+    column style "
+      min-height:100vh; display:flex; align-items:center; justify-content:center;
+      background:#0f172a; font-family:Inter,system-ui,sans-serif; color:#e2e8f0;
+    " {
+      column style "
+        width:340px; gap:12px; padding:32px; border-radius:14px;
+        background:#1e293b; box-shadow:0 10px 30px rgba(0,0,0,0.35);
+      " {
+        if loggedIn {
+          heading "Welcome, " + username
+          text "You are signed in." style "color:#94a3b8;"
+          button "Sign out" style "
+            padding:10px; border-radius:8px; border:0; background:#334155;
+            color:#e2e8f0; cursor:pointer;
+          " -> { loggedIn = false  error = "" }
+        } else {
+          heading "Sign in"
+          input "Username" bind username style "
+            padding:10px 12px; border-radius:8px; border:1px solid #334155;
+            background:#0f172a; color:#e2e8f0;
+          "
+          password "Password" bind password style "
+            padding:10px 12px; border-radius:8px; border:1px solid #334155;
+            background:#0f172a; color:#e2e8f0;
+          "
+
+          button "Sign in" style "
+            padding:10px; border-radius:8px; border:0; background:#2563eb;
+            color:white; font-weight:600; cursor:pointer;
+          " -> {
+            try {
+              let ok = await login(username, password)
+              loggedIn = ok
+              error = (ok ? "" : "Invalid password")
+            } catch {
+              error = "No such user"
+            }
+          }
+
+          button "Create account" style "
+            padding:10px; border-radius:8px; border:1px solid #334155;
+            background:transparent; color:#93c5fd; cursor:pointer;
+          " -> {
+            try {
+              let n = await register(username, password)
+              error = "Account created — now sign in"
+            } catch {
+              error = "That username is taken"
+            }
+          }
+
+          text error style "color:#f87171; font-size:13px; min-height:18px;"
+        }
+      }
+    }
+  }
+}

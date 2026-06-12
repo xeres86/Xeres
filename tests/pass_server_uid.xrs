@@ -1,0 +1,16 @@
+// uid() is a shared builtin and must be available inside a server fn (e.g. to
+// mint a row id on insert) — not only client-side
+model Row { id: String  v: Int }
+
+server fn make(v: Int) -> Row {
+  return Row { id: uid(), v: v }
+}
+
+ui screen S {
+  state msg: String = ""
+  view {
+    column {
+      button "go" -> { let r = await make(1)  msg = r.id }
+    }
+  }
+}

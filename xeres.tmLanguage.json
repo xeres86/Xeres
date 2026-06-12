@@ -28,7 +28,7 @@
     },
     "keywords": {
       "name": "keyword.control.xeres",
-      "match": "\\b(fn|let|return|model|state|screen|view|mutation|for|in|on)\\b"
+      "match": "\\b(fn|let|return|model|state|screen|component|view|mutation|for|in|on|if|else|while|break|continue|style|bind|await|try|catch)\\b"
     },
     "types": {
       "name": "support.type.xeres",
@@ -43,7 +43,7 @@
       "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
     },
     "declarations": {
-      "match": "\\b(fn|model|screen|mutation)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "match": "\\b(fn|model|screen|component|mutation)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": { "2": { "name": "entity.name.function.xeres" } }
     }
   }

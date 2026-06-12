@@ -1,0 +1,11 @@
+// hash()/verify() are server-only — calling hash() in a ui handler is R19
+ui screen S {
+  state p: String = ""
+  state h: String = ""
+  view {
+    column {
+      input "p" bind p
+      button "go" -> { h = hash(p) }
+    }
+  }
+}
