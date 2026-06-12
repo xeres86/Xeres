@@ -6,6 +6,13 @@ A larger, still tier-safe view vocabulary. The server/client boundary is
 unchanged: every new construct is browser-tier and goes through the same
 checker, so secrets and `db` still physically cannot reach the client.
 
+- **Control flow in functions** — statement-level `if`/`else`, `for x in list`,
+  `for i in 0..n` (ranges), `while`, and `break`/`continue` in `fn` bodies and
+  ui handlers (previously a fn body had only `let`/assign/`return`/`expr`/`try`,
+  so it couldn't loop or branch with statements — only the ternary). Compiles to
+  Rust (server), TypeScript (client), and runs in the interpreter (a `Flow`
+  control-signal). Server bindings are `let mut` so reassignment in loops works.
+  `if`/`while` conditions must be `Bool` (R14).
 - **View & component layer** — a bigger, still tier-safe view vocabulary:
   - **`style "<css>"`** on any element. `row`/`column` stay flex containers (the
     compiler prepends `display:flex`); your CSS wins otherwise. A screen that

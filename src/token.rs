@@ -42,6 +42,7 @@ pub enum Token {
     Question, // ?  (ternary: cond ? a : b)
     Comma,  // ,
     Dot,    // .
+    DotDot, // ..  (range: for i in 0..n)
     Arrow,  // ->
     Plus,   // +
     Minus,  // -

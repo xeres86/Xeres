@@ -48,6 +48,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
    interpreter + in-process server, no `cargo`. (`xeres build` remains for
    eject/max-perf.) Together with (7), a dev needs only Node + the `xeres`
    binary — no git, no Rust.
+10. ~~**Control flow in functions**~~ ✅ done — statement `if`/`else`, `for x in
+   list`, `for i in 0..n`, `while`, `break`/`continue` in `fn` bodies + ui
+   handlers (Rust + TS + interpreter). Functions can finally express algorithms
+   (a fn body previously had no loops or statement branching). Next language
+   foundations: extended primitives (`Date`/`Decimal`/`Enum`), then a stdlib.
 9. ~~**View & component layer**~~ ✅ done — inline `style "<css>"` (full-bleed
    when a screen styles its root), conditional expression `cond ? a : b`,
    layout/text primitives (`grid`, `box`, `subheading`, `title`, `paragraph`),

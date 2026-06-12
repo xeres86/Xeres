@@ -16,6 +16,15 @@ pub enum Value {
     Null,
 }
 
+/// Statement-execution outcome, so loops/`break`/`continue`/`return` propagate
+/// correctly through a tree-walk (distinct from "fell off the end").
+enum Flow {
+    Next,
+    Return(Value),
+    Break,
+    Continue,
+}
+
 pub struct Interp<'a> {
     pub program: &'a XeresProgram,
 }
@@ -46,7 +55,10 @@ impl<'a> Interp<'a> {
         for (p, a) in f.params.iter().zip(args) {
             env.insert(p.name.clone(), a);
         }
-        self.exec_block(&f.body, &mut env, f.return_type.as_deref())
+        match self.exec_block(&f.body, &mut env, f.return_type.as_deref())? {
+            Flow::Return(v) => Ok(v),
+            _ => Ok(Value::Null),
+        }
     }
 
     fn exec_block(
@@ -54,20 +66,20 @@ impl<'a> Interp<'a> {
         stmts: &[Stmt],
         env: &mut HashMap<String, Value>,
         ret_model: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Flow, String> {
         for s in stmts {
             match s {
                 Stmt::Let { name, type_ann, value } => {
                     // `let u: Model = db.query_one(...)` maps the row onto Model,
                     // exactly like a `return db.query_one(...)` does.
-                    if let Expr::MethodCall { receiver, method, args } = value {
-                        if is_db(receiver) && (method == "query_one" || method == "query") {
-                            let v = self.db_query(method, args, env, type_ann.as_deref())?;
-                            env.insert(name.clone(), v);
-                            continue;
+                    let v = match value {
+                        Expr::MethodCall { receiver, method, args }
+                            if is_db(receiver) && (method == "query_one" || method == "query") =>
+                        {
+                            self.db_query(method, args, env, type_ann.as_deref())?
                         }
-                    }
-                    let v = self.eval(value, env)?;
+                        _ => self.eval(value, env)?,
+                    };
                     env.insert(name.clone(), v);
                 }
                 Stmt::Assign { name, value } => {
@@ -82,18 +94,59 @@ impl<'a> Interp<'a> {
                     // `db.exec` falls through to eval (which runs db_exec).
                     if let Expr::MethodCall { receiver, method, args } = e {
                         if is_db(receiver) && (method == "query_one" || method == "query") {
-                            return self.db_query(method, args, env, ret_model);
+                            return Ok(Flow::Return(self.db_query(method, args, env, ret_model)?));
                         }
                     }
-                    return self.eval(e, env);
+                    return Ok(Flow::Return(self.eval(e, env)?));
                 }
-                // try/catch is browser-only (checker R16); harmless if present.
-                Stmt::Try { body, .. } => {
-                    return self.exec_block(body, env, ret_model);
+                // try/catch is browser-only (checker R16); run the body if present.
+                Stmt::Try { body, .. } => match self.exec_block(body, env, ret_model)? {
+                    Flow::Next => {}
+                    other => return Ok(other),
+                },
+                Stmt::If { cond, then_body, else_body } => {
+                    let branch = if self.truthy(cond, env)? { then_body } else { else_body };
+                    match self.exec_block(branch, env, ret_model)? {
+                        Flow::Next => {}
+                        other => return Ok(other),
+                    }
                 }
+                Stmt::For { var, iter, body } => {
+                    let items = match self.eval(iter, env)? {
+                        Value::List(vs) => vs,
+                        _ => return Err("`for` expects a list or range".into()),
+                    };
+                    for item in items {
+                        env.insert(var.clone(), item);
+                        match self.exec_block(body, env, ret_model)? {
+                            Flow::Next | Flow::Continue => {}
+                            Flow::Break => break,
+                            ret @ Flow::Return(_) => return Ok(ret),
+                        }
+                    }
+                }
+                Stmt::While { cond, body } => {
+                    while self.truthy(cond, env)? {
+                        match self.exec_block(body, env, ret_model)? {
+                            Flow::Next | Flow::Continue => {}
+                            Flow::Break => break,
+                            ret @ Flow::Return(_) => return Ok(ret),
+                        }
+                    }
+                }
+                Stmt::Break => return Ok(Flow::Break),
+                Stmt::Continue => return Ok(Flow::Continue),
             }
         }
-        Ok(Value::Null)
+        Ok(Flow::Next)
+    }
+
+    /// Evaluate a condition expression to a bool (error if it isn't one).
+    fn truthy(&self, e: &Expr, env: &HashMap<String, Value>) -> Result<bool, String> {
+        match self.eval(e, env)? {
+            Value::Bool(b) => Ok(b),
+            _ => Err("condition must be a boolean".into()),
+        }
     }
 
     fn eval(&self, e: &Expr, env: &HashMap<String, Value>) -> Result<Value, String> {
@@ -158,6 +211,17 @@ impl<'a> Interp<'a> {
                     Value::Bool(false) => self.eval(otherwise, env),
                     _ => Err("ternary condition must be a boolean".into()),
                 }
+            }
+            Expr::Range { start, end } => {
+                let s = match self.eval(start, env)? {
+                    Value::Int(n) => n,
+                    _ => return Err("range bounds must be Int".into()),
+                };
+                let e = match self.eval(end, env)? {
+                    Value::Int(n) => n,
+                    _ => return Err("range bounds must be Int".into()),
+                };
+                Ok(Value::List((s..e).map(Value::Int).collect()))
             }
             Expr::MethodCall { receiver, method, args } => {
                 if is_db(receiver) && method == "exec" {

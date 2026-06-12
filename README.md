@@ -143,6 +143,24 @@ ui screen Hello {
 }
 ```
 
+### Logic: control flow in functions
+
+A `fn` body (server, shared, or a ui handler) has statement-level `if`/`else`,
+`for x in list`, `for i in 0..n` (ranges), `while`, and `break`/`continue` —
+not just the ternary expression. It compiles to Rust on the server and
+TypeScript in the browser.
+
+```xeres
+server fn total(items: List<Int>) -> Int {
+  let sum = 0
+  for x in items {
+    if x < 0 { continue }
+    sum = sum + x
+  }
+  return sum
+}
+```
+
 ### Views: state, binding, lists, conditionals
 
 ```xeres

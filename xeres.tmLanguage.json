@@ -28,7 +28,7 @@
     },
     "keywords": {
       "name": "keyword.control.xeres",
-      "match": "\\b(fn|let|return|model|state|screen|component|view|mutation|for|in|on|if|else|style|bind|await|try|catch)\\b"
+      "match": "\\b(fn|let|return|model|state|screen|component|view|mutation|for|in|on|if|else|while|break|continue|style|bind|await|try|catch)\\b"
     },
     "types": {
       "name": "support.type.xeres",

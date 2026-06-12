@@ -59,6 +59,8 @@ pub enum Expr {
     ListLit(Vec<Expr>),
     /// `cond ? then : otherwise` — a conditional (ternary) expression.
     Ternary { cond: Box<Expr>, then: Box<Expr>, otherwise: Box<Expr> },
+    /// `start..end` — a half-open integer range (used by `for i in 0..n`).
+    Range { start: Box<Expr>, end: Box<Expr> },
 }
 
 #[derive(Debug)]
@@ -71,6 +73,15 @@ pub enum Stmt {
     Return(Expr),
     Expr(Expr),
     Try { body: Vec<Stmt>, handler: Vec<Stmt> },
+    /// `if cond { ... } else { ... }` — statement form (the ternary is the
+    /// expression form). `else_body` is empty when there's no `else`.
+    If { cond: Expr, then_body: Vec<Stmt>, else_body: Vec<Stmt> },
+    /// `for var in iter { ... }` — iterate a `List<T>` or a `start..end` range.
+    For { var: String, iter: Expr, body: Vec<Stmt> },
+    /// `while cond { ... }`.
+    While { cond: Expr, body: Vec<Stmt> },
+    Break,
+    Continue,
 }
 
 #[derive(Debug)]
@@ -394,8 +405,73 @@ impl<'a> Parser<'a> {
         stmts
     }
 
+    /// `if cond { ... } [else { ... } | else if ...]` in statement position.
+    fn parse_if_stmt(&mut self) -> Option<Stmt> {
+        self.next_token(); // consume 'if'
+        self.allow_record = false; // the `{` after the cond opens a block
+        let cond = self.parse_expr()?;
+        let then_body = self.parse_stmt_block();
+        let mut else_body = Vec::new();
+        if matches!(&self.current_token, Token::Identifier(k) if k == "else") {
+            self.next_token(); // consume 'else'
+            if matches!(&self.current_token, Token::Identifier(k) if k == "if") {
+                if let Some(s) = self.parse_if_stmt() {
+                    else_body.push(s);
+                }
+            } else {
+                else_body = self.parse_stmt_block();
+            }
+        }
+        Some(Stmt::If { cond, then_body, else_body })
+    }
+
+    /// `for var in iter { ... }` in statement position (`iter` may be a range).
+    fn parse_for_stmt(&mut self) -> Option<Stmt> {
+        self.next_token(); // consume 'for'
+        let var = match &self.current_token {
+            Token::Identifier(n) => n.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume var
+        match &self.current_token {
+            Token::Identifier(i) if i == "in" => self.next_token(),
+            _ => return None,
+        }
+        self.allow_record = false;
+        let iter = self.parse_expr()?;
+        let body = self.parse_stmt_block();
+        Some(Stmt::For { var, iter, body })
+    }
+
+    /// `while cond { ... }` in statement position.
+    fn parse_while_stmt(&mut self) -> Option<Stmt> {
+        self.next_token(); // consume 'while'
+        self.allow_record = false;
+        let cond = self.parse_expr()?;
+        let body = self.parse_stmt_block();
+        Some(Stmt::While { cond, body })
+    }
+
     fn parse_statement(&mut self) -> Option<Stmt> {
         self.allow_record = true; // statements may construct records
+
+        // control flow (contextual keywords, like the view parser)
+        if let Token::Identifier(kw) = &self.current_token {
+            match kw.as_str() {
+                "if" => return self.parse_if_stmt(),
+                "for" => return self.parse_for_stmt(),
+                "while" => return self.parse_while_stmt(),
+                "break" => {
+                    self.next_token();
+                    return Some(Stmt::Break);
+                }
+                "continue" => {
+                    self.next_token();
+                    return Some(Stmt::Continue);
+                }
+                _ => {}
+            }
+        }
 
         // try { ... } catch { ... }
         if self.current_token == Token::Try {
@@ -456,7 +532,7 @@ impl<'a> Parser<'a> {
     fn parse_expr(&mut self) -> Option<Expr> {
         let cond = self.parse_expr_bp(0)?;
         // ternary: `cond ? then : otherwise` (lowest precedence, right-assoc).
-        if self.current_token == Token::Question {
+        let e = if self.current_token == Token::Question {
             self.next_token(); // consume '?'
             let then = self.parse_expr()?;
             if self.current_token != Token::Colon {
@@ -464,13 +540,21 @@ impl<'a> Parser<'a> {
             }
             self.next_token(); // consume ':'
             let otherwise = self.parse_expr()?;
-            return Some(Expr::Ternary {
+            Expr::Ternary {
                 cond: Box::new(cond),
                 then: Box::new(then),
                 otherwise: Box::new(otherwise),
-            });
+            }
+        } else {
+            cond
+        };
+        // range: `start..end` (half-open). Lowest precedence.
+        if self.current_token == Token::DotDot {
+            self.next_token(); // consume '..'
+            let end = self.parse_expr_bp(0)?;
+            return Some(Expr::Range { start: Box::new(e), end: Box::new(end) });
         }
-        Some(cond)
+        Some(e)
     }
 
     /// Returns (operator, binding power) for the current token, if it's infix.

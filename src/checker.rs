@@ -129,6 +129,8 @@ fn resolve_type(
         Expr::Ternary { then, otherwise, .. } => {
             resolve_type(then, locals, table).or_else(|| resolve_type(otherwise, locals, table))
         }
+        // `a..b` yields a sequence of Int (so `for i in 0..n` binds `i: Int`).
+        Expr::Range { .. } => Some("List<Int>".into()),
     }
 }
 
@@ -179,6 +181,10 @@ fn is_tainted(
                 || is_tainted(then, locals, table, returns_secret)
                 || is_tainted(otherwise, locals, table, returns_secret)
         }
+        Expr::Range { start, end } => {
+            is_tainted(start, locals, table, returns_secret)
+                || is_tainted(end, locals, table, returns_secret)
+        }
     }
 }
 
@@ -221,7 +227,26 @@ fn taint_scan(
                 tainted_return |= taint_scan(body, &mut b, table, returns_secret);
                 tainted_return |= taint_scan(handler, &mut h, table, returns_secret);
             }
-            Stmt::Assign { .. } | Stmt::Expr(_) => {}
+            Stmt::If { cond: _, then_body, else_body } => {
+                let mut t = locals.clone();
+                let mut e = locals.clone();
+                tainted_return |= taint_scan(then_body, &mut t, table, returns_secret);
+                tainted_return |= taint_scan(else_body, &mut e, table, returns_secret);
+            }
+            Stmt::For { var, iter, body } => {
+                let mut inner = locals.clone();
+                let elem = resolve_type(iter, locals, table)
+                    .as_deref()
+                    .and_then(|t| generic_inner("List", t))
+                    .map(str::to_string);
+                inner.insert(var.clone(), (elem, false));
+                tainted_return |= taint_scan(body, &mut inner, table, returns_secret);
+            }
+            Stmt::While { cond: _, body } => {
+                let mut inner = locals.clone();
+                tainted_return |= taint_scan(body, &mut inner, table, returns_secret);
+            }
+            Stmt::Assign { .. } | Stmt::Expr(_) | Stmt::Break | Stmt::Continue => {}
         }
     }
     tainted_return
@@ -285,6 +310,48 @@ fn check_flow_stmts(
                 let mut h = locals.clone();
                 check_flow_stmts(handler, &mut h, f, table, errors);
             }
+            Stmt::If { cond, then_body, else_body } => {
+                check_expr(cond, locals, f.env, &f.name, f.line, table, errors);
+                check_await(cond, false, in_browser, &f.name, f.line, table, errors);
+                // R14 — the condition must be Bool (when resolvable).
+                if let Some(t) = resolve_type(cond, locals, table) {
+                    if t != "Bool" {
+                        errors.push(SemanticError {
+                            rule: "R14 if-condition",
+                            message: format!("`if` condition in `{}` must be Bool, got `{}`.", f.name, t),
+                            line: f.line,
+                        });
+                    }
+                }
+                let mut t = locals.clone();
+                check_flow_stmts(then_body, &mut t, f, table, errors);
+                let mut e = locals.clone();
+                check_flow_stmts(else_body, &mut e, f, table, errors);
+            }
+            Stmt::For { var, iter, body } => {
+                check_expr(iter, locals, f.env, &f.name, f.line, table, errors);
+                check_await(iter, false, in_browser, &f.name, f.line, table, errors);
+                let elem = element_type_of(iter, locals, table);
+                let mut inner = locals.clone();
+                inner.insert(var.clone(), (elem, false));
+                check_flow_stmts(body, &mut inner, f, table, errors);
+            }
+            Stmt::While { cond, body } => {
+                check_expr(cond, locals, f.env, &f.name, f.line, table, errors);
+                check_await(cond, false, in_browser, &f.name, f.line, table, errors);
+                if let Some(t) = resolve_type(cond, locals, table) {
+                    if t != "Bool" {
+                        errors.push(SemanticError {
+                            rule: "R14 if-condition",
+                            message: format!("`while` condition in `{}` must be Bool, got `{}`.", f.name, t),
+                            line: f.line,
+                        });
+                    }
+                }
+                let mut inner = locals.clone();
+                check_flow_stmts(body, &mut inner, f, table, errors);
+            }
+            Stmt::Break | Stmt::Continue => {}
         }
     }
 }
@@ -606,6 +673,32 @@ fn check_handler_block(
                 check_handler_block(body, &local, sname, sline, table, errors);
                 check_handler_block(handler, &local, sname, sline, table, errors);
             }
+            Stmt::If { cond, then_body, else_body } => {
+                check_screen_expr(cond, &local, sname, sline, table, errors);
+                if let Some(t) = resolve_type(cond, &local, table) {
+                    if t != "Bool" {
+                        errors.push(SemanticError {
+                            rule: "R14 if-condition",
+                            message: format!("`if` condition in screen `{}` must be Bool, got `{}`.", sname, t),
+                            line: sline,
+                        });
+                    }
+                }
+                check_handler_block(then_body, &local, sname, sline, table, errors);
+                check_handler_block(else_body, &local, sname, sline, table, errors);
+            }
+            Stmt::For { var, iter, body } => {
+                check_screen_expr(iter, &local, sname, sline, table, errors);
+                let elem = element_type_of(iter, &local, table);
+                let mut inner = local.clone();
+                inner.insert(var.clone(), (elem, false));
+                check_handler_block(body, &inner, sname, sline, table, errors);
+            }
+            Stmt::While { cond, body } => {
+                check_screen_expr(cond, &local, sname, sline, table, errors);
+                check_handler_block(body, &local, sname, sline, table, errors);
+            }
+            Stmt::Break | Stmt::Continue => {}
         }
     }
 }
@@ -683,6 +776,10 @@ fn check_bindings(
             check_bindings(cond, locals, sname, sline, table, errors);
             check_bindings(then, locals, sname, sline, table, errors);
             check_bindings(otherwise, locals, sname, sline, table, errors);
+        }
+        Expr::Range { start, end } => {
+            check_bindings(start, locals, sname, sline, table, errors);
+            check_bindings(end, locals, sname, sline, table, errors);
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::NoneLit => {}
     }
@@ -880,6 +977,10 @@ fn check_expr(
             }
             check_record(name, fields, locals, fn_line, table, errors);
         }
+        Expr::Range { start, end } => {
+            check_expr(start, locals, fn_env, fn_name, fn_line, table, errors);
+            check_expr(end, locals, fn_env, fn_name, fn_line, table, errors);
+        }
     }
 }
 
@@ -1052,6 +1153,10 @@ fn check_await(
             check_await(cond, false, in_browser, fn_name, line, table, errors);
             check_await(then, false, in_browser, fn_name, line, table, errors);
             check_await(otherwise, false, in_browser, fn_name, line, table, errors);
+        }
+        Expr::Range { start, end } => {
+            check_await(start, false, in_browser, fn_name, line, table, errors);
+            check_await(end, false, in_browser, fn_name, line, table, errors);
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
         | Expr::NoneLit => {}
