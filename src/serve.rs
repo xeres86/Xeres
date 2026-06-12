@@ -124,6 +124,7 @@ fn decode_arg(j: Option<&J>, ty: &str, program: &XeresProgram) -> Value {
         "Int" | "DateTime" => Value::Int(j.as_i64()),
         "Float" => Value::Float(j.as_f64()),
         "Bool" => Value::Bool(j.as_bool()),
+        _ if program.enums.iter().any(|e| e.name == ty) => Value::Str(j.as_string()),
         _ => {
             if let Some(model) = program.models.iter().find(|m| m.name == ty) {
                 let fields = model

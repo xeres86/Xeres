@@ -2,7 +2,7 @@
 // runtime (`xeres serve`) uses this instead of generating + compiling Rust, so
 // running an app needs no cargo. Database access is feature-gated (`db`).
 
-use crate::parser::{BinOp, Expr, Stmt, UnOp, XeresProgram};
+use crate::parser::{BinOp, Expr, MatchPat, Stmt, UnOp, XeresProgram};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -139,6 +139,22 @@ impl<'a> Interp<'a> {
                 }
                 Stmt::Break => return Ok(Flow::Break),
                 Stmt::Continue => return Ok(Flow::Continue),
+                Stmt::Match { scrutinee, arms } => {
+                    let v = match self.eval(scrutinee, env)? {
+                        Value::Str(s) => s,
+                        _ => return Err("`match` scrutinee must be an enum".into()),
+                    };
+                    let chosen = arms
+                        .iter()
+                        .find(|a| matches!(&a.pattern, MatchPat::Variant(n) if n == &v))
+                        .or_else(|| arms.iter().find(|a| matches!(a.pattern, MatchPat::Wildcard)));
+                    if let Some(arm) = chosen {
+                        match self.exec_block(&arm.body, env, ret_model)? {
+                            Flow::Next => {}
+                            other => return Ok(other),
+                        }
+                    }
+                }
             }
         }
         Ok(Flow::Next)
@@ -163,14 +179,22 @@ impl<'a> Interp<'a> {
                 .get(v)
                 .cloned()
                 .ok_or_else(|| format!("unknown variable `{}`", v)),
-            Expr::Field { base, field } => match self.eval(base, env)? {
-                Value::Record(_, fs) => fs
-                    .iter()
-                    .find(|(k, _)| k == field)
-                    .map(|(_, v)| v.clone())
-                    .ok_or_else(|| format!("no field `{}`", field)),
-                _ => Err(format!("`.{}` on a non-record value", field)),
-            },
+            Expr::Field { base, field } => {
+                // `Enum.Variant` (Capitalized base) -> the variant string.
+                if let Expr::Ident(name) = base.as_ref() {
+                    if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                        return Ok(Value::Str(field.clone()));
+                    }
+                }
+                match self.eval(base, env)? {
+                    Value::Record(_, fs) => fs
+                        .iter()
+                        .find(|(k, _)| k == field)
+                        .map(|(_, v)| v.clone())
+                        .ok_or_else(|| format!("no field `{}`", field)),
+                    _ => Err(format!("`.{}` on a non-record value", field)),
+                }
+            }
             Expr::Unary { op, expr } => {
                 let v = self.eval(expr, env)?;
                 match (op, v) {

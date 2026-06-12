@@ -95,10 +95,16 @@ fn build(path: &str) -> bool {
     let _ = fs::write(static_dir.join("index.html"), &index_html);
 
     let (screens, components) = screen_component_counts(&program);
+    let enums = if program.enums.is_empty() {
+        String::new()
+    } else {
+        format!(", {} enum(s)", program.enums.len())
+    };
     println!(
-        "xeres: compiled {} -> out/server/ ({} model(s), {} fn(s), {} screen(s), {} component(s))",
+        "xeres: compiled {} -> out/server/ ({} model(s){}, {} fn(s), {} screen(s), {} component(s))",
         path,
         program.models.len(),
+        enums,
         program.functions.len(),
         screens,
         components

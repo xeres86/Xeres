@@ -9,6 +9,14 @@ tier-safe boundary; new constructs go through the same checker.
   carried as `i64`/`number` over the wire and DB) and a `now()` builtin in both
   tiers. Temporal arithmetic: `DateTime - DateTime` is the elapsed `Int` (ms),
   `DateTime ± Int` shifts a timestamp; comparisons work. Dependency-free.
+- **`enum` + `match`** — `enum Status { Active Inactive Pending }` (unit
+  variants), values via `Status.Active`, and a `match` statement
+  (`match s { Active -> { … } _ -> { … } }`) in fn bodies + handlers. Enums are
+  **string-backed** end to end: a Rust `type X = String` alias, a TS string
+  union (`"Active" | …`), `Value::Str` in the interpreter, and the variant name
+  on the wire/DB. `==` works. New rule **R20**: a `match` scrutinee must be an
+  enum, every arm is a real variant, and the arms are **exhaustive** (cover all
+  variants or include `_`); an unknown `Enum.Variant` is also R20.
 
 ## 0.2.0 — view & component layer
 

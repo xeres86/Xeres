@@ -1,7 +1,7 @@
 // src/checker.rs
 use crate::parser::{
-    BinOp, EnvModifier, Expr, FunctionNode, Handler, ModelNode, ScreenNode, Stmt, SyncedStateNode,
-    ViewNode, XeresProgram,
+    BinOp, EnumNode, EnvModifier, Expr, FunctionNode, Handler, MatchArm, MatchPat, ModelNode,
+    ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -25,6 +25,7 @@ struct FnSig {
 
 struct SymbolTable<'a> {
     models: HashMap<String, &'a ModelNode>,
+    enums: HashMap<String, &'a EnumNode>,
     fns: HashMap<String, FnSig>,
     states: HashMap<String, &'a SyncedStateNode>,
     /// Reusable `ui component`s, keyed by name (for invocation checking).
@@ -44,11 +45,72 @@ fn starts_uppercase(name: &str) -> bool {
     name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
+/// R20 — a `match` scrutinee must be an enum; every arm names a real variant;
+/// and the arms are exhaustive (cover all variants, or include `_`).
+fn check_match_patterns(
+    scrutinee: &Expr,
+    arms: &[MatchArm],
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+    line: usize,
+    errors: &mut Vec<SemanticError>,
+) {
+    let enum_name = match resolve_type(scrutinee, locals, table) {
+        Some(t) if table.enums.contains_key(&t) => t,
+        Some(t) => {
+            errors.push(SemanticError {
+                rule: "R20 match",
+                message: format!("`match` expects an enum, got `{}`.", t),
+                line,
+            });
+            return;
+        }
+        None => return, // unresolvable — leave to R1
+    };
+    let en = table.enums[&enum_name];
+    let mut covered: HashSet<&str> = HashSet::new();
+    let mut has_wildcard = false;
+    for arm in arms {
+        match &arm.pattern {
+            MatchPat::Wildcard => has_wildcard = true,
+            MatchPat::Variant(v) => {
+                if !en.variants.iter().any(|x| x == v) {
+                    errors.push(SemanticError {
+                        rule: "R20 match",
+                        message: format!("enum `{}` has no variant `{}`.", enum_name, v),
+                        line,
+                    });
+                }
+                covered.insert(v.as_str());
+            }
+        }
+    }
+    if !has_wildcard {
+        let missing: Vec<&str> = en
+            .variants
+            .iter()
+            .map(String::as_str)
+            .filter(|v| !covered.contains(v))
+            .collect();
+        if !missing.is_empty() {
+            errors.push(SemanticError {
+                rule: "R20 match",
+                message: format!(
+                    "`match` on `{}` is not exhaustive — missing {} (add it, or `_`).",
+                    enum_name,
+                    missing.join(", ")
+                ),
+                line,
+            });
+        }
+    }
+}
+
 fn is_known_type(name: &str, table: &SymbolTable) -> bool {
     if let Some(inner) = generic_inner("List", name).or_else(|| generic_inner("Optional", name)) {
         return is_known_type(inner, table);
     }
-    BUILTINS.contains(&name) || table.models.contains_key(name)
+    BUILTINS.contains(&name) || table.models.contains_key(name) || table.enums.contains_key(name)
 }
 
 fn is_bool_op(op: BinOp) -> bool {
@@ -67,6 +129,12 @@ fn resolve_type(
         Expr::Bool(_) => Some("Bool".into()),
         Expr::Ident(v) => locals.get(v).and_then(|(t, _)| t.clone()),
         Expr::Field { base, field } => {
+            // enum variant access: `Status.Active` is a value of type `Status`.
+            if let Expr::Ident(name) = base.as_ref() {
+                if table.enums.contains_key(name) {
+                    return Some(name.clone());
+                }
+            }
             let base_ty = resolve_type(base, locals, table)?;
             let model = table.models.get(&base_ty)?;
             model.field(field).map(|p| p.data_type.clone())
@@ -255,6 +323,12 @@ fn taint_scan(
                 let mut inner = locals.clone();
                 tainted_return |= taint_scan(body, &mut inner, table, returns_secret);
             }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    let mut inner = locals.clone();
+                    tainted_return |= taint_scan(&arm.body, &mut inner, table, returns_secret);
+                }
+            }
             Stmt::Assign { .. } | Stmt::Expr(_) | Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -359,6 +433,15 @@ fn check_flow_stmts(
                 }
                 let mut inner = locals.clone();
                 check_flow_stmts(body, &mut inner, f, table, errors);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                check_expr(scrutinee, locals, f.env, &f.name, f.line, table, errors);
+                check_await(scrutinee, false, in_browser, &f.name, f.line, table, errors);
+                check_match_patterns(scrutinee, arms, locals, table, f.line, errors);
+                for arm in arms {
+                    let mut inner = locals.clone();
+                    check_flow_stmts(&arm.body, &mut inner, f, table, errors);
+                }
             }
             Stmt::Break | Stmt::Continue => {}
         }
@@ -707,6 +790,13 @@ fn check_handler_block(
                 check_screen_expr(cond, &local, sname, sline, table, errors);
                 check_handler_block(body, &local, sname, sline, table, errors);
             }
+            Stmt::Match { scrutinee, arms } => {
+                check_screen_expr(scrutinee, &local, sname, sline, table, errors);
+                check_match_patterns(scrutinee, arms, &local, table, sline, errors);
+                for arm in arms {
+                    check_handler_block(&arm.body, &local, sname, sline, table, errors);
+                }
+            }
             Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -752,7 +842,15 @@ fn check_bindings(
                 });
             }
         }
-        Expr::Field { base, .. } => check_bindings(base, locals, sname, sline, table, errors),
+        Expr::Field { base, .. } => {
+            // `Enum.Variant` — the base is a type name, not a value binding.
+            if let Expr::Ident(name) = base.as_ref() {
+                if table.enums.contains_key(name) {
+                    return;
+                }
+            }
+            check_bindings(base, locals, sname, sline, table, errors)
+        }
         Expr::Call { args, .. } => {
             for a in args {
                 check_bindings(a, locals, sname, sline, table, errors);
@@ -826,6 +924,19 @@ fn check_expr(
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => {}
         Expr::Field { base, field } => {
+            // enum variant access: validate the variant exists (R20).
+            if let Expr::Ident(name) = base.as_ref() {
+                if let Some(en) = table.enums.get(name) {
+                    if !en.variants.iter().any(|v| v == field) {
+                        errors.push(SemanticError {
+                            rule: "R20 match",
+                            message: format!("enum `{}` has no variant `{}`.", name, field),
+                            line: fn_line,
+                        });
+                    }
+                    return;
+                }
+            }
             check_expr(base, locals, fn_env, fn_name, fn_line, table, errors);
             if let Some(model_name) = resolve_type(base, locals, table) {
                 if let Some(model) = table.models.get(&model_name) {
@@ -1252,10 +1363,32 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     let mut errors = Vec::new();
     let mut table = SymbolTable {
         models: HashMap::new(),
+        enums: HashMap::new(),
         fns: HashMap::new(),
         states: HashMap::new(),
         components: HashMap::new(),
     };
+
+    // Enums: register, and reject duplicate enum names / duplicate variants (R2).
+    for e in &program.enums {
+        if table.enums.insert(e.name.clone(), e).is_some() || table.models.contains_key(&e.name) {
+            errors.push(SemanticError {
+                rule: "R2 duplicate-decl",
+                message: format!("type `{}` is declared more than once.", e.name),
+                line: e.line,
+            });
+        }
+        let mut seen = HashSet::new();
+        for v in &e.variants {
+            if !seen.insert(v) {
+                errors.push(SemanticError {
+                    rule: "R2 duplicate-decl",
+                    message: format!("variant `{}` is declared twice in enum `{}`.", v, e.name),
+                    line: e.line,
+                });
+            }
+        }
+    }
 
     // Screens and components compile to render functions in one namespace and
     // are mounted/invoked by name — so names must be unique (R2), and a

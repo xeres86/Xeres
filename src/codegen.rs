@@ -12,7 +12,7 @@
 //                stub — the dev never hand-writes a fetch.
 
 use crate::parser::{
-    BinOp, EnvModifier, Expr, FunctionNode, Handler, Stmt, UnOp, ViewNode, XeresProgram,
+    BinOp, EnvModifier, Expr, FunctionNode, Handler, MatchPat, Stmt, UnOp, ViewNode, XeresProgram,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -69,6 +69,9 @@ fn stmt_uses_auth(s: &Stmt) -> bool {
         }
         Stmt::For { iter, body, .. } => expr_uses_auth(iter) || body.iter().any(stmt_uses_auth),
         Stmt::While { cond, body } => expr_uses_auth(cond) || body.iter().any(stmt_uses_auth),
+        Stmt::Match { scrutinee, arms } => {
+            expr_uses_auth(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_auth))
+        }
         Stmt::Break | Stmt::Continue => false,
     }
 }
@@ -112,6 +115,9 @@ fn stmt_uses_db(s: &Stmt) -> bool {
         }
         Stmt::For { iter, body, .. } => expr_uses_db(iter) || body.iter().any(stmt_uses_db),
         Stmt::While { cond, body } => expr_uses_db(cond) || body.iter().any(stmt_uses_db),
+        Stmt::Match { scrutinee, arms } => {
+            expr_uses_db(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_db))
+        }
         Stmt::Break | Stmt::Continue => false,
     }
 }
@@ -153,6 +159,16 @@ fn gen_server(program: &XeresProgram) -> String {
     }
     if uses_auth(program) {
         out.push_str(CRYPTO_PRELUDE);
+        out.push('\n');
+    }
+
+    // Enums are string-backed: the variant validity is proven by the checker
+    // (R20), so the server tier carries them as `String` (wire = the variant).
+    for e in &program.enums {
+        let variants = e.variants.iter().map(|v| format!("// {}", v)).collect::<Vec<_>>().join(" ");
+        out.push_str(&format!("pub type {} = String;  {}\n", e.name, variants));
+    }
+    if !program.enums.is_empty() {
         out.push('\n');
     }
 
@@ -317,12 +333,15 @@ fn decode_json_rust(src: &str, ty: &str, program: &XeresProgram, depth: usize) -
             .join(", ");
         return format!("{} {{ {} }}", ty, fields);
     }
-    // scalar
+    // String and string-backed enums decode from a JSON string.
+    if ty == "String" || program.enums.iter().any(|e| e.name == ty) {
+        return format!("{}.map(|__v| __v.as_string()).unwrap_or_default()", src);
+    }
+    // scalar (Int, DateTime as i64; Float; Bool)
     match ty {
-        "String" => format!("{}.map(|__v| __v.as_string()).unwrap_or_default()", src),
         "Float" => format!("{}.and_then(|__v| __v.as_f64()).unwrap_or(0.0)", src),
         "Bool" => format!("{}.map(|__v| __v.as_bool()).unwrap_or_default()", src),
-        _ => format!("{}.map(|__v| __v.as_i64()).unwrap_or_default()", src), // Int
+        _ => format!("{}.map(|__v| __v.as_i64()).unwrap_or_default()", src),
     }
 }
 
@@ -346,11 +365,12 @@ fn wire_serialize(path: &str, ty: &str, models: &HashSet<&str>) -> String {
     }
     if models.contains(ty) {
         format!("{}.to_wire_json()", path)
-    } else if ty == "String" {
-        format!("json_str(&{})", path)
-    } else {
-        // Int, Float, Bool are valid JSON scalars as-is.
+    } else if matches!(ty, "Int" | "Float" | "Bool" | "DateTime") {
+        // valid JSON number/bool scalars as-is
         format!("{}.to_string()", path)
+    } else {
+        // String and (string-backed) enums -> a JSON string
+        format!("json_str(&{})", path)
     }
 }
 
@@ -593,6 +613,16 @@ fn gen_client(program: &XeresProgram) -> String {
     out.push('\n');
     out.push_str(UID_FN);
     out.push('\n');
+
+    // Enums — a string union (the variant names). String-backed end to end.
+    for e in &program.enums {
+        let union = e.variants.iter().map(|v| format!("\"{}\"", v)).collect::<Vec<_>>().join(" | ");
+        let union = if union.is_empty() { "never".to_string() } else { union };
+        out.push_str(&format!("export type {} = {};\n", e.name, union));
+    }
+    if !program.enums.is_empty() {
+        out.push('\n');
+    }
 
     // Model interfaces — secret fields are STRIPPED. They never reach the client.
     for m in &program.models {
@@ -1081,6 +1111,20 @@ fn emit_h_stmt(s: &Stmt, screen: &str, sv: &HashSet<String>) -> String {
         }
         Stmt::Break => "break;".to_string(),
         Stmt::Continue => "continue;".to_string(),
+        Stmt::Match { scrutinee, arms } => {
+            let mut out = format!("switch ({}) {{ ", emit_h_expr(scrutinee, screen, sv));
+            for arm in arms {
+                match &arm.pattern {
+                    MatchPat::Wildcard => out.push_str("default: { "),
+                    MatchPat::Variant(v) => out.push_str(&format!("case {:?}: {{ ", v)),
+                }
+                let b = arm.body.iter().map(|x| emit_h_stmt(x, screen, sv)).collect::<Vec<_>>().join(" ");
+                out.push_str(&b);
+                out.push_str(" break; } ");
+            }
+            out.push('}');
+            out
+        }
     }
 }
 
@@ -1097,7 +1141,14 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
         Expr::Float(f) => format!("{:?}", f),
         Expr::Str(s) => format!("{:?}", s),
         Expr::Bool(b) => b.to_string(),
-        Expr::Field { base, field } => format!("{}.{}", emit_h_expr(base, screen, sv), field),
+        Expr::Field { base, field } => {
+            if let Expr::Ident(name) = base.as_ref() {
+                if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return format!("{:?}", field); // `Enum.Variant` -> variant string
+                }
+            }
+            format!("{}.{}", emit_h_expr(base, screen, sv), field)
+        }
         Expr::Call { callee, args } => {
             if callee == "now" && args.is_empty() {
                 return "Date.now()".to_string();
@@ -1175,6 +1226,9 @@ fn stmts_have_await(stmts: &[Stmt]) -> bool {
         }
         Stmt::For { iter, body, .. } => expr_has_await(iter) || stmts_have_await(body),
         Stmt::While { cond, body } => expr_has_await(cond) || stmts_have_await(body),
+        Stmt::Match { scrutinee, arms } => {
+            expr_has_await(scrutinee) || arms.iter().any(|a| stmts_have_await(&a.body))
+        }
         Stmt::Break | Stmt::Continue => false,
     })
 }
@@ -1482,7 +1536,16 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
         Expr::Str(s) => if ts { format!("{:?}", s) } else { format!("String::from({:?})", s) },
         Expr::Bool(b) => b.to_string(),
         Expr::Ident(v) => v.clone(),
-        Expr::Field { base, field } => format!("{}.{}", emit_expr(base, ts), field),
+        Expr::Field { base, field } => {
+            // `Enum.Variant` (Capitalized base) -> the variant string; enums are
+            // string-backed. A lowercase base is an ordinary field access.
+            if let Expr::Ident(name) = base.as_ref() {
+                if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return if ts { format!("{:?}", field) } else { format!("String::from({:?})", field) };
+                }
+            }
+            format!("{}.{}", emit_expr(base, ts), field)
+        }
         Expr::Call { callee, args } => {
             // now() — epoch millis. Browser: Date.now(); server: the now() helper.
             if callee == "now" && args.is_empty() {
@@ -1628,6 +1691,42 @@ fn emit_stmt(s: &Stmt, let_kw: &str, ts: bool) -> String {
         }
         Stmt::Break => "break;".to_string(),
         Stmt::Continue => "continue;".to_string(),
+        // enums are string-backed: TS switches on the string, Rust matches the
+        // variant strings via `.as_str()` (with a `_` arm for exhaustiveness).
+        Stmt::Match { scrutinee, arms } => {
+            if ts {
+                let mut out = format!("switch ({}) {{ ", emit_expr(scrutinee, ts));
+                for arm in arms {
+                    match &arm.pattern {
+                        MatchPat::Wildcard => out.push_str("default: { "),
+                        MatchPat::Variant(v) => out.push_str(&format!("case {:?}: {{ ", v)),
+                    }
+                    out.push_str(&block(&arm.body));
+                    out.push_str(" break; } ");
+                }
+                out.push('}');
+                out
+            } else {
+                let mut out = format!("match ({}).as_str() {{ ", emit_expr(scrutinee, ts));
+                let mut has_wild = false;
+                for arm in arms {
+                    match &arm.pattern {
+                        MatchPat::Wildcard => {
+                            out.push_str("_ => { ");
+                            has_wild = true;
+                        }
+                        MatchPat::Variant(v) => out.push_str(&format!("{:?} => {{ ", v)),
+                    }
+                    out.push_str(&block(&arm.body));
+                    out.push_str(" } ");
+                }
+                if !has_wild {
+                    out.push_str("_ => {} ");
+                }
+                out.push('}');
+                out
+            }
+        }
     }
 }
 
