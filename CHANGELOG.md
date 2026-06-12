@@ -36,8 +36,19 @@ checker, so secrets and `db` still physically cannot reach the client.
   is `none` instead of an error (the graceful "miss" form; a bare `Model` return
   still requires the row). `uid()` is now also a **server-side** builtin, so it
   works inside a `server fn` (e.g. minting a row id on `db.exec` insert) — it
-  previously only existed client-side. See [`examples/users.xrs`](examples/users.xrs)
-  for the full read/lookup/write round-trip.
+  previously only existed client-side. Fixed: `return db.exec(...)` in the
+  interpreter ran the query path (mapping rows) instead of executing; it now
+  routes to exec. Verified end-to-end against a live Postgres (read/lookup/write).
+  See [`examples/users.xrs`](examples/users.xrs).
+- **Auth primitives** — server-only **`hash()` / `verify()`** builtins (Argon2id),
+  enforced by new rule **R19** (no client-side hashing; the secret hash is
+  compared server-side). The `argon2` dep is added to the generated server only
+  when used; in `xeres serve` they're behind an `auth` feature (released binaries
+  build `--features full`). **Typed `let`** (`let u: User = db.query_one(...)`)
+  lets a server fn bind a query row and compute on it — the piece that makes a
+  salted-hash login (fetch row → `verify`) expressible. Full tier-safe login:
+  [`examples/login_db.xrs`](examples/login_db.xrs), proven against live Neon
+  Postgres (register hashes, login fetch+verify, wrong-password + no-user paths).
 
 ## 0.1.1 — distribution & self-contained runtime
 

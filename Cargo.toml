@@ -15,11 +15,17 @@ default = []
 # Database support for `xeres serve` (the Postgres driver). Released binaries
 # are built with this on; local dev builds default off (no C toolchain needed).
 db = ["dep:postgres", "dep:postgres-native-tls", "dep:native-tls"]
+# Auth builtins hash()/verify() for `xeres serve` (Argon2id). Same rationale as
+# `db`: optional so the default build stays dependency-free.
+auth = ["dep:argon2"]
+# Batteries-included: what released binaries build with.
+full = ["db", "auth"]
 
 [dependencies]
 postgres = { version = "0.19", optional = true }
 postgres-native-tls = { version = "0.5", optional = true }
 native-tls = { version = "0.2", optional = true }
+argon2 = { version = "0.5", features = ["std"], optional = true }
 
 [profile.release]
 opt-level = 3

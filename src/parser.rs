@@ -63,7 +63,10 @@ pub enum Expr {
 
 #[derive(Debug)]
 pub enum Stmt {
-    Let { name: String, value: Expr },
+    /// `let name = expr`, or `let name: Type = expr`. The annotation lets a
+    /// server-side `db.query_one(...)` bind its row onto a model (it's the only
+    /// place the target model is otherwise unknown).
+    Let { name: String, type_ann: Option<String>, value: Expr },
     Assign { name: String, value: Expr },
     Return(Expr),
     Expr(Expr),
@@ -429,10 +432,17 @@ impl<'a> Parser<'a> {
                     _ => return None,
                 };
                 self.next_token(); // consume name
+                // optional `: Type` annotation
+                let type_ann = if self.current_token == Token::Colon {
+                    self.next_token(); // consume ':'
+                    self.parse_type()
+                } else {
+                    None
+                };
                 if self.current_token != Token::Assign { return None; }
                 self.next_token(); // consume '='
                 let value = self.parse_expr()?;
-                Some(Stmt::Let { name, value })
+                Some(Stmt::Let { name, type_ann, value })
             }
             _ => {
                 let e = self.parse_expr()?;

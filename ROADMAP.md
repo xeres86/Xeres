@@ -25,12 +25,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
 2. **Verify the db path end-to-end** — `Optional<Model>` return for `query_one`
    misses ✅ done; the db-feature build compiles (Windows uses `schannel`, no
    OpenSSL); `uid()` now works in `server fn`s (server-side builtin) ✅.
-   The login round-trip was confirmed against a **live Neon Postgres** (table
-   create + seed + the `db.query_one` auth query for valid/invalid/no-user
-   cases) by running the exact SQL the server fns compile to. Remaining: run the
-   compiled `xeres` **binary** itself against a live DB — blocked only by the
-   local toolchain (the GNU target needs MinGW `dlltool`, or switch to MSVC);
-   the CI release binaries already build with db. See
+   ✅ **Proven against a live Neon Postgres** with the compiled `xeres` binary
+   (`--features full`): `examples/login_db.xrs` register (insert + Argon2 hash),
+   login (typed-`let` fetch + `verify`), wrong-password and no-user paths all
+   correct. Also fixed `return db.exec(...)` routing in the interpreter. (Local
+   db builds need MinGW `dlltool` or MSVC; CI release binaries bundle it.) See
    [`examples/users.xrs`](examples/users.xrs), [`examples/login_db.xrs`](examples/login_db.xrs).
 3. **Sync hardening** — field-level merge (CRDT / cr-sqlite) instead of
    row-level last-write-wins.
@@ -39,8 +38,9 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
 5. ~~**List/Optional inside RPC arguments**~~ ✅ done — a recursive JSON decoder
    handles `List<T>`, `Optional<T>`, nested models and any nesting, in both the
    generated Rust and the `xeres serve` interpreter.
-6. **Auth primitives** — session tokens (a `declassify`d secret), TLS story
-   for the app server.
+6. **Auth primitives** — server-only `hash()` / `verify()` (Argon2id) ✅ done
+   (rule R19; `examples/login_db.xrs`). Remaining: session tokens (a
+   `declassify`d secret), TLS story for the app server.
 7. **Distribution** — npm `xeres` wrapper + per-platform release workflow built
    (see [RELEASING.md](RELEASING.md)); remaining: actually publish to npm + cut
    a tagged release.

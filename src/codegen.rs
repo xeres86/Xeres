@@ -28,19 +28,63 @@ pub fn generate(
     )
 }
 
-/// The generated app's Cargo.toml. The `postgres` driver is added only when the
-/// app actually uses `db` — db-free apps stay a zero-dependency std crate.
+/// The generated app's Cargo.toml. A dependency is added only when the app
+/// actually uses the capability — `postgres` for `db`, `argon2` for
+/// `hash`/`verify`. A plain app stays a zero-dependency std crate.
 fn gen_cargo(program: &XeresProgram) -> String {
-    let dep = if uses_db(program) {
-        "\n[dependencies]\npostgres = \"0.19\"\npostgres-native-tls = \"0.5\"\nnative-tls = \"0.2\"\n"
+    let mut deps = String::new();
+    if uses_db(program) {
+        deps.push_str("postgres = \"0.19\"\npostgres-native-tls = \"0.5\"\nnative-tls = \"0.2\"\n");
+    }
+    if uses_auth(program) {
+        deps.push_str("argon2 = { version = \"0.5\", features = [\"std\"] }\n");
+    }
+    let dep_section = if deps.is_empty() {
+        "\n".to_string()
     } else {
-        "\n"
+        format!("\n[dependencies]\n{}", deps)
     };
     format!(
         "[package]\nname = \"xeres-app\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n\
          [[bin]]\nname = \"xeres-app\"\npath = \"src/main.rs\"\n{}",
-        dep
+        dep_section
     )
+}
+
+/// Does any function body call the `hash`/`verify` auth builtins?
+fn uses_auth(program: &XeresProgram) -> bool {
+    program.functions.iter().any(|f| f.body.iter().any(stmt_uses_auth))
+}
+fn stmt_uses_auth(s: &Stmt) -> bool {
+    match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::Return(value)
+        | Stmt::Expr(value) => expr_uses_auth(value),
+        Stmt::Try { body, handler } => {
+            body.iter().any(stmt_uses_auth) || handler.iter().any(stmt_uses_auth)
+        }
+    }
+}
+fn expr_uses_auth(e: &Expr) -> bool {
+    match e {
+        Expr::Call { callee, args } => {
+            callee == "hash" || callee == "verify" || args.iter().any(expr_uses_auth)
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_uses_auth(receiver) || args.iter().any(expr_uses_auth)
+        }
+        Expr::Field { base, .. } => expr_uses_auth(base),
+        Expr::Unary { expr, .. } => expr_uses_auth(expr),
+        Expr::Binary { left, right, .. } => expr_uses_auth(left) || expr_uses_auth(right),
+        Expr::Declassify(i) | Expr::Await(i) => expr_uses_auth(i),
+        Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_auth(v)),
+        Expr::ListLit(items) => items.iter().any(expr_uses_auth),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_uses_auth(cond) || expr_uses_auth(then) || expr_uses_auth(otherwise)
+        }
+        _ => false,
+    }
 }
 
 /// Does any function body reference the `db` capability?
@@ -91,6 +135,10 @@ fn gen_server(program: &XeresProgram) -> String {
     out.push('\n');
     if uses_db(program) {
         out.push_str(DB_PRELUDE);
+        out.push('\n');
+    }
+    if uses_auth(program) {
+        out.push_str(CRYPTO_PRELUDE);
         out.push('\n');
     }
 
@@ -979,7 +1027,7 @@ fn emit_h_stmt(s: &Stmt, screen: &str, sv: &HashSet<String>) -> String {
             };
             format!("{} = {};", target, emit_h_expr(value, screen, sv))
         }
-        Stmt::Let { name, value } => format!("let {} = {};", name, emit_h_expr(value, screen, sv)),
+        Stmt::Let { name, value, .. } => format!("let {} = {};", name, emit_h_expr(value, screen, sv)),
         Stmt::Return(e) => format!("return {};", emit_h_expr(e, screen, sv)),
         Stmt::Expr(e) => format!("{};", emit_h_expr(e, screen, sv)),
         Stmt::Try { body, handler } => {
@@ -1458,7 +1506,7 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
 
 fn emit_stmt(s: &Stmt, let_kw: &str, ts: bool) -> String {
     match s {
-        Stmt::Let { name, value } => format!("{} {} = {};", let_kw, name, emit_expr(value, ts)),
+        Stmt::Let { name, value, .. } => format!("{} {} = {};", let_kw, name, emit_expr(value, ts)),
         Stmt::Assign { name, value } => format!("{} = {};", name, emit_expr(value, ts)),
         Stmt::Return(e) => format!("return {};", emit_expr(e, ts)),
         Stmt::Expr(e) => format!("{};", emit_expr(e, ts)),
@@ -1484,59 +1532,67 @@ fn pg_params(args: &[Expr]) -> String {
     format!("&[{}]", items)
 }
 
-/// Server-side statement emitter. Special-cases `return db.query_one(sql, ...)`
-/// to map the first row onto the function's return model; otherwise normal.
+/// Server-side statement emitter. Maps `db.query_one(...)` / `db.query(...)`
+/// onto the target model in both `return` and typed-`let` position; otherwise
+/// falls back to the normal statement emitter.
 fn emit_server_stmt(s: &Stmt, f: &FunctionNode, program: &XeresProgram) -> String {
+    // `return db.query_*(...)` — mapped onto the function's return type.
     if let Stmt::Return(Expr::MethodCall { receiver, method, args }) = s {
-        let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
-        // `return db.query_one(...)`. With an `Optional<Model>` return a miss is
-        // `None` (the safe form); with a bare `Model` return a miss is a hard
-        // error (the row is required).
-        if is_db && method == "query_one" {
+        if matches!(receiver.as_ref(), Expr::Ident(n) if n == "db") {
             if let Some(ret) = &f.return_type {
-                let sql = args.first().map(|a| emit_expr(a, false)).unwrap_or_else(|| "\"\"".into());
-                let params = pg_params(args.get(1..).unwrap_or(&[]));
-                // Optional<Model> — graceful miss.
-                if let Some(model_name) = generic_inner("Optional", ret) {
-                    if let Some(model) = program.models.iter().find(|m| m.name == model_name) {
-                        let fields = row_fields(model);
-                        return format!(
-                            "return {{ let __rows = db_query(&({sql}), {params}); \
-                             match __rows.into_iter().next() {{ Some(__r) => Some({model} {{ {fields} }}), None => None }} }};",
-                            sql = sql, params = params, model = model_name, fields = fields
-                        );
-                    }
-                }
-                // bare Model — the row is required.
-                if let Some(model) = program.models.iter().find(|m| &m.name == ret) {
-                    let fields = row_fields(model);
-                    return format!(
-                        "return {{ let __rows = db_query(&({sql}), {params}); \
-                         let __r = __rows.into_iter().next().expect(\"xeres: query_one returned no rows\"); \
-                         {model} {{ {fields} }} }};",
-                        sql = sql, params = params, model = ret, fields = fields
-                    );
-                }
-            }
-        }
-        // `return db.query(...)` -> every row mapped, List<Model>
-        if is_db && method == "query" {
-            if let Some(list_ty) = &f.return_type {
-                if let Some(model_name) = generic_inner("List", list_ty) {
-                    if let Some(model) = program.models.iter().find(|m| m.name == model_name) {
-                        let sql = args.first().map(|a| emit_expr(a, false)).unwrap_or_else(|| "\"\"".into());
-                        let params = pg_params(args.get(1..).unwrap_or(&[]));
-                        let fields = row_fields(model);
-                        return format!(
-                            "return db_query(&({sql}), {params}).into_iter().map(|__r| {model} {{ {fields} }}).collect();",
-                            sql = sql, params = params, model = model_name, fields = fields
-                        );
-                    }
+                if let Some(expr) = db_map_expr(method, args, ret, program) {
+                    return format!("return {};", expr);
                 }
             }
         }
     }
+    // `let u: Model = db.query_*(...)` — mapped onto the annotated type, so a
+    // server fn can fetch a row and compute on it (e.g. verify a password hash).
+    if let Stmt::Let { name, type_ann: Some(ty), value: Expr::MethodCall { receiver, method, args } } = s {
+        if matches!(receiver.as_ref(), Expr::Ident(n) if n == "db") {
+            if let Some(expr) = db_map_expr(method, args, ty, program) {
+                return format!("let {} = {};", name, expr);
+            }
+        }
+    }
     emit_stmt(s, "let", false)
+}
+
+/// Rust expression that runs `db.query_one`/`db.query` and maps rows onto `ty`:
+/// `query_one` -> `Model` (row required) or `Optional<Model>` (graceful miss);
+/// `query` -> `List<Model>`. Shared by `return` and typed-`let` lowering.
+fn db_map_expr(method: &str, args: &[Expr], ty: &str, program: &XeresProgram) -> Option<String> {
+    let sql = args.first().map(|a| emit_expr(a, false)).unwrap_or_else(|| "\"\"".into());
+    let params = pg_params(args.get(1..).unwrap_or(&[]));
+    if method == "query_one" {
+        if let Some(model_name) = generic_inner("Optional", ty) {
+            let model = program.models.iter().find(|m| m.name == model_name)?;
+            let fields = row_fields(model);
+            return Some(format!(
+                "{{ let __rows = db_query(&({sql}), {params}); \
+                 match __rows.into_iter().next() {{ Some(__r) => Some({model} {{ {fields} }}), None => None }} }}",
+                sql = sql, params = params, model = model_name, fields = fields
+            ));
+        }
+        let model = program.models.iter().find(|m| m.name == ty)?;
+        let fields = row_fields(model);
+        return Some(format!(
+            "{{ let __rows = db_query(&({sql}), {params}); \
+             let __r = __rows.into_iter().next().expect(\"xeres: query_one returned no rows\"); \
+             {model} {{ {fields} }} }}",
+            sql = sql, params = params, model = ty, fields = fields
+        ));
+    }
+    if method == "query" {
+        let model_name = generic_inner("List", ty)?;
+        let model = program.models.iter().find(|m| m.name == model_name)?;
+        let fields = row_fields(model);
+        return Some(format!(
+            "db_query(&({sql}), {params}).into_iter().map(|__r| {model} {{ {fields} }}).collect()",
+            sql = sql, params = params, model = model_name, fields = fields
+        ));
+    }
+    None
 }
 
 /// `name: __r.get("name"), ...` — map a postgres Row's columns onto a model.
@@ -1548,6 +1604,30 @@ fn row_fields(model: &crate::parser::ModelNode) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+// The `hash`/`verify` builtins, server side: Argon2id with a random salt,
+// emitting/parsing a standard PHC string. Added only when the app uses them.
+const CRYPTO_PRELUDE: &str = r#"use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::{SaltString, PasswordHash, rand_core::OsRng};
+
+/// hash() — derive a salted Argon2id password hash (a self-describing PHC string).
+fn hash(s: String) -> String {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(s.as_bytes(), &salt)
+        .expect("xeres: password hashing failed")
+        .to_string()
+}
+/// verify() — check a password against a stored PHC hash (false on any mismatch).
+fn verify(password: String, stored: String) -> bool {
+    match PasswordHash::new(&stored) {
+        Ok(parsed) => Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok(),
+        Err(_) => false,
+    }
+}
+"#;
 
 const DB_PRELUDE: &str = r#"use postgres::types::ToSql;
 

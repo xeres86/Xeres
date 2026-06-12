@@ -1,0 +1,23 @@
+// hash()/verify() server-only builtins + typed `let` binding of a query result
+model User { id: String  username: String  secret password_hash: String }
+
+server fn register(u: String, p: String) -> Int {
+  return db.exec("insert into users (id, username, password_hash) values ($1, $2, $3)", uid(), u, hash(p))
+}
+server fn login(u: String, p: String) -> Bool {
+  let row: User = db.query_one("select id, username, password_hash from users where username = $1", u)
+  return verify(p, row.password_hash)
+}
+
+ui screen S {
+  state un: String = ""
+  state pw: String = ""
+  state msg: String = ""
+  view {
+    column {
+      input "u" bind un
+      password "p" bind pw
+      button "in" -> { try { let ok = await login(un, pw)  msg = (ok ? "ok" : "no") } catch { msg = "err" } }
+    }
+  }
+}

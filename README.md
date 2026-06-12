@@ -297,6 +297,30 @@ an app uses `db`** — db-free apps stay a zero-dependency `std` crate. See
 [`examples/users.xrs`](examples/users.xrs) for the full read / lookup / write
 round-trip.
 
+### Auth: `hash` / `verify` + typed `let`
+
+`hash(password)` and `verify(password, stored)` are **server-only** builtins
+(**R19**) backed by Argon2id — hashing and the hash comparison happen on the
+server, never in the browser. Because a salted hash can't be matched in SQL, a
+login *fetches* the row and verifies it; binding a query result needs a type, so
+`let` takes an optional annotation: `let u: User = db.query_one(...)`. The stored
+hash stays a `secret` (stripped from the client + wire).
+
+```xeres
+server fn register(username: String, password: String) -> Int {
+  return db.exec("insert into users (id, username, password_hash) values ($1, $2, $3)",
+                 uid(), username, hash(password))
+}
+server fn login(username: String, password: String) -> Bool {
+  let u: User = db.query_one("select id, username, password_hash from users where username = $1", username)
+  return verify(password, u.password_hash)    // password_hash read server-side only (R3)
+}
+```
+
+`hash`/`verify` add the `argon2` dependency to the generated server **only when
+used**. The full screen is [`examples/login_db.xrs`](examples/login_db.xrs) —
+verified end-to-end against a live Postgres.
+
 ---
 
 ## The rules (what the compiler guarantees)
@@ -323,6 +347,7 @@ Every program is checked against these. A violation is a compile error.
 | **R16** try-context | `try`/`catch` is browser-only; server failures surface as a failed `await` |
 | **R17** component | a `ui component` is Capitalized; an invocation names a known component with args supplied once, type-compatible, required ones present (R3/R8 still apply inside its view) |
 | **R18** conditional-branch | both branches of `cond ? a : b` have one type (no silent mixing) |
+| **R19** auth-builtin | `hash()` / `verify()` are server-only (no client-side hashing; the secret hash is compared on the server) |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,
@@ -333,7 +358,7 @@ valid only server-side.
 ## How it compiles
 
 ```
-app.xrs ──► lexer ──► parser ──► checker (R1–R18) ──► codegen
+app.xrs ──► lexer ──► parser ──► checker (R1–R19) ──► codegen
                                                        ├─► out/server/         a self-contained Rust crate
                                                        │     ├─ src/main.rs      std-only HTTP server: router,
                                                        │     │                   RPC, secret-stripping, sync

@@ -30,6 +30,12 @@ impl<'a> Interp<'a> {
         if fn_name == "uid" {
             return Ok(Value::Str(uid()));
         }
+        if fn_name == "hash" {
+            return auth_hash(&args);
+        }
+        if fn_name == "verify" {
+            return auth_verify(&args);
+        }
         let f = self
             .program
             .functions
@@ -51,7 +57,16 @@ impl<'a> Interp<'a> {
     ) -> Result<Value, String> {
         for s in stmts {
             match s {
-                Stmt::Let { name, value } => {
+                Stmt::Let { name, type_ann, value } => {
+                    // `let u: Model = db.query_one(...)` maps the row onto Model,
+                    // exactly like a `return db.query_one(...)` does.
+                    if let Expr::MethodCall { receiver, method, args } = value {
+                        if is_db(receiver) && (method == "query_one" || method == "query") {
+                            let v = self.db_query(method, args, env, type_ann.as_deref())?;
+                            env.insert(name.clone(), v);
+                            continue;
+                        }
+                    }
                     let v = self.eval(value, env)?;
                     env.insert(name.clone(), v);
                 }
@@ -63,9 +78,10 @@ impl<'a> Interp<'a> {
                     self.eval(e, env)?;
                 }
                 Stmt::Return(e) => {
-                    // `return db.query_one|query(...)` maps rows onto ret_model
+                    // `return db.query_one|query(...)` maps rows onto ret_model;
+                    // `db.exec` falls through to eval (which runs db_exec).
                     if let Expr::MethodCall { receiver, method, args } = e {
-                        if is_db(receiver) {
+                        if is_db(receiver) && (method == "query_one" || method == "query") {
                             return self.db_query(method, args, env, ret_model);
                         }
                     }
@@ -400,6 +416,53 @@ pub fn uid() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("{:x}", nanos)
+}
+
+// ---- auth builtins (feature-gated) ----
+// hash()/verify() use Argon2id; like `db`, they're behind the `auth` feature so
+// the default std-only build stays dependency-free. Released binaries enable it.
+
+#[cfg(feature = "auth")]
+fn auth_hash(args: &[Value]) -> Result<Value, String> {
+    use argon2::password_hash::{rand_core::OsRng, SaltString};
+    use argon2::{Argon2, PasswordHasher};
+    let s = match args.first() {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Err("hash() expects a string".into()),
+    };
+    let salt = SaltString::generate(&mut OsRng);
+    let h = Argon2::default()
+        .hash_password(s.as_bytes(), &salt)
+        .map_err(|e| format!("hash failed: {}", e))?
+        .to_string();
+    Ok(Value::Str(h))
+}
+
+#[cfg(feature = "auth")]
+fn auth_verify(args: &[Value]) -> Result<Value, String> {
+    use argon2::password_hash::PasswordHash;
+    use argon2::{Argon2, PasswordVerifier};
+    let (password, stored) = match (args.first(), args.get(1)) {
+        (Some(Value::Str(p)), Some(Value::Str(h))) => (p.clone(), h.clone()),
+        _ => return Err("verify() expects (password, hash)".into()),
+    };
+    let ok = match PasswordHash::new(&stored) {
+        Ok(parsed) => Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok(),
+        Err(_) => false,
+    };
+    Ok(Value::Bool(ok))
+}
+
+#[cfg(not(feature = "auth"))]
+fn auth_hash(_args: &[Value]) -> Result<Value, String> {
+    Err("this xeres build has no auth support (hash/verify); released binaries do".into())
+}
+
+#[cfg(not(feature = "auth"))]
+fn auth_verify(_args: &[Value]) -> Result<Value, String> {
+    Err("this xeres build has no auth support (hash/verify); released binaries do".into())
 }
 
 // ---- postgres glue (feature-gated) ----

@@ -71,13 +71,12 @@ fn resolve_type(
             let model = table.models.get(&base_ty)?;
             model.field(field).map(|p| p.data_type.clone())
         }
-        Expr::Call { callee, .. } => {
-            if callee == "uid" {
-                Some("String".into()) // builtin: unique id generator
-            } else {
-                table.fns.get(callee).and_then(|s| s.ret.clone())
-            }
-        }
+        Expr::Call { callee, .. } => match callee.as_str() {
+            // builtins: uid() unique id, hash() password hash, verify() check
+            "uid" | "hash" => Some("String".into()),
+            "verify" => Some("Bool".into()),
+            _ => table.fns.get(callee).and_then(|s| s.ret.clone()),
+        },
         Expr::Unary { op, expr } => match op {
             crate::parser::UnOp::Not => Some("Bool".into()),
             crate::parser::UnOp::Neg => resolve_type(expr, locals, table),
@@ -206,9 +205,9 @@ fn taint_scan(
     let mut tainted_return = false;
     for stmt in stmts {
         match stmt {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, type_ann, value } => {
                 let t = is_tainted(value, locals, table, returns_secret);
-                let ty = resolve_type(value, locals, table);
+                let ty = type_ann.clone().or_else(|| resolve_type(value, locals, table));
                 locals.insert(name.clone(), (ty, t));
             }
             Stmt::Return(e) => {
@@ -246,10 +245,12 @@ fn check_flow_stmts(
     let in_browser = f.env != EnvModifier::Server;
     for stmt in stmts {
         match stmt {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, type_ann, value } => {
                 check_expr(value, locals, f.env, &f.name, f.line, table, errors);
                 check_await(value, false, in_browser, &f.name, f.line, table, errors);
-                let ty = resolve_type(value, locals, table);
+                // an explicit `: Type` wins (it's what lets `db.query_one`
+                // bind onto a model); otherwise infer from the initializer.
+                let ty = type_ann.clone().or_else(|| resolve_type(value, locals, table));
                 locals.insert(name.clone(), (ty, false));
             }
             Stmt::Return(e) => {
@@ -564,9 +565,9 @@ fn check_handler_block(
     let mut local = locals.clone();
     for s in stmts {
         match s {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, type_ann, value } => {
                 check_screen_expr(value, &local, sname, sline, table, errors);
-                let ty = resolve_type(value, &local, table);
+                let ty = type_ann.clone().or_else(|| resolve_type(value, &local, table));
                 local.insert(name.clone(), (ty, false));
             }
             Stmt::Assign { name, value } => {
@@ -737,7 +738,35 @@ fn check_expr(
                 }
             }
         }
-        Expr::Call { args, .. } => {
+        Expr::Call { callee, args } => {
+            // R19 — hash()/verify() are server-only crypto builtins: a password
+            // hash must be computed (and a secret hash compared) on the server,
+            // never in the browser. (Reading the stored `secret` hash is already
+            // R3-blocked client-side; this also stops a pointless client hash.)
+            if (callee == "hash" || callee == "verify") && fn_env != EnvModifier::Server {
+                errors.push(SemanticError {
+                    rule: "R19 auth-builtin",
+                    message: format!(
+                        "`{}(...)` is a server-only builtin; `{}` runs {}. Do password hashing/verification in a `server fn`.",
+                        callee, fn_name, env_label(fn_env)
+                    ),
+                    line: fn_line,
+                });
+            }
+            let want = match callee.as_str() {
+                "hash" => Some(1),
+                "verify" => Some(2),
+                _ => None,
+            };
+            if let Some(n) = want {
+                if args.len() != n {
+                    errors.push(SemanticError {
+                        rule: "R19 auth-builtin",
+                        message: format!("`{}` takes exactly {} argument(s).", callee, n),
+                        line: fn_line,
+                    });
+                }
+            }
             // UI->server calls are allowed now; the `await` requirement is
             // enforced separately by check_await (R4).
             for a in args {
