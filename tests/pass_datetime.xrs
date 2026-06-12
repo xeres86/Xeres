@@ -1,0 +1,27 @@
+// DateTime primitive (epoch ms) + now() builtin: model field, server fn,
+// state init, handler; temporal arithmetic (DateTime - DateTime -> Int,
+// DateTime +/- Int -> DateTime) and comparison.
+model Event { id: String  name: String  at: DateTime }
+
+server fn record(name: String) -> Event {
+  return Event { id: uid(), name: name, at: now() }
+}
+server fn elapsed(since: DateTime) -> Int {
+  return now() - since
+}
+server fn soon(base: DateTime) -> DateTime {
+  return base + 1000
+}
+
+ui screen S {
+  state opened: DateTime = now()
+  state msg: String = ""
+  view {
+    column {
+      button "go" -> {
+        let n = now()
+        if n - opened > 1000 { msg = "old" } else { msg = "fresh" }
+      }
+    }
+  }
+}

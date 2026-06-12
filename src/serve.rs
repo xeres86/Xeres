@@ -121,7 +121,7 @@ fn decode_arg(j: Option<&J>, ty: &str, program: &XeresProgram) -> Value {
     };
     match ty {
         "String" => Value::Str(j.as_string()),
-        "Int" => Value::Int(j.as_i64()),
+        "Int" | "DateTime" => Value::Int(j.as_i64()),
         "Float" => Value::Float(j.as_f64()),
         "Bool" => Value::Bool(j.as_bool()),
         _ => {

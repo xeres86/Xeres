@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 (unreleased) — language foundations
+
+Rounding out the core language so it can express real business logic. Same
+tier-safe boundary; new constructs go through the same checker.
+
+- **`DateTime` primitive + `now()`** — a timestamp type (epoch milliseconds,
+  carried as `i64`/`number` over the wire and DB) and a `now()` builtin in both
+  tiers. Temporal arithmetic: `DateTime - DateTime` is the elapsed `Int` (ms),
+  `DateTime ± Int` shifts a timestamp; comparisons work. Dependency-free.
+
 ## 0.2.0 — view & component layer
 
 A larger, still tier-safe view vocabulary. The server/client boundary is

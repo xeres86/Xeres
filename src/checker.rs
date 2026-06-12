@@ -5,7 +5,7 @@ use crate::parser::{
 };
 use std::collections::{HashMap, HashSet};
 
-const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool"];
+const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime"];
 
 pub struct SemanticError {
     pub rule: &'static str,
@@ -72,9 +72,11 @@ fn resolve_type(
             model.field(field).map(|p| p.data_type.clone())
         }
         Expr::Call { callee, .. } => match callee.as_str() {
-            // builtins: uid() unique id, hash() password hash, verify() check
+            // builtins: uid() unique id, hash() password hash, verify() check,
+            // now() current timestamp.
             "uid" | "hash" => Some("String".into()),
             "verify" => Some("Bool".into()),
+            "now" => Some("DateTime".into()),
             _ => table.fns.get(callee).and_then(|s| s.ret.clone()),
         },
         Expr::Unary { op, expr } => match op {
@@ -90,6 +92,13 @@ fn resolve_type(
             match (lt.as_deref(), rt.as_deref()) {
                 (Some("Int"), Some("Int")) => Some("Int".into()),
                 (Some("Float"), _) | (_, Some("Float")) => Some("Float".into()),
+                // temporal: `DateTime - DateTime` is the elapsed milliseconds
+                // (Int); shifting a `DateTime` by `Int` ms yields a `DateTime`.
+                (Some("DateTime"), Some("DateTime")) if matches!(*op, BinOp::Sub) => Some("Int".into()),
+                (Some("DateTime"), Some("Int")) if matches!(*op, BinOp::Add | BinOp::Sub) => {
+                    Some("DateTime".into())
+                }
+                (Some("Int"), Some("DateTime")) if matches!(*op, BinOp::Add) => Some("DateTime".into()),
                 _ => None,
             }
         }

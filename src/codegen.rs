@@ -383,6 +383,12 @@ fn uid() -> String {
     format!("{:x}", n)
 }
 
+/// The `now()` builtin, server side: epoch milliseconds (matches `Date.now()`).
+fn now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
 /// A JSON value + a recursive-descent parser (std-only). Shared by the RPC
 /// router (to decode args, including model objects) and the sync endpoint.
 enum J { Null, Bool(bool), Num(f64), Str(String), Arr(Vec<J>), Obj(Vec<(String, J)>) }
@@ -1093,6 +1099,9 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
         Expr::Bool(b) => b.to_string(),
         Expr::Field { base, field } => format!("{}.{}", emit_h_expr(base, screen, sv), field),
         Expr::Call { callee, args } => {
+            if callee == "now" && args.is_empty() {
+                return "Date.now()".to_string();
+            }
             let a = args
                 .iter()
                 .map(|x| emit_h_expr(x, screen, sv))
@@ -1475,6 +1484,10 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
         Expr::Ident(v) => v.clone(),
         Expr::Field { base, field } => format!("{}.{}", emit_expr(base, ts), field),
         Expr::Call { callee, args } => {
+            // now() — epoch millis. Browser: Date.now(); server: the now() helper.
+            if callee == "now" && args.is_empty() {
+                return if ts { "Date.now()".to_string() } else { "now()".to_string() };
+            }
             let a = args.iter().map(|x| emit_expr(x, ts)).collect::<Vec<_>>().join(", ");
             format!("{}({})", callee, a)
         }
@@ -1785,6 +1798,8 @@ fn map_rust_type(name: &str) -> String {
         "Int" => "i64".to_string(),
         "Float" => "f64".to_string(),
         "Bool" => "bool".to_string(),
+        // DateTime is epoch milliseconds — an i64 over the wire/db.
+        "DateTime" => "i64".to_string(),
         other => other.to_string(),
     }
 }
@@ -1798,7 +1813,7 @@ fn map_ts_type(name: &str) -> String {
     }
     match name {
         "String" => "string".to_string(),
-        "Int" | "Float" => "number".to_string(),
+        "Int" | "Float" | "DateTime" => "number".to_string(),
         "Bool" => "boolean".to_string(),
         other => other.to_string(),
     }

@@ -45,6 +45,9 @@ impl<'a> Interp<'a> {
         if fn_name == "verify" {
             return auth_verify(&args);
         }
+        if fn_name == "now" {
+            return Ok(Value::Int(now_millis()));
+        }
         let f = self
             .program
             .functions
@@ -482,6 +485,12 @@ pub fn uid() -> String {
     format!("{:x}", nanos)
 }
 
+/// The `now()` builtin: epoch milliseconds (matches the server + `Date.now()`).
+fn now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
 // ---- auth builtins (feature-gated) ----
 // hash()/verify() use Argon2id; like `db`, they're behind the `auth` feature so
 // the default std-only build stays dependency-free. Released binaries enable it.
@@ -543,7 +552,7 @@ fn db_client() -> Result<postgres::Client, String> {
 #[cfg(feature = "db")]
 fn pg_get(row: &postgres::Row, col: &str, ty: &str) -> Value {
     match ty {
-        "Int" => row.try_get::<_, i64>(col).map(Value::Int).unwrap_or(Value::Null),
+        "Int" | "DateTime" => row.try_get::<_, i64>(col).map(Value::Int).unwrap_or(Value::Null),
         "Float" => row.try_get::<_, f64>(col).map(Value::Float).unwrap_or(Value::Null),
         "Bool" => row.try_get::<_, bool>(col).map(Value::Bool).unwrap_or(Value::Null),
         _ => row.try_get::<_, String>(col).map(Value::Str).unwrap_or(Value::Null),
