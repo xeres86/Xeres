@@ -559,7 +559,7 @@ fn jparse(s: &str) -> J { let b: Vec<char> = s.chars().collect(); let mut i = 0;
 "#;
 
 const SERVER_MAIN: &str = r#"fn reason(code: u16) -> &'static str {
-    match code { 200 => "OK", 404 => "Not Found", 501 => "Not Implemented", _ => "OK" }
+    match code { 200 => "OK", 403 => "Forbidden", 404 => "Not Found", 501 => "Not Implemented", _ => "OK" }
 }
 
 fn serve_static(path: &str) -> (u16, &'static str, String) {
@@ -588,6 +588,46 @@ fn dispatch(method: &str, path: &str, body: &str) -> (u16, &'static str, String)
     serve_static(path)
 }
 
+fn cookie_value(req: &str, name: &str) -> Option<String> {
+    for line in req.lines() {
+        if line.get(..7).map_or(false, |p| p.eq_ignore_ascii_case("cookie:")) {
+            for pair in line[7..].split(';') {
+                if let Some(v) = pair.trim().strip_prefix(&format!("{}=", name)) { return Some(v.to_string()); }
+            }
+        }
+    }
+    None
+}
+
+fn header_value(req: &str, name: &str) -> Option<String> {
+    let key = format!("{}:", name);
+    for line in req.lines() {
+        if line.get(..key.len()).map_or(false, |p| p.eq_ignore_ascii_case(&key)) {
+            return Some(line[key.len()..].trim().to_string());
+        }
+    }
+    None
+}
+
+fn rand_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mk = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    format!("{:016x}{:016x}", mk(), mk())
+}
+
+// Default S1/S2 security headers, always emitted. HSTS is honored once TLS is
+// terminated in front; no Access-Control-Allow-Origin (the app is same-origin).
+const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n";
+
+fn write_response(stream: &mut TcpStream, code: u16, ctype: &str, payload: &str, cookies: &str) -> std::io::Result<()> {
+    let resp = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        code, reason(code), ctype, SECURITY_HEADERS, cookies, payload.as_bytes().len(), payload
+    );
+    stream.write_all(resp.as_bytes())?;
+    stream.flush()
+}
+
 fn handle_conn(stream: &mut TcpStream) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf)?;
@@ -598,16 +638,22 @@ fn handle_conn(stream: &mut TcpStream) -> std::io::Result<()> {
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("/");
     let body = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
+    let csrf_cookie = cookie_value(&req, "xeres_csrf");
+    // Default S1 CSRF: a state-changing RPC fn call must echo the double-submit
+    // token (xeres_csrf cookie value resent as X-CSRF-Token). Sync is exempt.
+    if method == "POST" && path.starts_with("/__xeres/") && !path.starts_with("/__xeres/sync/") {
+        let header = header_value(&req, "x-csrf-token");
+        let ok = matches!((&csrf_cookie, &header), (Some(c), Some(h)) if !c.is_empty() && c == h);
+        if !ok {
+            return write_response(stream, 403, "application/json", "{\"error\":\"csrf token missing or invalid\"}", "");
+        }
+    }
     let (code, ctype, payload) = dispatch(method, path, body);
-    // Default S1: security headers on every response. Strict CSP forbids inline
-    // script (backstops R22); inline style is allowed for the language's <style>
-    // blocks and style="" attributes.
-    let resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        code, reason(code), ctype, payload.as_bytes().len(), payload
-    );
-    stream.write_all(resp.as_bytes())?;
-    stream.flush()
+    let mut cookies = String::new();
+    if csrf_cookie.is_none() {
+        cookies.push_str(&format!("Set-Cookie: xeres_csrf={}; Secure; SameSite=Strict; Path=/\r\n", rand_token()));
+    }
+    write_response(stream, code, ctype, &payload, &cookies)
 }
 
 fn main() {
@@ -1485,10 +1531,13 @@ const UID_FN: &str = r#"function uid(): string {
 "#;
 
 const RPC_RUNTIME: &str = "\
+function __csrf(): string {
+  return (document.cookie.match(/(?:^|;\\s*)xeres_csrf=([^;]*)/) || [])[1] || \"\";
+}
 async function __rpc<T>(name: string, args: unknown[]): Promise<T> {
   const res = await fetch(`/__xeres/${name}`, {
     method: \"POST\",
-    headers: { \"content-type\": \"application/json\" },
+    headers: { \"content-type\": \"application/json\", \"x-csrf-token\": __csrf() },
     body: JSON.stringify(args),
   });
   if (!res.ok) throw new Error(`xeres rpc ${name} failed: ${res.status}`);

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 (unreleased) — security hardening, wave 2
+
+Finishing the secure-by-default posture and the remaining capability gaps.
+
+- **CSRF, HSTS & tighter CORS (Default S1/S2)** — every state-changing RPC fn
+  call now requires a double-submit CSRF token: the server issues a JS-readable
+  `xeres_csrf` cookie and the generated client resends it as the `X-CSRF-Token`
+  header on every call (a mismatch/absent token is a `403`). The developer never
+  writes any of it. `Strict-Transport-Security` is now always sent (honored once
+  TLS is terminated in front), and the blanket `Access-Control-Allow-Origin: *`
+  is removed — the app is same-origin. Enforced in both the `xeres serve` runtime
+  and the ejected server; sync replication is exempt. Proven live (403 with no /
+  mismatched token, 200 on a match).
+
 ## 0.3.0 — 2026-06-15 — language foundations + security hardening (R20–R25)
 
 Rounding out the core language so it can express real business logic. Same
