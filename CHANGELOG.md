@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased) — language foundations
+## 0.3.0 — 2026-06-15 — language foundations + security hardening (R20–R25)
 
 Rounding out the core language so it can express real business logic. Same
 tier-safe boundary; new constructs go through the same checker.
