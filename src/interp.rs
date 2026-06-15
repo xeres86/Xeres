@@ -90,6 +90,47 @@ impl<'a> Interp<'a> {
         Ok(Value::Null)
     }
 
+    /// `Endpoint.get(path)` / `Endpoint.post(path, body)` — host-fixed outbound
+    /// HTTP (R26). The base comes from the declaration; a declared secret is
+    /// loaded from `<NAME>_<FIELD>` and sent as a bearer token. The host can
+    /// never be changed by the caller — only the path is appended.
+    fn endpoint_method(
+        &self,
+        name: &str,
+        method: &str,
+        args: &[Expr],
+        env: &HashMap<String, Value>,
+    ) -> Result<Value, String> {
+        let ep = self
+            .program
+            .endpoints
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or("unknown endpoint")?;
+        let path = match self.eval(args.first().ok_or("endpoint needs a path")?, env)? {
+            Value::Str(s) => s,
+            _ => return Err("endpoint path must be a string".into()),
+        };
+        let url = format!("{}{}", ep.base, path);
+        let bearer = match ep.secrets.first() {
+            Some((f, _)) => std::env::var(format!("{}_{}", name.to_uppercase(), f.to_uppercase()))
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        match method {
+            "get" => endpoint_get(&url, &bearer),
+            "post" => {
+                let body = match args.get(1).map(|a| self.eval(a, env)).transpose()? {
+                    Some(Value::Str(s)) => s,
+                    Some(other) => self.wire_json(&other),
+                    None => String::new(),
+                };
+                endpoint_post(&url, &body, &bearer)
+            }
+            other => Err(format!("endpoint has no verb `{}`", other)),
+        }
+    }
+
     /// Call a server (or shared) fn by name with positional args.
     pub fn call(&self, fn_name: &str, args: Vec<Value>) -> Result<Value, String> {
         if fn_name == "uid" {
@@ -325,6 +366,11 @@ impl<'a> Interp<'a> {
                 }
                 if matches!(receiver.as_ref(), Expr::Ident(n) if n == "log") {
                     return self.log_method(method, args, env);
+                }
+                if let Expr::Ident(n) = receiver.as_ref() {
+                    if self.program.endpoints.iter().any(|e| &e.name == n) {
+                        return self.endpoint_method(n, method, args, env);
+                    }
                 }
                 if is_db(receiver) && method == "exec" {
                     return self.db_exec(args, env);
@@ -772,6 +818,43 @@ fn session_set_cookie(_id: &str) -> String {
 #[cfg(not(feature = "auth"))]
 fn session_clear_cookie() -> String {
     String::new()
+}
+
+// ---- endpoint egress (feature-gated `http`) ----
+// Outbound HTTP via ureq, only to a declared endpoint's fixed host (R26).
+
+#[cfg(feature = "http")]
+fn endpoint_get(url: &str, bearer: &str) -> Result<Value, String> {
+    let mut req = ureq::get(url);
+    if !bearer.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {}", bearer));
+    }
+    match req.call() {
+        Ok(resp) => Ok(Value::Str(resp.into_string().unwrap_or_default())),
+        Err(e) => Err(format!("endpoint GET failed: {}", e)),
+    }
+}
+
+#[cfg(feature = "http")]
+fn endpoint_post(url: &str, body: &str, bearer: &str) -> Result<Value, String> {
+    let mut req = ureq::post(url);
+    if !bearer.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {}", bearer));
+    }
+    match req.send_string(body) {
+        Ok(resp) => Ok(Value::Int(resp.status() as i64)),
+        Err(ureq::Error::Status(code, _)) => Ok(Value::Int(code as i64)),
+        Err(e) => Err(format!("endpoint POST failed: {}", e)),
+    }
+}
+
+#[cfg(not(feature = "http"))]
+fn endpoint_get(_url: &str, _bearer: &str) -> Result<Value, String> {
+    Err("this xeres build has no http support (endpoint); released binaries do".into())
+}
+#[cfg(not(feature = "http"))]
+fn endpoint_post(_url: &str, _body: &str, _bearer: &str) -> Result<Value, String> {
+    Err("this xeres build has no http support (endpoint); released binaries do".into())
 }
 
 // ---- postgres glue (feature-gated) ----

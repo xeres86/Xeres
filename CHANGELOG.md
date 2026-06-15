@@ -20,6 +20,17 @@ Finishing the secure-by-default posture and the remaining capability gaps.
   passed to `log`, so leaking a credential through logs is a compile error (use
   `declassify(...)` to release something deliberately). Dependency-free, in both
   the interpreter and the ejected server. Fixtures: pass_log, fail_log_secret.
+- **`endpoint` egress allowlist (R26, A10 SSRF)** — outbound HTTP is expressible
+  *only* through a declared `endpoint` whose host is fixed at declaration
+  (`endpoint Notify { base "https://…" secret key: String }`). Call sites append
+  a **literal** path (`Notify.post("/path", body) -> Int`, `Notify.get("/path")
+  -> String`) but can never change the host — so `http.get(arbitraryUrl)` doesn't
+  exist, and the program's entire egress surface is the set of `endpoint`
+  declarations (statically auditable). Server-only (Located): calling an endpoint
+  from the browser is a compile error, and its secret (env-loaded as
+  `<NAME>_<FIELD>`, sent as a bearer token) never crosses the wire. Behaviour in
+  both backends via `ureq` behind a new optional `http` feature (in `full`).
+  Fixtures: pass_endpoint, fail_endpoint_in_ui, fail_endpoint_path.
 
 ## 0.3.0 — 2026-06-15 — language foundations + security hardening (R20–R25)
 

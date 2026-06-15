@@ -16,10 +16,24 @@ use crate::parser::{
 };
 use std::collections::{HashMap, HashSet};
 
+thread_local! {
+    /// Declared `endpoint` names for the program being generated, so `emit_expr`
+    /// can recognize `Name.get/post(...)` egress calls without threading the
+    /// program through every emitter. Set once at the start of `generate`.
+    static ENDPOINTS: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+}
+
+fn is_endpoint_name(n: &str) -> bool {
+    ENDPOINTS.with(|e| e.borrow().contains(n))
+}
+
 pub fn generate(
     program: &XeresProgram,
     _returns_secret: &HashMap<String, bool>,
 ) -> (String, String, String, String) {
+    ENDPOINTS.with(|e| {
+        *e.borrow_mut() = program.endpoints.iter().map(|x| x.name.clone()).collect();
+    });
     (
         gen_server(program),
         gen_client(program),
@@ -38,6 +52,9 @@ fn gen_cargo(program: &XeresProgram) -> String {
     }
     if uses_auth(program) {
         deps.push_str("argon2 = { version = \"0.5\", features = [\"std\"] }\n");
+    }
+    if !program.endpoints.is_empty() {
+        deps.push_str("ureq = \"2\"\n");
     }
     let dep_section = if deps.is_empty() {
         "\n".to_string()
@@ -220,6 +237,33 @@ fn gen_server(program: &XeresProgram) -> String {
     }
     if uses_auth(program) {
         out.push_str(CRYPTO_PRELUDE);
+        out.push('\n');
+    }
+    // Egress endpoints (R26): the ureq helpers + a fixed base const and bearer
+    // loader per declaration. The host is baked in here, never caller-supplied.
+    if !program.endpoints.is_empty() {
+        out.push_str(HTTP_PRELUDE);
+        out.push('\n');
+        for ep in &program.endpoints {
+            out.push_str(&format!(
+                "const __EP_{}_BASE: &str = \"{}\";\n",
+                ep.name.to_uppercase(),
+                ep.base
+            ));
+            let bearer = match ep.secrets.first() {
+                Some((f, _)) => format!(
+                    "std::env::var(\"{}_{}\").unwrap_or_default()",
+                    ep.name.to_uppercase(),
+                    f.to_uppercase()
+                ),
+                None => "String::new()".to_string(),
+            };
+            out.push_str(&format!(
+                "fn __ep_{}_bearer() -> String {{ {} }}\n",
+                ep.name.to_lowercase(),
+                bearer
+            ));
+        }
         out.push('\n');
     }
 
@@ -1736,6 +1780,25 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     )
                 };
             }
+            // endpoint egress: `Name.get(path)` / `Name.post(path, body)` (R26).
+            // Host is the declared `base` (a generated const); only the path is
+            // appended. Server-only, so the `ts` branch is unreachable.
+            if let Expr::Ident(n) = receiver.as_ref() {
+                if is_endpoint_name(n) {
+                    if ts {
+                        return "\"\"".to_string();
+                    }
+                    let path = args.first().map(|a| emit_expr(a, ts)).unwrap_or_else(|| "String::new()".into());
+                    let base = format!("__EP_{}_BASE", n.to_uppercase());
+                    let bearer = format!("__ep_{}_bearer()", n.to_lowercase());
+                    return if method == "post" {
+                        let body = args.get(1).map(|a| emit_expr(a, ts)).unwrap_or_else(|| "String::new()".into());
+                        format!("http_post({}, &({}), &({}), &{})", base, path, body, bearer)
+                    } else {
+                        format!("http_get({}, &({}), &{})", base, path, bearer)
+                    };
+                }
+            }
             // `optional.or(default)` — TS `??`, Rust `unwrap_or`.
             if method == "or" && args.len() == 1 {
                 let r = emit_expr(receiver, ts);
@@ -2001,6 +2064,25 @@ fn verify(password: String, stored: String) -> bool {
             .verify_password(password.as_bytes(), &parsed)
             .is_ok(),
         Err(_) => false,
+    }
+}
+"#;
+
+const HTTP_PRELUDE: &str = r#"// Egress (R26): outbound HTTP only to a declared endpoint's fixed host.
+fn http_get(base: &str, path: &str, bearer: &str) -> String {
+    let url = format!("{}{}", base, path);
+    let mut req = ureq::get(&url);
+    if !bearer.is_empty() { req = req.set("Authorization", &format!("Bearer {}", bearer)); }
+    req.call().ok().and_then(|r| r.into_string().ok()).unwrap_or_default()
+}
+fn http_post(base: &str, path: &str, body: &str, bearer: &str) -> i64 {
+    let url = format!("{}{}", base, path);
+    let mut req = ureq::post(&url);
+    if !bearer.is_empty() { req = req.set("Authorization", &format!("Bearer {}", bearer)); }
+    match req.send_string(body) {
+        Ok(r) => r.status() as i64,
+        Err(ureq::Error::Status(code, _)) => code as i64,
+        Err(_) => 0,
     }
 }
 "#;

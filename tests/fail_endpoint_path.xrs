@@ -1,0 +1,10 @@
+// R26 — the path must be a string literal: the host is fixed by `base` and only
+// a literal path may be appended, so the egress surface stays static. A
+// caller-supplied (dynamic) path is rejected.
+endpoint Api {
+  base "https://api.example.gov"
+}
+
+server fn fetch(p: String) -> String {
+  return Api.get(p)
+}

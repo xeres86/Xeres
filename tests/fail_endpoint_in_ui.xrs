@@ -1,0 +1,9 @@
+// R26 — calling an endpoint from the browser tier is rejected (Located): the
+// host and its secret must never reach the client.
+endpoint Notify {
+  base "https://api.notifications.example.gov"
+}
+
+ui fn leak() -> Int {
+  return Notify.post("/x", "y")
+}

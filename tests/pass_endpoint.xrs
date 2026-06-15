@@ -1,0 +1,15 @@
+// R26 — egress allowlist. Outbound HTTP is expressible only through a declared
+// `endpoint` whose host is fixed by `base`; the call site appends a literal
+// path. The secret is server-only (env-loaded, never on the wire).
+endpoint Notify {
+  base "https://api.notifications.example.gov"
+  secret key: String
+}
+
+server fn send(ref: String) -> Int {
+  return Notify.post("/v2/notifications/email", ref)
+}
+
+server fn health() -> String {
+  return Notify.get("/health")
+}

@@ -188,6 +188,20 @@ pub struct EnumNode {
     pub line: usize,
 }
 
+/// `endpoint Name { base "https://host" secret key: String }` — the egress
+/// allowlist (R26, anti-SSRF). Outbound HTTP is expressible *only* through a
+/// declared endpoint whose host is fixed at declaration; there is no
+/// `http.get(arbitraryUrl)`, so the program's entire egress surface is the set
+/// of `endpoint` declarations (statically auditable). Server-only (Located).
+#[derive(Debug)]
+pub struct EndpointNode {
+    pub name: String,
+    pub base: String,
+    /// secret fields (name, type) — server-only, env-loaded, never on the wire.
+    pub secrets: Vec<(String, String)>,
+    pub line: usize,
+}
+
 #[derive(Debug)]
 pub struct XeresProgram {
     pub models: Vec<ModelNode>,
@@ -195,6 +209,7 @@ pub struct XeresProgram {
     pub functions: Vec<FunctionNode>,
     pub states: Vec<SyncedStateNode>,
     pub screens: Vec<ScreenNode>,
+    pub endpoints: Vec<EndpointNode>,
 }
 
 // --- The Parser ---
@@ -238,6 +253,7 @@ impl<'a> Parser<'a> {
     pub fn parse_program(&mut self) -> XeresProgram {
         let mut program = XeresProgram {
             models: vec![], enums: vec![], functions: vec![], states: vec![], screens: vec![],
+            endpoints: vec![],
         };
 
         while self.current_token != Token::EOF {
@@ -245,6 +261,13 @@ impl<'a> Parser<'a> {
             if self.cur_is_kw("enum") {
                 if let Some(e) = self.parse_enum() {
                     program.enums.push(e);
+                }
+                continue;
+            }
+            // `endpoint` is a contextual keyword (top-level only).
+            if self.cur_is_kw("endpoint") {
+                if let Some(ep) = self.parse_endpoint() {
+                    program.endpoints.push(ep);
                 }
                 continue;
             }
@@ -344,6 +367,54 @@ impl<'a> Parser<'a> {
             self.next_token();
         }
         Some(EnumNode { name, variants, line })
+    }
+
+    /// `endpoint Name { base "https://host" secret key: String … }` (R26).
+    fn parse_endpoint(&mut self) -> Option<EndpointNode> {
+        let line = self.cur_line;
+        self.next_token(); // consume 'endpoint'
+        let name = match &self.current_token {
+            Token::Identifier(n) => n.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume name
+        if self.current_token != Token::LBrace {
+            return None;
+        }
+        self.next_token(); // consume '{'
+        let mut base = String::new();
+        let mut secrets = Vec::new();
+        while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+            if self.cur_is_kw("base") {
+                self.next_token(); // consume 'base'
+                match &self.current_token {
+                    Token::Str(s) => {
+                        base = s.clone();
+                        self.next_token();
+                    }
+                    _ => return None,
+                }
+            } else if self.current_token == Token::Secret {
+                self.next_token(); // consume 'secret'
+                let fname = match &self.current_token {
+                    Token::Identifier(n) => n.clone(),
+                    _ => return None,
+                };
+                self.next_token(); // consume field name
+                if self.current_token != Token::Colon {
+                    return None;
+                }
+                self.next_token(); // consume ':'
+                let ty = self.parse_type()?;
+                secrets.push((fname, ty));
+            } else {
+                self.next_token(); // skip anything unexpected
+            }
+        }
+        if self.current_token == Token::RBrace {
+            self.next_token();
+        }
+        Some(EndpointNode { name, base, secrets, line })
     }
 
     fn parse_function(&mut self) -> Option<FunctionNode> {
