@@ -1128,18 +1128,30 @@ impl ScreenEmit {
                     }
                     None => {}
                 }
-                // input placeholder from a string arg; `password` masks input
+                // void elements: input type, image src, or input placeholder.
                 if void {
                     if tag == "password" {
                         s.push_str(" type=\"password\"");
                     }
-                    if let Some(Expr::Str(ph)) = arg {
+                    if tag == "checkbox" {
+                        s.push_str(" type=\"checkbox\"");
+                    }
+                    if tag == "image" {
+                        // the (string) arg is the image src — escaped (R22).
+                        if let Some(e) = arg {
+                            s.push_str(" src=\"${__esc(");
+                            s.push_str(&emit_expr(e, true));
+                            s.push_str(")}\"");
+                        }
+                    } else if let Some(Expr::Str(ph)) = arg {
                         s.push_str(" placeholder=\"");
                         s.push_str(ph);
                         s.push('"');
                     }
                 }
-                // two-way bind: value reflects state; oninput updates state.
+                // two-way bind. `checkbox` reflects a Bool via `checked` (runtime
+                // reads node.checked); `textarea` reflects via element content
+                // (added below); everything else reflects via the `value` attr.
                 if let Some(var) = bind {
                     let bname = format!("{}:{}", self.screen, var);
                     self.handlers.push_str(&format!(
@@ -1148,32 +1160,54 @@ impl ScreenEmit {
                         sc = self.screen,
                         v = var
                     ));
-                    s.push_str(" value=\"${__esc(");
-                    s.push_str(var);
-                    s.push_str(")}\" data-bind=\"");
-                    s.push_str(&bname);
-                    s.push('"');
+                    if tag == "checkbox" {
+                        s.push_str(" ${");
+                        s.push_str(var);
+                        s.push_str(" ? \"checked\" : \"\"} data-bind=\"");
+                        s.push_str(&bname);
+                        s.push('"');
+                    } else if tag == "textarea" {
+                        s.push_str(" data-bind=\"");
+                        s.push_str(&bname);
+                        s.push('"');
+                    } else {
+                        s.push_str(" value=\"${__esc(");
+                        s.push_str(var);
+                        s.push_str(")}\" data-bind=\"");
+                        s.push_str(&bname);
+                        s.push('"');
+                    }
                 }
                 if void {
                     s.push_str(" />`");
                     return s;
                 }
                 s.push('>');
-                match arg {
-                    Some(Expr::Str(t)) => s.push_str(t),
-                    // `raw(...)` — the single audited un-escaped HTML sink (R22).
-                    Some(Expr::Raw(inner)) => {
-                        s.push_str("${");
-                        s.push_str(&emit_expr(inner, true));
-                        s.push('}');
-                    }
-                    // Default: every interpolated value is HTML-escaped (R22).
-                    Some(e) => {
+                // A bound `textarea` carries its value as element content; every
+                // other tag emits its positional arg.
+                if tag == "textarea" {
+                    if let Some(var) = bind {
                         s.push_str("${__esc(");
-                        s.push_str(&emit_expr(e, true));
+                        s.push_str(var);
                         s.push_str(")}");
                     }
-                    None => {}
+                } else {
+                    match arg {
+                        Some(Expr::Str(t)) => s.push_str(t),
+                        // `raw(...)` — the single audited un-escaped HTML sink (R22).
+                        Some(Expr::Raw(inner)) => {
+                            s.push_str("${");
+                            s.push_str(&emit_expr(inner, true));
+                            s.push('}');
+                        }
+                        // Default: every interpolated value is HTML-escaped (R22).
+                        Some(e) => {
+                            s.push_str("${__esc(");
+                            s.push_str(&emit_expr(e, true));
+                            s.push_str(")}");
+                        }
+                        None => {}
+                    }
                 }
                 for c in children {
                     s.push_str("${");
@@ -1457,10 +1491,10 @@ function __esc(v: unknown): string {
 }
 type XHandler = (key?: string) => void | Promise<void>;
 const __handlers = new Map<string, XHandler>();
-const __binds = new Map<string, (v: string) => void>();
+const __binds = new Map<string, (v: string | boolean) => void>();
 let __draw: (() => void) | null = null;   // set by mount; called on reactive updates
 export function on(name: string, fn: XHandler): void { __handlers.set(name, fn); }
-export function onBind(name: string, fn: (v: string) => void): void { __binds.set(name, fn); }
+export function onBind(name: string, fn: (v: string | boolean) => void): void { __binds.set(name, fn); }
 
 // Render a screen into `el`, then wire events. Clicks re-render afterwards;
 // input binds update state WITHOUT re-rendering (so the field keeps focus).
@@ -1474,7 +1508,10 @@ export function mount(el: HTMLElement, render: () => string): void {
     });
     el.querySelectorAll<HTMLInputElement>("[data-bind]").forEach((node) => {
       const name = node.getAttribute("data-bind") || "";
-      node.oninput = () => { const b = __binds.get(name); if (b) b(node.value); };
+      const b = __binds.get(name);
+      if (!b) return;
+      if (node.type === "checkbox") { node.onchange = () => b(node.checked); }
+      else { node.oninput = () => b(node.value); }
     });
   };
   __draw = draw;
@@ -2237,6 +2274,8 @@ fn map_tag(tag: &str) -> &str {
         "paragraph" => "p",
         "button" => "button",
         "password" => "input",
-        other => other,
+        "checkbox" => "input",  // type="checkbox" added in codegen
+        "image" => "img",
+        other => other,         // text, input, textarea, select, option …
     }
 }

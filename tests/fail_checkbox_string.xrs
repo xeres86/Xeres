@@ -1,0 +1,9 @@
+// R13 — `checkbox` binds a `Bool`; binding it to a `String` state is rejected.
+ui screen S {
+  state name: String = ""
+  view {
+    column {
+      checkbox bind name
+    }
+  }
+}

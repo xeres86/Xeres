@@ -1,0 +1,15 @@
+// P3 — form controls: `textarea` (bind String, multiline), `checkbox`
+// (bind Bool), and `image` (escaped src). Each routes through the R22 escape path.
+ui screen Profile {
+  state bio: String = ""
+  state subscribed: Bool = false
+  view {
+    column {
+      heading "Profile"
+      textarea bind bio
+      checkbox bind subscribed
+      text "Subscribe to the newsletter"
+      image "https://cdn.example.com/avatar.png"
+    }
+  }
+}

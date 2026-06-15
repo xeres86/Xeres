@@ -617,20 +617,22 @@ fn check_view(
     errors: &mut Vec<SemanticError>,
 ) {
     match v {
-        ViewNode::Element { arg, bind, event, children, .. } => {
+        ViewNode::Element { tag, arg, bind, event, children, .. } => {
             if let Some(a) = arg {
                 check_screen_expr(a, locals, sname, sline, table, errors);
             }
-            // R13 — `bind x` requires x to be a String `state` cell.
+            // R13 — `bind x` requires a matching `state` cell: `checkbox` binds a
+            // `Bool`, every other control (input/password/textarea/select) a `String`.
             if let Some(var) = bind {
+                let want = if tag == "checkbox" { "Bool" } else { "String" };
                 let ok = states.contains(var)
-                    && matches!(locals.get(var), Some((Some(t), _)) if t == "String");
+                    && matches!(locals.get(var), Some((Some(t), _)) if t == want);
                 if !ok {
                     errors.push(SemanticError {
                         rule: "R13 input-binding",
                         message: format!(
-                            "`bind {}` in screen `{}` requires a `state {}: String` cell.",
-                            var, sname, var
+                            "`bind {}` on `{}` in screen `{}` requires a `state {}: {}` cell.",
+                            var, tag, sname, var, want
                         ),
                         line: sline,
                     });

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 (unreleased) — view & navigation primitives
+
+The remaining capability gaps for line-of-business apps.
+
+- **Form controls (P3, part 1)** — `textarea` (bind `String`, multiline; value is
+  the element content), `checkbox` (bind `Bool`, reflected via `checked` and read
+  back from `node.checked`), and `image` (escaped `src`). Each routes through the
+  R22 escape path, and **R13 is now type-aware** — `checkbox` requires a `Bool`
+  state, the others a `String`. Fixtures: pass_form_controls, fail_checkbox_string.
+  (Still to come: `select`, `radio`, and `link` — `link` depends on the router.)
+
 ## 0.4.0 — 2026-06-15 — security wave 2 (CSRF, R26 SSRF, R27 logging) + on-load
 
 Finishing the secure-by-default posture and the remaining capability gaps.
