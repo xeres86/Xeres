@@ -43,6 +43,21 @@ tier-safe boundary; new constructs go through the same checker.
   user values may flow only through the trailing `$1`, `$2`, … parameters. So
   `"… where name='" + name + "'"` simply does not compile — the unsafe form is
   gone, not merely discouraged.
+- **Server-only `session` capability + authn-required (R24)** — a Located,
+  server-only `session` (the same machinery as `db`): `session.actor` reads the
+  authenticated actor id (`Optional<String>`) from a verified cookie, and
+  `session.login(id)` / `session.logout()` mint and clear it. The cookie is
+  **HMAC-SHA256-signed** over a server secret (`SESSION_SECRET`) and set
+  `HttpOnly; Secure; SameSite=Strict`, so it can't be read by JS, forged, or
+  sent cross-site. New modifier **`auth server fn`** and rule **R24**: an `auth`
+  fn must be server-side and must consult `session` — a protected fn that never
+  reads `session.actor` (the "I forgot the auth check" bug) does not compile, and
+  touching `session` from the browser is rejected (Located). Proven live on the
+  `xeres serve` interpreter: login mints the signed cookie, the actor populates on
+  the next request, and a tampered cookie is rejected. Signing uses `hmac`/`sha2`
+  behind the existing `auth` feature. Eject (`xeres build`) guards a session app
+  with a `compile_error!` for now — the interpreter is the supported session
+  runtime. Fixtures: pass_session, fail_protected_no_auth, fail_session_in_ui.
 
 ## 0.2.0 — view & component layer
 

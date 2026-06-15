@@ -1,0 +1,5 @@
+// R24 — `session` is server-only (Located). Reading the actor in a ui fn would
+// leak the capability to the browser, so it is rejected.
+ui fn leak() -> Optional<String> {
+  return session.actor
+}

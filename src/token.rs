@@ -23,6 +23,7 @@ pub enum Token {
     State,      // state
     Declassify, // declassify  (reserved: the single audited downgrade)
     Raw,        // raw  (the single audited un-escaped HTML sink in a view)
+    Auth,       // auth  (server-fn modifier: must consult `session` — R24)
     Await,      // await  (suspend on a server-fn RPC, browser-side only)
     Try,        // try   (handle a failed await/RPC, browser-side only)
     Catch,      // catch

@@ -43,7 +43,12 @@ fn handle_conn(mut stream: TcpStream, program: &XeresProgram, static_dir: &str) 
     let path = parts.next().unwrap_or("/");
     let body = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
 
-    let (code, ctype, payload) = dispatch(method, path, body, program, static_dir);
+    // Recover the actor from a verified session cookie (None = anonymous).
+    let actor = cookie_value(&req, "xeres_session").and_then(|c| crate::interp::session_verify(&c));
+
+    let (code, ctype, payload, set_cookie) =
+        dispatch(method, path, body, actor, program, static_dir);
+    let set_cookie_hdr = set_cookie.map(|v| format!("Set-Cookie: {}\r\n", v)).unwrap_or_default();
     // Default S1: security headers on every response, no opt-in. The strict CSP
     // forbids inline/external script except 'self' (backstops R22 — an injected
     // <script> can't run); inline style is allowed (the language emits <style>
@@ -52,39 +57,62 @@ fn handle_conn(mut stream: TcpStream, program: &XeresProgram, static_dir: &str) 
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n\
          X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n\
          Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n\
-         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+         {set_cookie}Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         code,
         reason(code),
         ctype,
         payload.as_bytes().len(),
-        payload
+        payload,
+        set_cookie = set_cookie_hdr
     );
     stream.write_all(resp.as_bytes())?;
     stream.flush()
+}
+
+/// Extract a cookie value from the raw request headers (case-insensitive header
+/// name, case-sensitive value).
+fn cookie_value(req: &str, name: &str) -> Option<String> {
+    for line in req.lines() {
+        if line.get(..7).map_or(false, |p| p.eq_ignore_ascii_case("cookie:")) {
+            for pair in line[7..].split(';') {
+                if let Some(v) = pair.trim().strip_prefix(&format!("{}=", name)) {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn dispatch(
     method: &str,
     path: &str,
     body: &str,
+    actor: Option<String>,
     program: &XeresProgram,
     static_dir: &str,
-) -> (u16, &'static str, String) {
+) -> (u16, &'static str, String, Option<String>) {
     if method == "POST" && path.starts_with("/__xeres/sync/") {
         let coll = &path["/__xeres/sync/".len()..];
-        return (200, "application/json", sync_dispatch(coll, body));
+        return (200, "application/json", sync_dispatch(coll, body), None);
     }
     if method == "POST" && path.starts_with("/__xeres/") {
         let fname = &path["/__xeres/".len()..];
-        return match rpc(program, fname, body) {
-            Ok(json) => (200, "application/json", json),
-            Err(e) => (500, "application/json", format!("{{\"error\":{}}}", json_str(&e))),
+        return match rpc(program, fname, body, actor) {
+            Ok((json, set_cookie)) => (200, "application/json", json, set_cookie),
+            Err(e) => (500, "application/json", format!("{{\"error\":{}}}", json_str(&e)), None),
         };
     }
-    serve_static(path, static_dir)
+    let (code, ctype, payload) = serve_static(path, static_dir);
+    (code, ctype, payload, None)
 }
 
-fn rpc(program: &XeresProgram, fname: &str, body: &str) -> Result<String, String> {
+fn rpc(
+    program: &XeresProgram,
+    fname: &str,
+    body: &str,
+    actor: Option<String>,
+) -> Result<(String, Option<String>), String> {
     let f = program
         .functions
         .iter()
@@ -97,9 +125,9 @@ fn rpc(program: &XeresProgram, fname: &str, body: &str) -> Result<String, String
         .enumerate()
         .map(|(i, p)| decode_arg(parsed.idx(i), &p.type_name, program))
         .collect();
-    let interp = Interp::new(program);
+    let interp = Interp::with_session(program, actor);
     let result = interp.call(&f.name, args)?;
-    Ok(interp.wire_json(&result))
+    Ok((interp.wire_json(&result), interp.take_set_cookie()))
 }
 
 /// Decode a JSON value into a runtime Value, guided by the declared type.

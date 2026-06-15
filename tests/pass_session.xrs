@@ -1,0 +1,25 @@
+// R24 — `session` is the server-only authenticated-actor capability. An `auth`
+// fn must consult `session.actor`; `login`/`logout` mint and clear the signed
+// HttpOnly/Secure/SameSite cookie. User values still flow through $1 params (R23).
+model User {
+  id: String
+  username: String
+  secret password_hash: String
+}
+
+auth server fn me() -> Optional<String> {
+  return session.actor
+}
+
+server fn sign_in(username: String, password: String) -> Bool {
+  let u: User = db.query_one("select id, username, password_hash from users where username = $1", username)
+  if verify(u.password_hash, password) {
+    session.login(u.id)
+    return true
+  }
+  return false
+}
+
+server fn sign_out() {
+  session.logout()
+}

@@ -27,11 +27,54 @@ enum Flow {
 
 pub struct Interp<'a> {
     pub program: &'a XeresProgram,
+    /// Authenticated actor id, recovered from a verified session cookie
+    /// (`None` = anonymous). Read by `session.actor`.
+    session_actor: Option<String>,
+    /// A `Set-Cookie` header recorded by `session.login`/`session.logout`, read
+    /// out by the server after the call. Interior mutability: `call` is `&self`.
+    set_cookie: std::cell::RefCell<Option<String>>,
 }
 
 impl<'a> Interp<'a> {
     pub fn new(program: &'a XeresProgram) -> Self {
-        Interp { program }
+        Interp { program, session_actor: None, set_cookie: std::cell::RefCell::new(None) }
+    }
+
+    /// Construct with the actor recovered from a verified session cookie.
+    pub fn with_session(program: &'a XeresProgram, session_actor: Option<String>) -> Self {
+        Interp { program, session_actor, set_cookie: std::cell::RefCell::new(None) }
+    }
+
+    /// The `Set-Cookie` header to emit after this call, if `session.login` or
+    /// `session.logout` ran during it. Takes (clears) the recorded value.
+    pub fn take_set_cookie(&self) -> Option<String> {
+        self.set_cookie.borrow_mut().take()
+    }
+
+    /// `session.login(id)` mints a signed session cookie; `session.logout()`
+    /// clears it. Both record a `Set-Cookie` for the server to emit after the
+    /// call returns.
+    fn session_method(
+        &self,
+        method: &str,
+        args: &[Expr],
+        env: &HashMap<String, Value>,
+    ) -> Result<Value, String> {
+        match method {
+            "login" => {
+                let id = match self.eval(args.first().ok_or("session.login(id) needs an id")?, env)? {
+                    Value::Str(s) => s,
+                    _ => return Err("session.login expects a String id".into()),
+                };
+                *self.set_cookie.borrow_mut() = Some(session_set_cookie(&id));
+                Ok(Value::Null)
+            }
+            "logout" => {
+                *self.set_cookie.borrow_mut() = Some(session_clear_cookie());
+                Ok(Value::Null)
+            }
+            other => Err(format!("session has no method `{}`", other)),
+        }
     }
 
     /// Call a server (or shared) fn by name with positional args.
@@ -183,6 +226,13 @@ impl<'a> Interp<'a> {
                 .cloned()
                 .ok_or_else(|| format!("unknown variable `{}`", v)),
             Expr::Field { base, field } => {
+                // `session.actor` — the authenticated actor id, or null.
+                if matches!(base.as_ref(), Expr::Ident(n) if n == "session") && field == "actor" {
+                    return Ok(match &self.session_actor {
+                        Some(id) => Value::Str(id.clone()),
+                        None => Value::Null,
+                    });
+                }
                 // `Enum.Variant` (Capitalized base) -> the variant string.
                 if let Expr::Ident(name) = base.as_ref() {
                     if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
@@ -255,6 +305,11 @@ impl<'a> Interp<'a> {
                 Ok(Value::List((s..e).map(Value::Int).collect()))
             }
             Expr::MethodCall { receiver, method, args } => {
+                // `session.login(id)` / `session.logout()` — receiver is the
+                // capability, not a value, so handle before evaluating it.
+                if matches!(receiver.as_ref(), Expr::Ident(n) if n == "session") {
+                    return self.session_method(method, args, env);
+                }
                 if is_db(receiver) && method == "exec" {
                     return self.db_exec(args, env);
                 }
@@ -618,6 +673,89 @@ fn auth_hash(_args: &[Value]) -> Result<Value, String> {
 #[cfg(not(feature = "auth"))]
 fn auth_verify(_args: &[Value]) -> Result<Value, String> {
     Err("this xeres build has no auth support (hash/verify); released binaries do".into())
+}
+
+// ---- session cookie (feature-gated, like auth) ----
+// The cookie value is `<actor-id>.<hmac>` signed with HMAC-SHA256 over a server
+// secret (SESSION_SECRET). It is set HttpOnly; Secure; SameSite=Strict so it
+// cannot be read by JS, forged, or sent cross-site.
+
+/// Verify an incoming `xeres_session` cookie value, returning the actor id if
+/// the signature checks out.
+#[cfg(feature = "auth")]
+pub fn session_verify(raw: &str) -> Option<String> {
+    let (id, sig) = raw.rsplit_once('.')?;
+    let expected = session_sign(id);
+    let expected_sig = expected.rsplit_once('.')?.1.to_string();
+    if constant_eq(expected_sig.as_bytes(), sig.as_bytes()) {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "auth")]
+fn session_sign(id: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::digest::KeyInit;
+    use sha2::Sha256;
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&session_secret())
+        .expect("HMAC accepts a key of any length");
+    mac.update(id.as_bytes());
+    format!("{}.{}", id, hex(&mac.finalize().into_bytes()))
+}
+
+#[cfg(feature = "auth")]
+fn session_secret() -> Vec<u8> {
+    std::env::var("SESSION_SECRET").map(String::into_bytes).unwrap_or_else(|_| {
+        eprintln!("xeres: SESSION_SECRET not set — using an insecure dev key. Set it in .env for production.");
+        b"xeres-insecure-dev-session-key".to_vec()
+    })
+}
+
+#[cfg(feature = "auth")]
+fn session_set_cookie(id: &str) -> String {
+    format!("xeres_session={}; HttpOnly; Secure; SameSite=Strict; Path=/", session_sign(id))
+}
+
+#[cfg(feature = "auth")]
+fn session_clear_cookie() -> String {
+    "xeres_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0".to_string()
+}
+
+#[cfg(feature = "auth")]
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+#[cfg(feature = "auth")]
+fn constant_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+// Non-auth builds: no HMAC, so no real session (released binaries enable it).
+#[cfg(not(feature = "auth"))]
+pub fn session_verify(_raw: &str) -> Option<String> {
+    None
+}
+#[cfg(not(feature = "auth"))]
+fn session_set_cookie(_id: &str) -> String {
+    String::new()
+}
+#[cfg(not(feature = "auth"))]
+fn session_clear_cookie() -> String {
+    String::new()
 }
 
 // ---- postgres glue (feature-gated) ----

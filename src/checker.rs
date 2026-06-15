@@ -132,6 +132,10 @@ fn resolve_type(
         Expr::Bool(_) => Some("Bool".into()),
         Expr::Ident(v) => locals.get(v).and_then(|(t, _)| t.clone()),
         Expr::Field { base, field } => {
+            // `session.actor` — the authenticated actor id, or none.
+            if matches!(base.as_ref(), Expr::Ident(n) if n == "session") && field == "actor" {
+                return Some("Optional<String>".into());
+            }
             // enum variant access: `Status.Active` is a value of type `Status`.
             if let Expr::Ident(name) = base.as_ref() {
                 if table.enums.contains_key(name) {
@@ -946,6 +950,11 @@ fn check_expr(
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => {}
         Expr::Field { base, field } => {
+            // `session` capability: a server-only Located read of `.actor` (R24).
+            if matches!(base.as_ref(), Expr::Ident(n) if n == "session") {
+                check_session_member(field, 0, fn_env, fn_name, fn_line, errors);
+                return;
+            }
             // enum variant access: validate the variant exists (R20).
             if let Expr::Ident(name) = base.as_ref() {
                 if let Some(en) = table.enums.get(name) {
@@ -1035,16 +1044,20 @@ fn check_expr(
         // downgrade) — just check the inner expression.
         Expr::Raw(inner) => check_expr(inner, locals, fn_env, fn_name, fn_line, table, errors),
         Expr::MethodCall { receiver, method, args } => {
-            // `db.*` is the server-only database capability; everything else is
-            // a synced-collection method. (Don't recurse into `db` as a value.)
+            // `db.*` / `session.*` are server-only capabilities; everything else
+            // is a synced-collection method. (Don't recurse into the capability
+            // ident as a value.)
             let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
-            if !is_db {
+            let is_session = matches!(receiver.as_ref(), Expr::Ident(n) if n == "session");
+            if !is_db && !is_session {
                 check_expr(receiver, locals, fn_env, fn_name, fn_line, table, errors);
             }
             for a in args {
                 check_expr(a, locals, fn_env, fn_name, fn_line, table, errors);
             }
-            if is_db {
+            if is_session {
+                check_session_member(method, args.len(), fn_env, fn_name, fn_line, errors);
+            } else if is_db {
                 check_db_method(method, args, fn_env, fn_name, fn_line, errors);
             } else if method == "or"
                 && resolve_type(receiver, locals, table)
@@ -1173,6 +1186,96 @@ fn check_db_method(
             ),
             line,
         });
+    }
+}
+
+/// R24 — `session` is a server-only `Located` capability (like `db`): the actor
+/// and the HMAC signing key never reach the browser. Members are `.actor` (read
+/// the authenticated actor id, an `Optional<String>`), `.login(id)` and
+/// `.logout()` (mint / clear the signed `HttpOnly; Secure; SameSite=Strict`
+/// session cookie).
+fn check_session_member(
+    member: &str,
+    argc: usize,
+    fn_env: EnvModifier,
+    fn_name: &str,
+    line: usize,
+    errors: &mut Vec<SemanticError>,
+) {
+    if fn_env != EnvModifier::Server {
+        errors.push(SemanticError {
+            rule: "R24 authn-required",
+            message: format!(
+                "`session` is a server-only capability; `{}` runs {}. The actor and signing key cannot reach the browser.",
+                fn_name, env_label(fn_env)
+            ),
+            line,
+        });
+    }
+    let want = match member {
+        "actor" => return, // a field read, no args
+        "login" => 1,
+        "logout" => 0,
+        _ => {
+            errors.push(SemanticError {
+                rule: "R24 authn-required",
+                message: format!("`session` has no member `{}` (use actor, login, logout).", member),
+                line,
+            });
+            return;
+        }
+    };
+    if argc != want {
+        errors.push(SemanticError {
+            rule: "R24 authn-required",
+            message: format!("`session.{}(...)` takes {} argument(s).", member, want),
+            line,
+        });
+    }
+}
+
+/// Does any statement in this body consult `session` (R24)? An `auth` fn that
+/// never reads `session.actor` is the "I forgot the auth check" bug — so it must
+/// not compile.
+fn stmts_use_session(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_uses_session)
+}
+
+fn stmt_uses_session(s: &Stmt) -> bool {
+    match s {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Return(value)
+        | Stmt::Expr(value) => expr_uses_session(value),
+        Stmt::Try { body, handler } => stmts_use_session(body) || stmts_use_session(handler),
+        Stmt::If { cond, then_body, else_body } => {
+            expr_uses_session(cond) || stmts_use_session(then_body) || stmts_use_session(else_body)
+        }
+        Stmt::For { iter, body, .. } => expr_uses_session(iter) || stmts_use_session(body),
+        Stmt::While { cond, body } => expr_uses_session(cond) || stmts_use_session(body),
+        Stmt::Match { scrutinee, arms } => {
+            expr_uses_session(scrutinee) || arms.iter().any(|a| stmts_use_session(&a.body))
+        }
+        Stmt::Break | Stmt::Continue => false,
+    }
+}
+
+fn expr_uses_session(e: &Expr) -> bool {
+    let is_session = |x: &Expr| matches!(x, Expr::Ident(n) if n == "session");
+    match e {
+        Expr::Field { base, .. } => is_session(base) || expr_uses_session(base),
+        Expr::MethodCall { receiver, args, .. } => {
+            is_session(receiver) || expr_uses_session(receiver) || args.iter().any(expr_uses_session)
+        }
+        Expr::Call { args, .. } => args.iter().any(expr_uses_session),
+        Expr::Unary { expr, .. } => expr_uses_session(expr),
+        Expr::Binary { left, right, .. } => expr_uses_session(left) || expr_uses_session(right),
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_uses_session(i),
+        Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_session(v)),
+        Expr::ListLit(items) => items.iter().any(expr_uses_session),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_uses_session(cond) || expr_uses_session(then) || expr_uses_session(otherwise)
+        }
+        Expr::Range { start, end } => expr_uses_session(start) || expr_uses_session(end),
+        _ => false,
     }
 }
 
@@ -1584,6 +1687,30 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
                     line: f.line,
                 });
             }
+        }
+    }
+
+    // R24 — an `auth` fn must be server-side and must consult `session`.
+    for f in &program.functions {
+        if !f.is_auth {
+            continue;
+        }
+        if f.env != EnvModifier::Server {
+            errors.push(SemanticError {
+                rule: "R24 authn-required",
+                message: format!("`auth` is a server-only modifier, but `{}` runs {}.", f.name, env_label(f.env)),
+                line: f.line,
+            });
+        }
+        if !stmts_use_session(&f.body) {
+            errors.push(SemanticError {
+                rule: "R24 authn-required",
+                message: format!(
+                    "`auth fn {}` never consults `session`. Read `session.actor` to authenticate the caller — an `auth` fn that ignores the session is the 'forgot the auth check' bug.",
+                    f.name
+                ),
+                line: f.line,
+            });
         }
     }
 

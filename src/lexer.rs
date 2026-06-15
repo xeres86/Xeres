@@ -173,6 +173,7 @@ impl Lexer {
             "state" => Token::State,
             "declassify" => Token::Declassify,
             "raw" => Token::Raw,
+            "auth" => Token::Auth,
             "await" => Token::Await,
             "try" => Token::Try,
             "catch" => Token::Catch,

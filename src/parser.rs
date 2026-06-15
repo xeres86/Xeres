@@ -106,6 +106,8 @@ pub enum MatchPat {
 #[derive(Debug)]
 pub struct FunctionNode {
     pub env: EnvModifier,
+    /// `auth server fn` — must consult `session` (R24). Server-only.
+    pub is_auth: bool,
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Option<String>,
@@ -260,7 +262,7 @@ impl<'a> Parser<'a> {
                         program.functions.push(f);
                     }
                 }
-                Token::Server | Token::Fn => {
+                Token::Server | Token::Fn | Token::Auth => {
                     if let Some(f) = self.parse_function() { program.functions.push(f); }
                 }
                 Token::Synced => {
@@ -346,6 +348,13 @@ impl<'a> Parser<'a> {
 
     fn parse_function(&mut self) -> Option<FunctionNode> {
         let fn_line = self.cur_line;
+        // `auth` modifier precedes the tier: `auth server fn …`.
+        let is_auth = if self.current_token == Token::Auth {
+            self.next_token();
+            true
+        } else {
+            false
+        };
         let env = match self.current_token {
             Token::Server => { self.next_token(); EnvModifier::Server }
             Token::Ui => { self.next_token(); EnvModifier::Ui }
@@ -385,7 +394,7 @@ impl<'a> Parser<'a> {
             if self.current_token == Token::RBrace { self.next_token(); }
         }
 
-        Some(FunctionNode { env, name, params, return_type, body, line: fn_line })
+        Some(FunctionNode { env, is_auth, name, params, return_type, body, line: fn_line })
     }
 
     /// Parse a type name: `Ident` or a one-level generic `Ident<Ident>`
