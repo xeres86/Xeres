@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.4.0 — 2026-06-15 — security wave 2 (CSRF, R26 SSRF, R27 logging) + on-load
+
+Finishing the secure-by-default posture and the remaining capability gaps.
+
+- **CSRF, HSTS & tighter CORS (Default S1/S2)** — every state-changing RPC fn
+  call now requires a double-submit CSRF token: the server issues a JS-readable
+  `xeres_csrf` cookie and the generated client resends it as the `X-CSRF-Token`
+  header on every call (a mismatch/absent token is a `403`). The developer never
+  writes any of it. `Strict-Transport-Security` is now always sent (honored once
+  TLS is terminated in front), and the blanket `Access-Control-Allow-Origin: *`
+  is removed — the app is same-origin. Enforced in both the `xeres serve` runtime
+  and the ejected server; sync replication is exempt. Proven live (403 with no /
+  mismatched token, 200 on a match).
+- **`log` primitive + log-no-secret (R27, A09)** — a server-only structured
+  logger: `log.info` / `log.warn` / `log.error` emit one JSON line per call
+  (`{"level":…,"msg":…}`) to stderr — the web-appropriate output primitive (the
+  replacement for a stray `print`). Rule **R27**: a secret/Located value cannot be
+  passed to `log`, so leaking a credential through logs is a compile error (use
+  `declassify(...)` to release something deliberately). Dependency-free, in both
+  the interpreter and the ejected server. Fixtures: pass_log, fail_log_secret.
+- **`endpoint` egress allowlist (R26, A10 SSRF)** — outbound HTTP is expressible
+  *only* through a declared `endpoint` whose host is fixed at declaration
+  (`endpoint Notify { base "https://…" secret key: String }`). Call sites append
+  a **literal** path (`Notify.post("/path", body) -> Int`, `Notify.get("/path")
+  -> String`) but can never change the host — so `http.get(arbitraryUrl)` doesn't
+  exist, and the program's entire egress surface is the set of `endpoint`
+  declarations (statically auditable). Server-only (Located): calling an endpoint
+  from the browser is a compile error, and its secret (env-loaded as
+  `<NAME>_<FIELD>`, sent as a bearer token) never crosses the wire. Behaviour in
+  both backends via `ureq` behind a new optional `http` feature (in `full`).
+  Fixtures: pass_endpoint, fail_endpoint_in_ui, fail_endpoint_path.
+- **`on load` lifecycle hook (P1)** — a screen-level `on load { … }` block that
+  runs once on mount and may `await` server fns, so a screen fetches its own data
+  on open (`on load { users = await list_users() }`), then redraws. It's a
+  browser handler context, so the await discipline (R4) and `try` rule (R16)
+  apply — a non-awaited server call in `on load` does not compile. The
+  most-requested missing piece. Fixtures: pass_on_load, fail_on_load_sync.
+
 ## 0.3.0 — 2026-06-15 — language foundations + security hardening (R20–R25)
 
 Rounding out the core language so it can express real business logic. Same

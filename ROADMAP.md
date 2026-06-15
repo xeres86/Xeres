@@ -87,14 +87,25 @@ Landed:
   must bind `session.actor` (an ownership predicate); a fetch/mutation scoped
   only by a caller-supplied id doesn't compile.
 
-Remaining (next, in sequence):
-- **Default S1 CSRF** (double-submit token) + **Default S2 TLS/HSTS**.
-- **R26 `endpoint` egress allowlist** (anti-SSRF): outbound HTTP only through a
-  declared, host-fixed `endpoint`.
-- **R27 `log` primitive + log-no-secret**: structured server logging where a
-  Located value (secret/`db`/`session`) can't be logged.
-- Ejected-server session runtime (lift the `compile_error!` guard).
-- Primitives: `on load` lifecycle, form controls, client router.
+## v0.4 — security hardening, wave 2
+Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
+- **CSRF + HSTS + tighter CORS** (Default S1/S2) — a double-submit token on every
+  RPC fn call (the generated client attaches it automatically); HSTS always set;
+  the blanket `Access-Control-Allow-Origin: *` removed.
+- **R26 `endpoint` egress** (anti-SSRF) — outbound HTTP only through a declared,
+  host-fixed `endpoint`; server-only (Located); secret env-loaded as a bearer.
+  `ureq` behind a new optional `http` feature.
+- **R27 `log` + log-no-secret** — server-only structured logging; a secret/Located
+  value can't be passed to `log`.
+- **P1 `on load`** — screen lifecycle hook that fetches its own data on mount
+  (may `await`; R4/R16 apply).
+
+## v0.5 — view & navigation primitives (next)
+- **P3 form controls** — `select`, `checkbox`, `radio`, `textarea`, `link`,
+  `image` (each escaped + bind-aware).
+- **P2 client router** — `navigate(Screen)` + URL sync (`link` depends on it).
+- Light touch: `cargo audit` in CI; real TLS for the app server (HSTS already
+  set); lift the ejected-server `session` `compile_error!` guard.
 
 ## Later
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword

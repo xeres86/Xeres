@@ -1,0 +1,20 @@
+// P1 / R4 — a server fn called in `on load` WITHOUT `await` is rejected: the
+// await discipline applies to the lifecycle block just like any handler.
+model User {
+  id: String
+  name: String
+}
+
+server fn list_users() -> List<User> {
+  return db.query("select id, name from users")
+}
+
+ui screen Users {
+  state users: List<User> = []
+  on load { users = list_users() }
+  view {
+    column {
+      for u in users { text u.name }
+    }
+  }
+}

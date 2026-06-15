@@ -43,27 +43,76 @@ fn handle_conn(mut stream: TcpStream, program: &XeresProgram, static_dir: &str) 
     let path = parts.next().unwrap_or("/");
     let body = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
 
+    let csrf_cookie = cookie_value(&req, "xeres_csrf");
+
+    // Default S1 CSRF: a state-changing RPC fn call must echo the double-submit
+    // token (the `xeres_csrf` cookie value, resent as the X-CSRF-Token header).
+    // Sync replication is exempt. SameSite=Strict already blocks the cross-site
+    // case; this is defense-in-depth the developer never writes.
+    if method == "POST" && path.starts_with("/__xeres/") && !path.starts_with("/__xeres/sync/") {
+        let header = header_value(&req, "x-csrf-token");
+        let ok = matches!((&csrf_cookie, &header), (Some(c), Some(h)) if !c.is_empty() && c == h);
+        if !ok {
+            return write_response(
+                &mut stream,
+                403,
+                "application/json",
+                "{\"error\":\"csrf token missing or invalid\"}",
+                "",
+            );
+        }
+    }
+
     // Recover the actor from a verified session cookie (None = anonymous).
     let actor = cookie_value(&req, "xeres_session").and_then(|c| crate::interp::session_verify(&c));
 
     let (code, ctype, payload, set_cookie) =
         dispatch(method, path, body, actor, program, static_dir);
-    let set_cookie_hdr = set_cookie.map(|v| format!("Set-Cookie: {}\r\n", v)).unwrap_or_default();
-    // Default S1: security headers on every response, no opt-in. The strict CSP
-    // forbids inline/external script except 'self' (backstops R22 — an injected
-    // <script> can't run); inline style is allowed (the language emits <style>
-    // blocks and style="" attributes).
+
+    // Set-Cookie(s): a session mint (if `session.login`/`logout` ran) plus a
+    // fresh CSRF token when the client doesn't have one yet (readable by JS so
+    // the client can echo it back as a header).
+    let mut cookies = String::new();
+    if let Some(c) = set_cookie {
+        cookies.push_str(&format!("Set-Cookie: {}\r\n", c));
+    }
+    if csrf_cookie.is_none() {
+        cookies.push_str(&format!(
+            "Set-Cookie: xeres_csrf={}; Secure; SameSite=Strict; Path=/\r\n",
+            rand_token()
+        ));
+    }
+
+    write_response(&mut stream, code, ctype, &payload, &cookies)
+}
+
+/// Default S1/S2: the always-on security headers. Strict CSP forbids inline
+/// script (backstops R22); inline style is allowed for the language's `<style>`/
+/// `style=""`. HSTS is always set (honored once TLS is terminated in front);
+/// `Access-Control-Allow-Origin` is intentionally absent — the app is same-origin.
+const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\n\
+    Referrer-Policy: no-referrer\r\n\
+    X-Frame-Options: DENY\r\n\
+    Strict-Transport-Security: max-age=63072000; includeSubDomains\r\n\
+    Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n";
+
+/// Write a response with the security headers + any `Set-Cookie` lines.
+fn write_response(
+    stream: &mut TcpStream,
+    code: u16,
+    ctype: &str,
+    payload: &str,
+    cookies: &str,
+) -> std::io::Result<()> {
     let resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n\
-         X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n\
-         Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n\
-         {set_cookie}Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         code,
         reason(code),
         ctype,
+        SECURITY_HEADERS,
+        cookies,
         payload.as_bytes().len(),
-        payload,
-        set_cookie = set_cookie_hdr
+        payload
     );
     stream.write_all(resp.as_bytes())?;
     stream.flush()
@@ -82,6 +131,24 @@ fn cookie_value(req: &str, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract an arbitrary request header value (case-insensitive name).
+fn header_value(req: &str, name: &str) -> Option<String> {
+    let key = format!("{}:", name);
+    for line in req.lines() {
+        if line.get(..key.len()).map_or(false, |p| p.eq_ignore_ascii_case(&key)) {
+            return Some(line[key.len()..].trim().to_string());
+        }
+    }
+    None
+}
+
+/// A 128-bit random token (CSRF), std-only: `RandomState` is OS-seeded.
+fn rand_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mk = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    format!("{:016x}{:016x}", mk(), mk())
 }
 
 fn dispatch(

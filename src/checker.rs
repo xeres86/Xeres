@@ -1,7 +1,7 @@
 // src/checker.rs
 use crate::parser::{
-    BinOp, EnumNode, EnvModifier, Expr, FunctionNode, Handler, MatchArm, MatchPat, ModelNode,
-    ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
+    BinOp, EndpointNode, EnumNode, EnvModifier, Expr, FunctionNode, Handler, MatchArm, MatchPat,
+    ModelNode, ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -33,6 +33,8 @@ struct SymbolTable<'a> {
     states: HashMap<String, &'a SyncedStateNode>,
     /// Reusable `ui component`s, keyed by name (for invocation checking).
     components: HashMap<String, &'a ScreenNode>,
+    /// Declared egress `endpoint`s, keyed by name (R26).
+    endpoints: HashMap<String, &'a EndpointNode>,
 }
 
 /// Inner type of a one-level generic, e.g. `("List", "List<User>") -> "User"`.
@@ -191,6 +193,14 @@ fn resolve_type(
                 // by the surrounding fn's return model (resolved in codegen).
                 if name == "db" {
                     return if method == "exec" { Some("Int".into()) } else { None };
+                }
+                // endpoint verbs: `.get` -> String (response body), `.post` -> Int (status).
+                if table.endpoints.contains_key(name) {
+                    return match method.as_str() {
+                        "get" => Some("String".into()),
+                        "post" => Some("Int".into()),
+                        _ => None,
+                    };
                 }
                 // `collection.get(id)` yields the element type.
                 if method == "get" {
@@ -577,6 +587,22 @@ fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<SemanticEr
     let state_names: HashSet<String> = s.states.iter().map(|st| st.name.clone()).collect();
     for v in &s.body {
         check_view(v, &locals, &state_names, &s.name, s.line, table, errors);
+    }
+
+    // `on load { … }` runs in the browser on mount: check it as a ui handler so
+    // the await discipline (R4) and `try` rule (R16) apply. A synthetic ui fn
+    // carries the env/name; locals already hold the props + state cells.
+    if !s.load.is_empty() {
+        let synthetic = FunctionNode {
+            env: EnvModifier::Ui,
+            is_auth: false,
+            name: format!("{} on load", s.name),
+            params: vec![],
+            return_type: None,
+            body: vec![],
+            line: s.line,
+        };
+        check_flow_stmts(&s.load, &mut locals, &synthetic, table, errors);
     }
 }
 
@@ -1049,13 +1075,20 @@ fn check_expr(
             // ident as a value.)
             let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
             let is_session = matches!(receiver.as_ref(), Expr::Ident(n) if n == "session");
-            if !is_db && !is_session {
+            let is_log = matches!(receiver.as_ref(), Expr::Ident(n) if n == "log");
+            let is_endpoint =
+                matches!(receiver.as_ref(), Expr::Ident(n) if table.endpoints.contains_key(n));
+            if !is_db && !is_session && !is_log && !is_endpoint {
                 check_expr(receiver, locals, fn_env, fn_name, fn_line, table, errors);
             }
             for a in args {
                 check_expr(a, locals, fn_env, fn_name, fn_line, table, errors);
             }
-            if is_session {
+            if is_endpoint {
+                check_endpoint_method(method, args, fn_env, fn_name, fn_line, errors);
+            } else if is_log {
+                check_log_method(method, args, fn_env, fn_name, fn_line, locals, table, errors);
+            } else if is_session {
                 check_session_member(method, args.len(), fn_env, fn_name, fn_line, errors);
             } else if is_db {
                 check_db_method(method, args, fn_env, fn_name, fn_line, errors);
@@ -1183,6 +1216,105 @@ fn check_db_method(
             message: format!(
                 "`db.{}(...)` requires a string-literal query. Pass user values as $1, $2, … parameters — never build SQL from a variable, concatenation, or interpolation.",
                 method
+            ),
+            line,
+        });
+    }
+}
+
+/// R26 — `endpoint` egress (anti-SSRF). An endpoint verb call is server-only
+/// (Located: the host + its secret never reach the browser), the verb is `get`
+/// or `post`, and the path is a **string literal** — so the host is fixed and
+/// the program's egress surface stays statically auditable.
+fn check_endpoint_method(
+    method: &str,
+    args: &[Expr],
+    fn_env: EnvModifier,
+    fn_name: &str,
+    line: usize,
+    errors: &mut Vec<SemanticError>,
+) {
+    if fn_env != EnvModifier::Server {
+        errors.push(SemanticError {
+            rule: "R26 egress-allowlist",
+            message: format!(
+                "an `endpoint` call runs in `{}`, which is {}. Outbound HTTP is server-only — the host and its secret cannot reach the browser.",
+                fn_name, env_label(fn_env)
+            ),
+            line,
+        });
+    }
+    if !matches!(method, "get" | "post") {
+        errors.push(SemanticError {
+            rule: "R26 egress-allowlist",
+            message: format!("an `endpoint` has no verb `{}` (use get, post).", method),
+            line,
+        });
+        return;
+    }
+    if !matches!(args.first(), Some(Expr::Str(_))) {
+        errors.push(SemanticError {
+            rule: "R26 egress-allowlist",
+            message: "an `endpoint` path must be a string literal — the host is fixed by `base`, and only a literal path may be appended.".into(),
+            line,
+        });
+    }
+    let want = if method == "post" { 2 } else { 1 };
+    if args.len() != want {
+        errors.push(SemanticError {
+            rule: "R26 egress-allowlist",
+            message: format!("`endpoint.{}(...)` takes {} argument(s) (path{}).", method, want, if method == "post" { ", body" } else { "" }),
+            line,
+        });
+    }
+}
+
+/// R27 — `log` is a server-only structured logger (`log.info`/`warn`/`error`),
+/// the web-appropriate output primitive. Its message cannot be a secret/Located
+/// value: logging a credential is a compile error (use `declassify(...)` to
+/// release something deliberately).
+#[allow(clippy::too_many_arguments)]
+fn check_log_method(
+    method: &str,
+    args: &[Expr],
+    fn_env: EnvModifier,
+    fn_name: &str,
+    line: usize,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
+    if fn_env != EnvModifier::Server {
+        errors.push(SemanticError {
+            rule: "R27 log",
+            message: format!("`log` is a server-only capability; `{}` runs {}.", fn_name, env_label(fn_env)),
+            line,
+        });
+    }
+    if !matches!(method, "info" | "warn" | "error") {
+        errors.push(SemanticError {
+            rule: "R27 log",
+            message: format!("`log` has no method `{}` (use info, warn, error).", method),
+            line,
+        });
+        return;
+    }
+    if args.len() != 1 {
+        errors.push(SemanticError {
+            rule: "R27 log",
+            message: format!("`log.{}(...)` takes one message argument.", method),
+            line,
+        });
+        return;
+    }
+    // log-no-secret: the message cannot derive from a secret/Located value.
+    let no_taint: HashMap<String, bool> = HashMap::new();
+    if is_tainted(&args[0], locals, table, &no_taint) {
+        errors.push(SemanticError {
+            rule: "R27 log",
+            message: format!(
+                "a secret value is passed to `log.{}` in `{}`. Logging a credential is forbidden — use `declassify(...)` to release a value deliberately.",
+                method, fn_name
             ),
             line,
         });
@@ -1642,7 +1774,17 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         fns: HashMap::new(),
         states: HashMap::new(),
         components: HashMap::new(),
+        endpoints: HashMap::new(),
     };
+    for ep in &program.endpoints {
+        if table.endpoints.insert(ep.name.clone(), ep).is_some() {
+            errors.push(SemanticError {
+                rule: "R2 duplicate-decl",
+                message: format!("endpoint `{}` is declared more than once.", ep.name),
+                line: ep.line,
+            });
+        }
+    }
 
     // Enums: register, and reject duplicate enum names / duplicate variants (R2).
     for e in &program.enums {

@@ -1,6 +1,6 @@
 [package]
 name = "xeres"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "The Xeres compiler — tier-safe (server/ui) web language with a typed, compiler-enforced boundary."
 license = "MIT"
@@ -19,8 +19,10 @@ db = ["dep:postgres", "dep:postgres-native-tls", "dep:native-tls"]
 # (HMAC-SHA256) for `xeres serve`. Same rationale as `db`: optional so the
 # default build stays dependency-free.
 auth = ["dep:argon2", "dep:hmac", "dep:sha2"]
+# Outbound HTTP for declared `endpoint`s (R26). Optional like `db`/`auth`.
+http = ["dep:ureq"]
 # Batteries-included: what released binaries build with.
-full = ["db", "auth"]
+full = ["db", "auth", "http"]
 
 [dependencies]
 postgres = { version = "0.19", optional = true }
@@ -29,6 +31,7 @@ native-tls = { version = "0.2", optional = true }
 argon2 = { version = "0.5", features = ["std"], optional = true }
 hmac = { version = "0.13", optional = true }
 sha2 = { version = "0.11", optional = true }
+ureq = { version = "2", optional = true }
 
 [profile.release]
 opt-level = 3
