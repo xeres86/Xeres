@@ -1045,7 +1045,7 @@ fn check_expr(
                 check_expr(a, locals, fn_env, fn_name, fn_line, table, errors);
             }
             if is_db {
-                check_db_method(method, fn_env, fn_name, fn_line, errors);
+                check_db_method(method, args, fn_env, fn_name, fn_line, errors);
             } else if method == "or"
                 && resolve_type(receiver, locals, table)
                     .as_deref()
@@ -1133,8 +1133,13 @@ fn check_expr(
 
 /// R15 — `db` is a server-only `Located` capability (the connection + creds
 /// can never reach the browser). Its methods: query_one, query, exec.
+/// R23 — the query argument must be a string literal; user values may flow
+/// only through the trailing `$1`, `$2`, … parameters, so SQL injection is not
+/// expressible (concatenation/interpolation/a variable in query position is a
+/// compile error).
 fn check_db_method(
     method: &str,
+    args: &[Expr],
     fn_env: EnvModifier,
     fn_name: &str,
     line: usize,
@@ -1154,6 +1159,18 @@ fn check_db_method(
         errors.push(SemanticError {
             rule: "R15 db-capability",
             message: format!("`db` has no method `{}` (use query_one, query, exec).", method),
+            line,
+        });
+        return;
+    }
+    // R23: the SQL must be a literal — never built from user input.
+    if !matches!(args.first(), Some(Expr::Str(_))) {
+        errors.push(SemanticError {
+            rule: "R23 sql-literal",
+            message: format!(
+                "`db.{}(...)` requires a string-literal query. Pass user values as $1, $2, … parameters — never build SQL from a variable, concatenation, or interpolation.",
+                method
+            ),
             line,
         });
     }

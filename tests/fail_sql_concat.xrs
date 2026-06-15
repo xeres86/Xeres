@@ -1,0 +1,10 @@
+// R23 — building a query by string concatenation is a compile error. User
+// input must flow through $1, $2, … parameters, never the SQL string itself.
+model User {
+  id: String
+  username: String
+}
+
+server fn find(name: String) -> User {
+  return db.query_one("select id, username from users where username = '" + name + "'")
+}

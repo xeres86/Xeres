@@ -37,6 +37,12 @@ tier-safe boundary; new constructs go through the same checker.
   runtime and the ejected server — no opt-in. The client bootstrap moved out of an
   inline `<script>` (`client.js` now self-starts) so the CSP needs no script
   exceptions.
+- **SQL injection made inexpressible (R23)** — the query argument to
+  `db.query` / `db.query_one` / `db.exec` must be a **string literal**. A
+  variable, concatenation, or interpolation in query position is a compile error;
+  user values may flow only through the trailing `$1`, `$2`, … parameters. So
+  `"… where name='" + name + "'"` simply does not compile — the unsafe form is
+  gone, not merely discouraged.
 
 ## 0.2.0 — view & component layer
 
