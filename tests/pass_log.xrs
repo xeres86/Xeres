@@ -1,0 +1,13 @@
+// R27 — `log` is the server-side structured logger (info/warn/error). A literal
+// or a non-secret value is fine; a secret is rejected (see fail_log_secret).
+model User {
+  id: String
+  username: String
+  secret password_hash: String
+}
+
+server fn register(username: String) -> String {
+  log.info("registering a new user")
+  log.warn(username)
+  return uid()
+}

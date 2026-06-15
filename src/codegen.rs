@@ -1724,6 +1724,18 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     format!("db_query(&({}), {})", sql, params)
                 };
             }
+            // `log.{info,warn,error}(msg)` — structured server-side log line (R27).
+            if matches!(receiver.as_ref(), Expr::Ident(n) if n == "log") {
+                let arg = args.first().map(|a| emit_expr(a, ts)).unwrap_or_else(|| "\"\"".into());
+                return if ts {
+                    format!("console.{}({})", method, arg) // server-only by R27; harmless fallback
+                } else {
+                    format!(
+                        "eprintln!(\"{{{{\\\"level\\\":\\\"{}\\\",\\\"msg\\\":{{}}}}}}\", json_str(&({})))",
+                        method, arg
+                    )
+                };
+            }
             // `optional.or(default)` — TS `??`, Rust `unwrap_or`.
             if method == "or" && args.len() == 1 {
                 let r = emit_expr(receiver, ts);

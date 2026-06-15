@@ -74,6 +74,22 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// `log.info/warn/error(msg)` — emit one structured (JSON) line to stderr.
+    fn log_method(
+        &self,
+        method: &str,
+        args: &[Expr],
+        env: &HashMap<String, Value>,
+    ) -> Result<Value, String> {
+        let v = self.eval(args.first().ok_or("log needs a message")?, env)?;
+        let msg = match v {
+            Value::Str(s) => Value::Str(s),
+            other => Value::Str(format!("{:?}", other)),
+        };
+        eprintln!("{{\"level\":\"{}\",\"msg\":{}}}", method, self.wire_json(&msg));
+        Ok(Value::Null)
+    }
+
     /// Call a server (or shared) fn by name with positional args.
     pub fn call(&self, fn_name: &str, args: Vec<Value>) -> Result<Value, String> {
         if fn_name == "uid" {
@@ -306,6 +322,9 @@ impl<'a> Interp<'a> {
                 // capability, not a value, so handle before evaluating it.
                 if matches!(receiver.as_ref(), Expr::Ident(n) if n == "session") {
                     return self.session_method(method, args, env);
+                }
+                if matches!(receiver.as_ref(), Expr::Ident(n) if n == "log") {
+                    return self.log_method(method, args, env);
                 }
                 if is_db(receiver) && method == "exec" {
                     return self.db_exec(args, env);

@@ -13,6 +13,13 @@ Finishing the secure-by-default posture and the remaining capability gaps.
   is removed — the app is same-origin. Enforced in both the `xeres serve` runtime
   and the ejected server; sync replication is exempt. Proven live (403 with no /
   mismatched token, 200 on a match).
+- **`log` primitive + log-no-secret (R27, A09)** — a server-only structured
+  logger: `log.info` / `log.warn` / `log.error` emit one JSON line per call
+  (`{"level":…,"msg":…}`) to stderr — the web-appropriate output primitive (the
+  replacement for a stray `print`). Rule **R27**: a secret/Located value cannot be
+  passed to `log`, so leaking a credential through logs is a compile error (use
+  `declassify(...)` to release something deliberately). Dependency-free, in both
+  the interpreter and the ejected server. Fixtures: pass_log, fail_log_secret.
 
 ## 0.3.0 — 2026-06-15 — language foundations + security hardening (R20–R25)
 
