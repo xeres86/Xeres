@@ -86,7 +86,7 @@ fn expr_uses_auth(e: &Expr) -> bool {
         Expr::Field { base, .. } => expr_uses_auth(base),
         Expr::Unary { expr, .. } => expr_uses_auth(expr),
         Expr::Binary { left, right, .. } => expr_uses_auth(left) || expr_uses_auth(right),
-        Expr::Declassify(i) | Expr::Await(i) => expr_uses_auth(i),
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_uses_auth(i),
         Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_auth(v)),
         Expr::ListLit(items) => items.iter().any(expr_uses_auth),
         Expr::Ternary { cond, then, otherwise } => {
@@ -132,7 +132,7 @@ fn expr_uses_db(e: &Expr) -> bool {
         Expr::Call { args, .. } => args.iter().any(expr_uses_db),
         Expr::Unary { expr, .. } => expr_uses_db(expr),
         Expr::Binary { left, right, .. } => expr_uses_db(left) || expr_uses_db(right),
-        Expr::Declassify(i) | Expr::Await(i) => expr_uses_db(i),
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_uses_db(i),
         Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_db(v)),
         Expr::ListLit(items) => items.iter().any(expr_uses_db),
         Expr::Ternary { cond, then, otherwise } => {
@@ -538,8 +538,11 @@ fn handle_conn(stream: &mut TcpStream) -> std::io::Result<()> {
     let path = parts.next().unwrap_or("/");
     let body = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
     let (code, ctype, payload) = dispatch(method, path, body);
+    // Default S1: security headers on every response. Strict CSP forbids inline
+    // script (backstops R22); inline style is allowed for the language's <style>
+    // blocks and style="" attributes.
     let resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         code, reason(code), ctype, payload.as_bytes().len(), payload
     );
     stream.write_all(resp.as_bytes())?;
@@ -750,7 +753,8 @@ fn gen_client(program: &XeresProgram) -> String {
                 "\nexport function __start(rootId: string): void {{\n\
                  \x20 const el = document.getElementById(rootId);\n\
                  \x20 if (el) mount(el, () => {screen}());\n\
-                 }}\n",
+                 }}\n\
+                 __start(\"app\");\n",
                 screen = sc.name
             ));
         }
@@ -935,9 +939,9 @@ impl ScreenEmit {
                             ));
                             s.push_str(" data-onclick=\"");
                             s.push_str(&hname);
-                            s.push_str("\" data-key=\"${");
+                            s.push_str("\" data-key=\"${__esc(");
                             s.push_str(&key);
-                            s.push_str("}\"");
+                            s.push_str(")}\"");
                         } else {
                             self.handlers.push_str(&format!(
                                 "{kw} {h}() {{ {b} }}\non(\"{h}\", {h});\n",
@@ -970,9 +974,9 @@ impl ScreenEmit {
                         sc = self.screen,
                         v = var
                     ));
-                    s.push_str(" value=\"${");
+                    s.push_str(" value=\"${__esc(");
                     s.push_str(var);
-                    s.push_str("}\" data-bind=\"");
+                    s.push_str(")}\" data-bind=\"");
                     s.push_str(&bname);
                     s.push('"');
                 }
@@ -983,10 +987,17 @@ impl ScreenEmit {
                 s.push('>');
                 match arg {
                     Some(Expr::Str(t)) => s.push_str(t),
-                    Some(e) => {
+                    // `raw(...)` — the single audited un-escaped HTML sink (R22).
+                    Some(Expr::Raw(inner)) => {
                         s.push_str("${");
-                        s.push_str(&emit_expr(e, true));
+                        s.push_str(&emit_expr(inner, true));
                         s.push('}');
+                    }
+                    // Default: every interpolated value is HTML-escaped (R22).
+                    Some(e) => {
+                        s.push_str("${__esc(");
+                        s.push_str(&emit_expr(e, true));
+                        s.push_str(")}");
                     }
                     None => {}
                 }
@@ -1176,7 +1187,7 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
             binop_sym(*op),
             emit_h_expr(right, screen, sv)
         ),
-        Expr::Declassify(inner) => emit_h_expr(inner, screen, sv),
+        Expr::Declassify(inner) | Expr::Raw(inner) => emit_h_expr(inner, screen, sv),
         Expr::Await(inner) => format!("await {}", emit_h_expr(inner, screen, sv)),
         Expr::MethodCall { receiver, method, args } => {
             if method == "or" && args.len() == 1 {
@@ -1247,7 +1258,7 @@ fn expr_has_await(e: &Expr) -> bool {
         Expr::Call { args, .. } => args.iter().any(expr_has_await),
         Expr::Unary { expr, .. } => expr_has_await(expr),
         Expr::Binary { left, right, .. } => expr_has_await(left) || expr_has_await(right),
-        Expr::Declassify(inner) => expr_has_await(inner),
+        Expr::Declassify(inner) | Expr::Raw(inner) => expr_has_await(inner),
         Expr::MethodCall { receiver, args, .. } => {
             expr_has_await(receiver) || args.iter().any(expr_has_await)
         }
@@ -1263,6 +1274,13 @@ fn expr_has_await(e: &Expr) -> bool {
 }
 
 const MOUNT_RUNTIME: &str = r#"// ---- xeres dom runtime ----
+// R22: every interpolated view value is HTML-escaped before it reaches the DOM,
+// so `text userInput` can never inject markup. `raw(...)` is the audited opt-out.
+function __esc(v: unknown): string {
+  return String(v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 type XHandler = (key?: string) => void | Promise<void>;
 const __handlers = new Map<string, XHandler>();
 const __binds = new Map<string, (v: string) => void>();
@@ -1305,7 +1323,7 @@ fn gen_index(program: &XeresProgram) -> String {
         out.push_str(INDEX_HEAD_BLEED);
         out.push_str("<div id=\"app\"></div>");
         out.push_str(
-            "<script type=\"module\">import { __start } from \"./client.js\"; __start(\"app\");</script>",
+            "<script type=\"module\" src=\"./client.js\"></script>",
         );
         out.push_str("</body></html>");
         return out;
@@ -1321,7 +1339,7 @@ fn gen_index(program: &XeresProgram) -> String {
     out.push_str("</main>");
     if first.is_some() {
         out.push_str(
-            "<script type=\"module\">import { __start } from \"./client.js\"; __start(\"app\");</script>",
+            "<script type=\"module\" src=\"./client.js\"></script>",
         );
     }
     out.push_str("</body></html>");
@@ -1583,7 +1601,7 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
             format!("({} {} {})", emit_expr(left, ts), binop_sym(*op), emit_expr(right, ts))
         }
         // declassify is a server-only, audited identity at the value level.
-        Expr::Declassify(inner) => emit_expr(inner, ts),
+        Expr::Declassify(inner) | Expr::Raw(inner) => emit_expr(inner, ts),
         Expr::Await(inner) => format!("await {}", emit_expr(inner, ts)),
         Expr::MethodCall { receiver, method, args } => {
             // `db.*` compiles to Postgres helper calls (server tier only).

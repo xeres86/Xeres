@@ -179,6 +179,7 @@ fn resolve_type(
             }
         }
         Expr::Declassify(inner) => resolve_type(inner, locals, table),
+        Expr::Raw(inner) => resolve_type(inner, locals, table),
         Expr::Await(inner) => resolve_type(inner, locals, table),
         Expr::MethodCall { receiver, method, args: _ } => {
             if let Expr::Ident(name) = receiver.as_ref() {
@@ -257,6 +258,9 @@ fn is_tainted(
                 || is_tainted(right, locals, table, returns_secret)
         }
         Expr::Declassify(_) => false,
+        // `raw()` is an HTML-trust marker, orthogonal to secret taint: it does
+        // NOT launder a secret, so propagate the inner expression's taint.
+        Expr::Raw(inner) => is_tainted(inner, locals, table, returns_secret),
         // An awaited value crossed the wire (secrets stripped) — it is clean.
         Expr::Await(_) => false,
         Expr::MethodCall { .. } => false,
@@ -879,6 +883,7 @@ fn check_bindings(
             check_bindings(right, locals, sname, sline, table, errors);
         }
         Expr::Declassify(inner) => check_bindings(inner, locals, sname, sline, table, errors),
+        Expr::Raw(inner) => check_bindings(inner, locals, sname, sline, table, errors),
         Expr::Await(inner) => check_bindings(inner, locals, sname, sline, table, errors),
         Expr::MethodCall { receiver, args, .. } => {
             check_bindings(receiver, locals, sname, sline, table, errors);
@@ -1026,6 +1031,9 @@ fn check_expr(
             check_expr(inner, locals, fn_env, fn_name, fn_line, table, errors);
         }
         Expr::Await(inner) => check_expr(inner, locals, fn_env, fn_name, fn_line, table, errors),
+        // `raw(...)` has no tier rule (it's a view-escaping sink, not a secret
+        // downgrade) — just check the inner expression.
+        Expr::Raw(inner) => check_expr(inner, locals, fn_env, fn_name, fn_line, table, errors),
         Expr::MethodCall { receiver, method, args } => {
             // `db.*` is the server-only database capability; everything else is
             // a synced-collection method. (Don't recurse into `db` as a value.)
@@ -1308,6 +1316,7 @@ fn check_await(
             check_await(right, false, in_browser, fn_name, line, table, errors);
         }
         Expr::Declassify(inner) => check_await(inner, false, in_browser, fn_name, line, table, errors),
+        Expr::Raw(inner) => check_await(inner, false, in_browser, fn_name, line, table, errors),
         Expr::MethodCall { receiver, args, .. } => {
             check_await(receiver, false, in_browser, fn_name, line, table, errors);
             for a in args {

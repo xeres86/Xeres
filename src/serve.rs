@@ -44,8 +44,15 @@ fn handle_conn(mut stream: TcpStream, program: &XeresProgram, static_dir: &str) 
     let body = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
 
     let (code, ctype, payload) = dispatch(method, path, body, program, static_dir);
+    // Default S1: security headers on every response, no opt-in. The strict CSP
+    // forbids inline/external script except 'self' (backstops R22 — an injected
+    // <script> can't run); inline style is allowed (the language emits <style>
+    // blocks and style="" attributes).
     let resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n\
+         X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n\
+         Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n\
+         Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         code,
         reason(code),
         ctype,

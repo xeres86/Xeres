@@ -24,6 +24,19 @@ tier-safe boundary; new constructs go through the same checker.
   `String` and its argument count must match (`contains`/`split` take 1,
   `replace` 2, the rest 0). `abs`/`min`/`max` stay `Int` when all arguments are
   `Int`, else `Float`.
+- **View XSS escaping (R22) + secure-by-default headers** — every value
+  interpolated into a view is HTML-escaped before it reaches the DOM (text
+  content, `value="…"` attributes, and per-item `data-key`s), so `text userInput`
+  can never inject markup: *escaping is the default, not a thing the developer has
+  to remember*. The single audited opt-out is **`raw(html)`** — a keyword in the
+  spirit of `declassify` (greppable, reviewable) for the rare trusted-HTML case.
+  Backstopped by a strict **Content-Security-Policy** (no inline/external script
+  except `'self'`; inline style allowed for the language's `<style>`/`style=""`),
+  shipped with `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`
+  and `X-Frame-Options: DENY` on **every** response from both the `xeres serve`
+  runtime and the ejected server — no opt-in. The client bootstrap moved out of an
+  inline `<script>` (`client.js` now self-starts) so the CSP needs no script
+  exceptions.
 
 ## 0.2.0 — view & component layer
 

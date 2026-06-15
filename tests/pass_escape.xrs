@@ -1,0 +1,14 @@
+// R22 — interpolated view values are HTML-escaped by default. A state string
+// carrying markup renders as inert text, never live DOM (no opt-in needed).
+ui screen S {
+  state danger: String = "<img src=x onerror=alert(1)>"
+  state name: String = ""
+  view {
+    column {
+      heading "escape demo"
+      text danger
+      input "your name" bind name
+      text name
+    }
+  }
+}

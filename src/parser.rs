@@ -52,6 +52,9 @@ pub enum Expr {
     Unary { op: UnOp, expr: Box<Expr> },
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     Declassify(Box<Expr>),
+    /// `raw(html)` — the single audited sink that bypasses default view
+    /// escaping (R22). Like `declassify`: greppable, reviewable, deliberate.
+    Raw(Box<Expr>),
     Await(Box<Expr>),
     MethodCall { receiver: Box<Expr>, method: String, args: Vec<Expr> },
     Record { name: String, fields: Vec<(String, Expr)> },
@@ -753,6 +756,15 @@ impl<'a> Parser<'a> {
                 self.next_token(); // consume ')'
                 Some(Expr::Declassify(Box::new(inner)))
             }
+            Token::Raw => {
+                self.next_token(); // consume 'raw'
+                if self.current_token != Token::LParen { return None; }
+                self.next_token(); // consume '('
+                let inner = self.parse_expr()?;
+                if self.current_token != Token::RParen { return None; }
+                self.next_token(); // consume ')'
+                Some(Expr::Raw(Box::new(inner)))
+            }
             Token::NoneLit => {
                 self.next_token();
                 Some(Expr::NoneLit)
@@ -1036,6 +1048,7 @@ impl<'a> Parser<'a> {
             self.current_token,
             Token::Str(_) | Token::Int(_) | Token::Float(_) | Token::True | Token::False
                 | Token::Identifier(_) | Token::LParen | Token::Minus | Token::Bang
+                | Token::Raw  // `text raw(html)` — the audited un-escaped sink
         )
     }
 

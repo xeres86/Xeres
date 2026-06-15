@@ -1,0 +1,10 @@
+// R22 — `raw(...)` is the single audited opt-out (like `declassify`): the only
+// way to interpolate un-escaped HTML into a view. Greppable and reviewable.
+ui screen S {
+  state html: String = "<b>bold</b>"
+  view {
+    column {
+      text raw(html)
+    }
+  }
+}

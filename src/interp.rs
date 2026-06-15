@@ -220,6 +220,7 @@ impl<'a> Interp<'a> {
                 self.call(callee, argv)
             }
             Expr::Declassify(inner) => self.eval(inner, env),
+            Expr::Raw(inner) => self.eval(inner, env),
             Expr::Await(inner) => self.eval(inner, env),
             Expr::Record { name, fields } => {
                 let mut fs = Vec::new();
