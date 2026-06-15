@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 (unreleased) — security hardening, wave 2
+## 0.4.0 — 2026-06-15 — security wave 2 (CSRF, R26 SSRF, R27 logging) + on-load
 
 Finishing the secure-by-default posture and the remaining capability gaps.
 
