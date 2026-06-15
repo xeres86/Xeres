@@ -1237,6 +1237,97 @@ fn check_session_member(
 /// Does any statement in this body consult `session` (R24)? An `auth` fn that
 /// never reads `session.actor` is the "I forgot the auth check" bug — so it must
 /// not compile.
+/// R25 — actor-scope (anti-IDOR). In an `auth` fn, a `db.query/query_one/exec`
+/// that binds any parameter must include `session.actor` among those params, so
+/// a protected resource can't be fetched or mutated by a caller-supplied id
+/// alone (the common IDOR omission stops compiling).
+fn check_actor_scope(stmts: &[Stmt], fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+    for s in stmts {
+        stmt_actor_scope(s, fn_name, line, errors);
+    }
+}
+
+fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+    match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::Return(value)
+        | Stmt::Expr(value) => expr_actor_scope(value, fn_name, line, errors),
+        Stmt::Try { body, handler } => {
+            check_actor_scope(body, fn_name, line, errors);
+            check_actor_scope(handler, fn_name, line, errors);
+        }
+        Stmt::If { cond, then_body, else_body } => {
+            expr_actor_scope(cond, fn_name, line, errors);
+            check_actor_scope(then_body, fn_name, line, errors);
+            check_actor_scope(else_body, fn_name, line, errors);
+        }
+        Stmt::For { iter, body, .. } => {
+            expr_actor_scope(iter, fn_name, line, errors);
+            check_actor_scope(body, fn_name, line, errors);
+        }
+        Stmt::While { cond, body } => {
+            expr_actor_scope(cond, fn_name, line, errors);
+            check_actor_scope(body, fn_name, line, errors);
+        }
+        Stmt::Match { scrutinee, arms } => {
+            expr_actor_scope(scrutinee, fn_name, line, errors);
+            for a in arms {
+                check_actor_scope(&a.body, fn_name, line, errors);
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
+    }
+}
+
+fn expr_actor_scope(e: &Expr, fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+    if let Expr::MethodCall { receiver, method, args } = e {
+        let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
+        if is_db && matches!(method.as_str(), "query" | "query_one" | "exec") {
+            // args[0] is the SQL literal; args[1..] are the bound parameters.
+            let params = args.get(1..).unwrap_or(&[]);
+            if !params.is_empty() && !params.iter().any(expr_uses_session) {
+                errors.push(SemanticError {
+                    rule: "R25 actor-scope",
+                    message: format!(
+                        "`db.{}` in `auth fn {}` binds a caller-supplied value but not `session.actor`. Add an ownership predicate bound to the actor (e.g. `… where id = $1 and owner = $2`, …, session.actor) — a protected query scoped only by a caller id is an IDOR.",
+                        method, fn_name
+                    ),
+                    line,
+                });
+            }
+        }
+    }
+    match e {
+        Expr::Field { base, .. } => expr_actor_scope(base, fn_name, line, errors),
+        Expr::Call { args, .. } => args.iter().for_each(|a| expr_actor_scope(a, fn_name, line, errors)),
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_actor_scope(receiver, fn_name, line, errors);
+            args.iter().for_each(|a| expr_actor_scope(a, fn_name, line, errors));
+        }
+        Expr::Unary { expr, .. } => expr_actor_scope(expr, fn_name, line, errors),
+        Expr::Binary { left, right, .. } => {
+            expr_actor_scope(left, fn_name, line, errors);
+            expr_actor_scope(right, fn_name, line, errors);
+        }
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_actor_scope(i, fn_name, line, errors),
+        Expr::Record { fields, .. } => {
+            fields.iter().for_each(|(_, v)| expr_actor_scope(v, fn_name, line, errors))
+        }
+        Expr::ListLit(items) => items.iter().for_each(|i| expr_actor_scope(i, fn_name, line, errors)),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_actor_scope(cond, fn_name, line, errors);
+            expr_actor_scope(then, fn_name, line, errors);
+            expr_actor_scope(otherwise, fn_name, line, errors);
+        }
+        Expr::Range { start, end } => {
+            expr_actor_scope(start, fn_name, line, errors);
+            expr_actor_scope(end, fn_name, line, errors);
+        }
+        _ => {}
+    }
+}
+
 fn stmts_use_session(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_uses_session)
 }
@@ -1712,6 +1803,9 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
                 line: f.line,
             });
         }
+        // R25 — a parameterized `db` query in this protected fn must bind the
+        // actor (anti-IDOR).
+        check_actor_scope(&f.body, &f.name, f.line, &mut errors);
     }
 
     for f in &program.functions {

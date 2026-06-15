@@ -1,0 +1,16 @@
+// R25 — the actor-scoped form: the query binds `session.actor` as the owner
+// predicate, so it can only ever return the caller's own row. (Satisfies R24 +
+// R25 together; user-supplied `id` still flows through a $-param, R23.)
+model Note {
+  id: String
+  owner: String
+  body: String
+}
+
+auth server fn get_my_note(id: String) -> Note {
+  return db.query_one("select id, owner, body from notes where id = $1 and owner = $2", id, session.actor)
+}
+
+auth server fn delete_my_note(id: String) -> Int {
+  return db.exec("delete from notes where id = $1 and owner = $2", id, session.actor)
+}

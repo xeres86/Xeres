@@ -66,7 +66,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
 ## v0.3 — language foundations + security hardening
 Rounding out the core language *and* moving web-app security from developer
 discipline into compiler-enforced impossibility (see `SECURITY-HARDENING.md`).
-Rules now span **R1–R24**.
+Rules now span **R1–R25**.
 
 Landed:
 - **Primitives & stdlib** — `DateTime` + `now()`; `enum` + exhaustive `match`
@@ -83,10 +83,11 @@ Landed:
   `HttpOnly; Secure; SameSite=Strict` cookie; the `auth server fn` modifier must
   consult `session` or it won't compile. Interpreter-proven; eject guarded by a
   `compile_error!` pending cookie-threading in the generated server.
+- **R25 actor-scope** (anti-IDOR) — in an `auth` fn, a parameterized `db` query
+  must bind `session.actor` (an ownership predicate); a fetch/mutation scoped
+  only by a caller-supplied id doesn't compile.
 
 Remaining (next, in sequence):
-- **R25 actor-scope** (anti-IDOR): a protected fetch/mutation must reference
-  `session.actor`, not a caller-supplied id alone.
 - **Default S1 CSRF** (double-submit token) + **Default S2 TLS/HSTS**.
 - **R26 `endpoint` egress allowlist** (anti-SSRF): outbound HTTP only through a
   declared, host-fixed `endpoint`.

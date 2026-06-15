@@ -36,11 +36,8 @@ pub struct Interp<'a> {
 }
 
 impl<'a> Interp<'a> {
-    pub fn new(program: &'a XeresProgram) -> Self {
-        Interp { program, session_actor: None, set_cookie: std::cell::RefCell::new(None) }
-    }
-
-    /// Construct with the actor recovered from a verified session cookie.
+    /// Construct with the actor recovered from a verified session cookie
+    /// (`None` = anonymous; the sync path and non-session apps pass `None`).
     pub fn with_session(program: &'a XeresProgram, session_actor: Option<String>) -> Self {
         Interp { program, session_actor, set_cookie: std::cell::RefCell::new(None) }
     }

@@ -58,6 +58,13 @@ tier-safe boundary; new constructs go through the same checker.
   behind the existing `auth` feature. Eject (`xeres build`) guards a session app
   with a `compile_error!` for now — the interpreter is the supported session
   runtime. Fixtures: pass_session, fail_protected_no_auth, fail_session_in_ui.
+- **Actor-scope, anti-IDOR (R25)** — in an `auth` fn, a `db` query that binds any
+  parameter must also bind `session.actor` as an ownership predicate. A protected
+  fetch or mutation scoped only by a caller-supplied id (`… where id = $1`,
+  note_id) is a probable IDOR and does not compile; the actor-scoped form
+  (`… where id = $1 and owner = $2`, note_id, session.actor) is required. This
+  makes the common "forgot the ownership check" omission non-compiling. Fixtures:
+  pass_owner_scope, fail_idor_no_owner.
 
 ## 0.2.0 — view & component layer
 
