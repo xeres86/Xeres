@@ -1139,7 +1139,8 @@ impl<'a> Parser<'a> {
             self.current_token,
             Token::Str(_) | Token::Int(_) | Token::Float(_) | Token::True | Token::False
                 | Token::Identifier(_) | Token::LParen | Token::Minus | Token::Bang
-                | Token::Raw  // `text raw(html)` — the audited un-escaped sink
+                | Token::Raw         // `text raw(html)` — the audited un-escaped sink
+                | Token::LBracket    // a list-literal arg, e.g. `select [..] bind x`
         )
     }
 

@@ -1,0 +1,12 @@
+// P3 — `radio` renders a group of radio inputs from a list arg; the bound
+// `String` state is the chosen value (the inputs share a name + data-bind).
+ui screen Survey {
+  state plan: String = "free"
+  view {
+    column {
+      heading "Plan"
+      radio ["free", "pro", "team"] bind plan
+      text plan
+    }
+  }
+}

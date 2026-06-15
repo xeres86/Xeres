@@ -1,0 +1,12 @@
+// P3 — `select` renders `<option>`s from a list arg; the bound `String` state is
+// the selected value (reflected via `selected`, updated on change).
+ui screen Picker {
+  state color: String = "Red"
+  view {
+    column {
+      heading "Pick a colour"
+      select ["Red", "Green", "Blue"] bind color
+      text color
+    }
+  }
+}

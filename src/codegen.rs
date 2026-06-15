@@ -1166,10 +1166,12 @@ impl ScreenEmit {
                         s.push_str(" ? \"checked\" : \"\"} data-bind=\"");
                         s.push_str(&bname);
                         s.push('"');
-                    } else if tag == "textarea" {
+                    } else if tag == "textarea" || tag == "select" {
                         s.push_str(" data-bind=\"");
                         s.push_str(&bname);
                         s.push('"');
+                    } else if tag == "radio" {
+                        // the data-bind + name go on each generated input (content).
                     } else {
                         s.push_str(" value=\"${__esc(");
                         s.push_str(var);
@@ -1183,13 +1185,35 @@ impl ScreenEmit {
                     return s;
                 }
                 s.push('>');
-                // A bound `textarea` carries its value as element content; every
-                // other tag emits its positional arg.
+                // A bound `textarea` carries its value as element content; a
+                // `select` generates `<option>`s from its list arg (the bound
+                // value is the selected one); every other tag emits its arg.
                 if tag == "textarea" {
                     if let Some(var) = bind {
                         s.push_str("${__esc(");
                         s.push_str(var);
                         s.push_str(")}");
+                    }
+                } else if tag == "select" {
+                    if let (Some(var), Some(opts)) = (bind, arg) {
+                        s.push_str("${(");
+                        s.push_str(&emit_expr(opts, true));
+                        s.push_str(").map((__o) => `<option ${(");
+                        s.push_str(var);
+                        s.push_str(") === __o ? \"selected\" : \"\"}>${__esc(__o)}</option>`).join(\"\")}");
+                    }
+                } else if tag == "radio" {
+                    if let (Some(var), Some(opts)) = (bind, arg) {
+                        let bname = format!("{}:{}", self.screen, var);
+                        s.push_str("${(");
+                        s.push_str(&emit_expr(opts, true));
+                        s.push_str(").map((__o) => `<label><input type=\"radio\" name=\"");
+                        s.push_str(&bname);
+                        s.push_str("\" value=\"${__esc(__o)}\" ${(");
+                        s.push_str(var);
+                        s.push_str(") === __o ? \"checked\" : \"\"} data-bind=\"");
+                        s.push_str(&bname);
+                        s.push_str("\" />${__esc(__o)}</label>`).join(\"\")}");
                     }
                 } else {
                     match arg {
@@ -1511,7 +1535,7 @@ export function mount(el: HTMLElement, render: () => string): void {
       const b = __binds.get(name);
       if (!b) return;
       if (node.type === "checkbox") { node.onchange = () => b(node.checked); }
-      else { node.oninput = () => b(node.value); }
+      else { node.oninput = () => b(node.value); node.onchange = () => b(node.value); }
     });
   };
   __draw = draw;
@@ -2276,6 +2300,7 @@ fn map_tag(tag: &str) -> &str {
         "password" => "input",
         "checkbox" => "input",  // type="checkbox" added in codegen
         "image" => "img",
+        "radio" => "div",       // a <div> wrapping the generated radio-input group
         other => other,         // text, input, textarea, select, option …
     }
 }

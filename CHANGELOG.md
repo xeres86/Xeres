@@ -4,12 +4,14 @@
 
 The remaining capability gaps for line-of-business apps.
 
-- **Form controls (P3, part 1)** — `textarea` (bind `String`, multiline; value is
-  the element content), `checkbox` (bind `Bool`, reflected via `checked` and read
-  back from `node.checked`), and `image` (escaped `src`). Each routes through the
-  R22 escape path, and **R13 is now type-aware** — `checkbox` requires a `Bool`
-  state, the others a `String`. Fixtures: pass_form_controls, fail_checkbox_string.
-  (Still to come: `select`, `radio`, and `link` — `link` depends on the router.)
+- **Form controls (P3)** — `textarea` (bind `String`, multiline; value is the
+  element content), `checkbox` (bind `Bool`, reflected via `checked`, read from
+  `node.checked`), `image` (escaped `src`), `select` (renders `<option>`s from a
+  list arg; the bound `String` is the selected one), and `radio` (a grouped set
+  from a list arg). All route through the R22 escape path; **R13 is type-aware**
+  (`checkbox` needs `Bool`, the rest `String`); list-literal args are now allowed
+  in views. Fixtures: pass_form_controls, pass_select, pass_radio,
+  fail_checkbox_string. (`link` lands with the **router** in a later cut.)
 
 ## 0.4.0 — 2026-06-15 — security wave 2 (CSRF, R26 SSRF, R27 logging) + on-load
 
