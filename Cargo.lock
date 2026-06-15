@@ -1346,12 +1346,14 @@ dependencies = [
 
 [[package]]
 name = "xeres"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argon2",
+ "hmac",
  "native-tls",
  "postgres",
  "postgres-native-tls",
+ "sha2",
 ]
 
 [[package]]

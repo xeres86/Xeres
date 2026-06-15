@@ -1,0 +1,14 @@
+// R25 — an `auth` fetch scoped by a caller-supplied id but NOT by
+// `session.actor` is a probable IDOR (any caller could pass another user's id),
+// so it does not compile. (R24 is satisfied — the fn reads the actor — but the
+// query never binds it.)
+model Note {
+  id: String
+  owner: String
+  body: String
+}
+
+auth server fn get_note(id: String) -> Note {
+  let me = session.actor
+  return db.query_one("select id, owner, body from notes where id = $1", id)
+}

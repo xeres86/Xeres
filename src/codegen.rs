@@ -12,7 +12,7 @@
 //                stub — the dev never hand-writes a fetch.
 
 use crate::parser::{
-    BinOp, EnvModifier, Expr, FunctionNode, Handler, Stmt, UnOp, ViewNode, XeresProgram,
+    BinOp, EnvModifier, Expr, FunctionNode, Handler, MatchPat, Stmt, UnOp, ViewNode, XeresProgram,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -69,6 +69,9 @@ fn stmt_uses_auth(s: &Stmt) -> bool {
         }
         Stmt::For { iter, body, .. } => expr_uses_auth(iter) || body.iter().any(stmt_uses_auth),
         Stmt::While { cond, body } => expr_uses_auth(cond) || body.iter().any(stmt_uses_auth),
+        Stmt::Match { scrutinee, arms } => {
+            expr_uses_auth(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_auth))
+        }
         Stmt::Break | Stmt::Continue => false,
     }
 }
@@ -83,13 +86,62 @@ fn expr_uses_auth(e: &Expr) -> bool {
         Expr::Field { base, .. } => expr_uses_auth(base),
         Expr::Unary { expr, .. } => expr_uses_auth(expr),
         Expr::Binary { left, right, .. } => expr_uses_auth(left) || expr_uses_auth(right),
-        Expr::Declassify(i) | Expr::Await(i) => expr_uses_auth(i),
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_uses_auth(i),
         Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_auth(v)),
         Expr::ListLit(items) => items.iter().any(expr_uses_auth),
         Expr::Ternary { cond, then, otherwise } => {
             expr_uses_auth(cond) || expr_uses_auth(then) || expr_uses_auth(otherwise)
         }
         Expr::Range { start, end } => expr_uses_auth(start) || expr_uses_auth(end),
+        _ => false,
+    }
+}
+
+/// Does any function reference the `session` capability? The ejected server
+/// doesn't support it yet (cookie threading is interpreter-only), so its
+/// presence triggers a clean `compile_error!` rather than broken/insecure code.
+fn uses_session(program: &XeresProgram) -> bool {
+    program.functions.iter().any(|f| f.body.iter().any(stmt_uses_session))
+}
+fn stmt_uses_session(s: &Stmt) -> bool {
+    match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::Return(value)
+        | Stmt::Expr(value) => expr_uses_session(value),
+        Stmt::Try { body, handler } => {
+            body.iter().any(stmt_uses_session) || handler.iter().any(stmt_uses_session)
+        }
+        Stmt::If { cond, then_body, else_body } => {
+            expr_uses_session(cond)
+                || then_body.iter().any(stmt_uses_session)
+                || else_body.iter().any(stmt_uses_session)
+        }
+        Stmt::For { iter, body, .. } => expr_uses_session(iter) || body.iter().any(stmt_uses_session),
+        Stmt::While { cond, body } => expr_uses_session(cond) || body.iter().any(stmt_uses_session),
+        Stmt::Match { scrutinee, arms } => {
+            expr_uses_session(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_session))
+        }
+        Stmt::Break | Stmt::Continue => false,
+    }
+}
+fn expr_uses_session(e: &Expr) -> bool {
+    let is_session = |x: &Expr| matches!(x, Expr::Ident(n) if n == "session");
+    match e {
+        Expr::Field { base, .. } => is_session(base) || expr_uses_session(base),
+        Expr::MethodCall { receiver, args, .. } => {
+            is_session(receiver) || expr_uses_session(receiver) || args.iter().any(expr_uses_session)
+        }
+        Expr::Call { args, .. } => args.iter().any(expr_uses_session),
+        Expr::Unary { expr, .. } => expr_uses_session(expr),
+        Expr::Binary { left, right, .. } => expr_uses_session(left) || expr_uses_session(right),
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_uses_session(i),
+        Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_session(v)),
+        Expr::ListLit(items) => items.iter().any(expr_uses_session),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_uses_session(cond) || expr_uses_session(then) || expr_uses_session(otherwise)
+        }
+        Expr::Range { start, end } => expr_uses_session(start) || expr_uses_session(end),
         _ => false,
     }
 }
@@ -112,6 +164,9 @@ fn stmt_uses_db(s: &Stmt) -> bool {
         }
         Stmt::For { iter, body, .. } => expr_uses_db(iter) || body.iter().any(stmt_uses_db),
         Stmt::While { cond, body } => expr_uses_db(cond) || body.iter().any(stmt_uses_db),
+        Stmt::Match { scrutinee, arms } => {
+            expr_uses_db(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_db))
+        }
         Stmt::Break | Stmt::Continue => false,
     }
 }
@@ -126,7 +181,7 @@ fn expr_uses_db(e: &Expr) -> bool {
         Expr::Call { args, .. } => args.iter().any(expr_uses_db),
         Expr::Unary { expr, .. } => expr_uses_db(expr),
         Expr::Binary { left, right, .. } => expr_uses_db(left) || expr_uses_db(right),
-        Expr::Declassify(i) | Expr::Await(i) => expr_uses_db(i),
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_uses_db(i),
         Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_db(v)),
         Expr::ListLit(items) => items.iter().any(expr_uses_db),
         Expr::Ternary { cond, then, otherwise } => {
@@ -140,6 +195,18 @@ fn expr_uses_db(e: &Expr) -> bool {
 // ------------------------------------------------------------------ server.rs
 
 fn gen_server(program: &XeresProgram) -> String {
+    // The `session` capability's signed-cookie threading is implemented in the
+    // interpreter (`xeres serve`) only; the ejected server doesn't support it
+    // yet. Fail loudly and clearly rather than emit broken or insecure code.
+    if uses_session(program) {
+        return "// GENERATED by xeres — server tier.\n\
+                compile_error!(\"`session` is not yet supported by the ejected server (`xeres build`). \
+                Run the app with `xeres serve`, which has full session support (HMAC-signed \
+                HttpOnly/Secure/SameSite cookies). Ejected session support is planned.\");\n\
+                fn main() {}\n"
+            .to_string();
+    }
+
     let models: HashSet<&str> = program.models.iter().map(|m| m.name.as_str()).collect();
 
     let mut out = String::new();
@@ -153,6 +220,16 @@ fn gen_server(program: &XeresProgram) -> String {
     }
     if uses_auth(program) {
         out.push_str(CRYPTO_PRELUDE);
+        out.push('\n');
+    }
+
+    // Enums are string-backed: the variant validity is proven by the checker
+    // (R20), so the server tier carries them as `String` (wire = the variant).
+    for e in &program.enums {
+        let variants = e.variants.iter().map(|v| format!("// {}", v)).collect::<Vec<_>>().join(" ");
+        out.push_str(&format!("pub type {} = String;  {}\n", e.name, variants));
+    }
+    if !program.enums.is_empty() {
         out.push('\n');
     }
 
@@ -317,12 +394,15 @@ fn decode_json_rust(src: &str, ty: &str, program: &XeresProgram, depth: usize) -
             .join(", ");
         return format!("{} {{ {} }}", ty, fields);
     }
-    // scalar
+    // String and string-backed enums decode from a JSON string.
+    if ty == "String" || program.enums.iter().any(|e| e.name == ty) {
+        return format!("{}.map(|__v| __v.as_string()).unwrap_or_default()", src);
+    }
+    // scalar (Int, DateTime as i64; Float; Bool)
     match ty {
-        "String" => format!("{}.map(|__v| __v.as_string()).unwrap_or_default()", src),
         "Float" => format!("{}.and_then(|__v| __v.as_f64()).unwrap_or(0.0)", src),
         "Bool" => format!("{}.map(|__v| __v.as_bool()).unwrap_or_default()", src),
-        _ => format!("{}.map(|__v| __v.as_i64()).unwrap_or_default()", src), // Int
+        _ => format!("{}.map(|__v| __v.as_i64()).unwrap_or_default()", src),
     }
 }
 
@@ -346,11 +426,12 @@ fn wire_serialize(path: &str, ty: &str, models: &HashSet<&str>) -> String {
     }
     if models.contains(ty) {
         format!("{}.to_wire_json()", path)
-    } else if ty == "String" {
-        format!("json_str(&{})", path)
-    } else {
-        // Int, Float, Bool are valid JSON scalars as-is.
+    } else if matches!(ty, "Int" | "Float" | "Bool" | "DateTime") {
+        // valid JSON number/bool scalars as-is
         format!("{}.to_string()", path)
+    } else {
+        // String and (string-backed) enums -> a JSON string
+        format!("json_str(&{})", path)
     }
 }
 
@@ -381,6 +462,12 @@ fn uid() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("{:x}", n)
+}
+
+/// The `now()` builtin, server side: epoch milliseconds (matches `Date.now()`).
+fn now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 /// A JSON value + a recursive-descent parser (std-only). Shared by the RPC
@@ -512,8 +599,11 @@ fn handle_conn(stream: &mut TcpStream) -> std::io::Result<()> {
     let path = parts.next().unwrap_or("/");
     let body = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
     let (code, ctype, payload) = dispatch(method, path, body);
+    // Default S1: security headers on every response. Strict CSP forbids inline
+    // script (backstops R22); inline style is allowed for the language's <style>
+    // blocks and style="" attributes.
     let resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         code, reason(code), ctype, payload.as_bytes().len(), payload
     );
     stream.write_all(resp.as_bytes())?;
@@ -587,6 +677,16 @@ fn gen_client(program: &XeresProgram) -> String {
     out.push('\n');
     out.push_str(UID_FN);
     out.push('\n');
+
+    // Enums — a string union (the variant names). String-backed end to end.
+    for e in &program.enums {
+        let union = e.variants.iter().map(|v| format!("\"{}\"", v)).collect::<Vec<_>>().join(" | ");
+        let union = if union.is_empty() { "never".to_string() } else { union };
+        out.push_str(&format!("export type {} = {};\n", e.name, union));
+    }
+    if !program.enums.is_empty() {
+        out.push('\n');
+    }
 
     // Model interfaces — secret fields are STRIPPED. They never reach the client.
     for m in &program.models {
@@ -714,7 +814,8 @@ fn gen_client(program: &XeresProgram) -> String {
                 "\nexport function __start(rootId: string): void {{\n\
                  \x20 const el = document.getElementById(rootId);\n\
                  \x20 if (el) mount(el, () => {screen}());\n\
-                 }}\n",
+                 }}\n\
+                 __start(\"app\");\n",
                 screen = sc.name
             ));
         }
@@ -899,9 +1000,9 @@ impl ScreenEmit {
                             ));
                             s.push_str(" data-onclick=\"");
                             s.push_str(&hname);
-                            s.push_str("\" data-key=\"${");
+                            s.push_str("\" data-key=\"${__esc(");
                             s.push_str(&key);
-                            s.push_str("}\"");
+                            s.push_str(")}\"");
                         } else {
                             self.handlers.push_str(&format!(
                                 "{kw} {h}() {{ {b} }}\non(\"{h}\", {h});\n",
@@ -934,9 +1035,9 @@ impl ScreenEmit {
                         sc = self.screen,
                         v = var
                     ));
-                    s.push_str(" value=\"${");
+                    s.push_str(" value=\"${__esc(");
                     s.push_str(var);
-                    s.push_str("}\" data-bind=\"");
+                    s.push_str(")}\" data-bind=\"");
                     s.push_str(&bname);
                     s.push('"');
                 }
@@ -947,10 +1048,17 @@ impl ScreenEmit {
                 s.push('>');
                 match arg {
                     Some(Expr::Str(t)) => s.push_str(t),
-                    Some(e) => {
+                    // `raw(...)` — the single audited un-escaped HTML sink (R22).
+                    Some(Expr::Raw(inner)) => {
                         s.push_str("${");
-                        s.push_str(&emit_expr(e, true));
+                        s.push_str(&emit_expr(inner, true));
                         s.push('}');
+                    }
+                    // Default: every interpolated value is HTML-escaped (R22).
+                    Some(e) => {
+                        s.push_str("${__esc(");
+                        s.push_str(&emit_expr(e, true));
+                        s.push_str(")}");
                     }
                     None => {}
                 }
@@ -1075,6 +1183,20 @@ fn emit_h_stmt(s: &Stmt, screen: &str, sv: &HashSet<String>) -> String {
         }
         Stmt::Break => "break;".to_string(),
         Stmt::Continue => "continue;".to_string(),
+        Stmt::Match { scrutinee, arms } => {
+            let mut out = format!("switch ({}) {{ ", emit_h_expr(scrutinee, screen, sv));
+            for arm in arms {
+                match &arm.pattern {
+                    MatchPat::Wildcard => out.push_str("default: { "),
+                    MatchPat::Variant(v) => out.push_str(&format!("case {:?}: {{ ", v)),
+                }
+                let b = arm.body.iter().map(|x| emit_h_stmt(x, screen, sv)).collect::<Vec<_>>().join(" ");
+                out.push_str(&b);
+                out.push_str(" break; } ");
+            }
+            out.push('}');
+            out
+        }
     }
 }
 
@@ -1091,14 +1213,27 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
         Expr::Float(f) => format!("{:?}", f),
         Expr::Str(s) => format!("{:?}", s),
         Expr::Bool(b) => b.to_string(),
-        Expr::Field { base, field } => format!("{}.{}", emit_h_expr(base, screen, sv), field),
+        Expr::Field { base, field } => {
+            if let Expr::Ident(name) = base.as_ref() {
+                if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return format!("{:?}", field); // `Enum.Variant` -> variant string
+                }
+            }
+            format!("{}.{}", emit_h_expr(base, screen, sv), field)
+        }
         Expr::Call { callee, args } => {
-            let a = args
-                .iter()
-                .map(|x| emit_h_expr(x, screen, sv))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{}({})", callee, a)
+            if callee == "now" && args.is_empty() {
+                return "Date.now()".to_string();
+            }
+            let a: Vec<String> = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect();
+            let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
+            match callee.as_str() {
+                "abs" => return format!("Math.abs({})", arg(0)),
+                "min" => return format!("Math.min({}, {})", arg(0), arg(1)),
+                "max" => return format!("Math.max({}, {})", arg(0), arg(1)),
+                _ => {}
+            }
+            format!("{}({})", callee, a.join(", "))
         }
         Expr::Unary { op, expr } => {
             let sym = match op {
@@ -1113,7 +1248,7 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
             binop_sym(*op),
             emit_h_expr(right, screen, sv)
         ),
-        Expr::Declassify(inner) => emit_h_expr(inner, screen, sv),
+        Expr::Declassify(inner) | Expr::Raw(inner) => emit_h_expr(inner, screen, sv),
         Expr::Await(inner) => format!("await {}", emit_h_expr(inner, screen, sv)),
         Expr::MethodCall { receiver, method, args } => {
             if method == "or" && args.len() == 1 {
@@ -1123,8 +1258,12 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
                     emit_h_expr(&args[0], screen, sv)
                 );
             }
-            let a = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect::<Vec<_>>().join(", ");
-            format!("{}.{}({})", emit_h_expr(receiver, screen, sv), method, a)
+            let recv = emit_h_expr(receiver, screen, sv);
+            let a: Vec<String> = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect();
+            if let Some(s) = emit_string_method(&recv, method, &a, true) {
+                return s;
+            }
+            format!("{}.{}({})", recv, method, a.join(", "))
         }
         Expr::NoneLit => "null".to_string(),
         Expr::ListLit(items) => {
@@ -1166,6 +1305,9 @@ fn stmts_have_await(stmts: &[Stmt]) -> bool {
         }
         Stmt::For { iter, body, .. } => expr_has_await(iter) || stmts_have_await(body),
         Stmt::While { cond, body } => expr_has_await(cond) || stmts_have_await(body),
+        Stmt::Match { scrutinee, arms } => {
+            expr_has_await(scrutinee) || arms.iter().any(|a| stmts_have_await(&a.body))
+        }
         Stmt::Break | Stmt::Continue => false,
     })
 }
@@ -1177,7 +1319,7 @@ fn expr_has_await(e: &Expr) -> bool {
         Expr::Call { args, .. } => args.iter().any(expr_has_await),
         Expr::Unary { expr, .. } => expr_has_await(expr),
         Expr::Binary { left, right, .. } => expr_has_await(left) || expr_has_await(right),
-        Expr::Declassify(inner) => expr_has_await(inner),
+        Expr::Declassify(inner) | Expr::Raw(inner) => expr_has_await(inner),
         Expr::MethodCall { receiver, args, .. } => {
             expr_has_await(receiver) || args.iter().any(expr_has_await)
         }
@@ -1193,6 +1335,13 @@ fn expr_has_await(e: &Expr) -> bool {
 }
 
 const MOUNT_RUNTIME: &str = r#"// ---- xeres dom runtime ----
+// R22: every interpolated view value is HTML-escaped before it reaches the DOM,
+// so `text userInput` can never inject markup. `raw(...)` is the audited opt-out.
+function __esc(v: unknown): string {
+  return String(v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 type XHandler = (key?: string) => void | Promise<void>;
 const __handlers = new Map<string, XHandler>();
 const __binds = new Map<string, (v: string) => void>();
@@ -1235,7 +1384,7 @@ fn gen_index(program: &XeresProgram) -> String {
         out.push_str(INDEX_HEAD_BLEED);
         out.push_str("<div id=\"app\"></div>");
         out.push_str(
-            "<script type=\"module\">import { __start } from \"./client.js\"; __start(\"app\");</script>",
+            "<script type=\"module\" src=\"./client.js\"></script>",
         );
         out.push_str("</body></html>");
         return out;
@@ -1251,7 +1400,7 @@ fn gen_index(program: &XeresProgram) -> String {
     out.push_str("</main>");
     if first.is_some() {
         out.push_str(
-            "<script type=\"module\">import { __start } from \"./client.js\"; __start(\"app\");</script>",
+            "<script type=\"module\" src=\"./client.js\"></script>",
         );
     }
     out.push_str("</body></html>");
@@ -1473,10 +1622,34 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
         Expr::Str(s) => if ts { format!("{:?}", s) } else { format!("String::from({:?})", s) },
         Expr::Bool(b) => b.to_string(),
         Expr::Ident(v) => v.clone(),
-        Expr::Field { base, field } => format!("{}.{}", emit_expr(base, ts), field),
+        Expr::Field { base, field } => {
+            // `Enum.Variant` (Capitalized base) -> the variant string; enums are
+            // string-backed. A lowercase base is an ordinary field access.
+            if let Expr::Ident(name) = base.as_ref() {
+                if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return if ts { format!("{:?}", field) } else { format!("String::from({:?})", field) };
+                }
+            }
+            format!("{}.{}", emit_expr(base, ts), field)
+        }
         Expr::Call { callee, args } => {
-            let a = args.iter().map(|x| emit_expr(x, ts)).collect::<Vec<_>>().join(", ");
-            format!("{}({})", callee, a)
+            // now() — epoch millis. Browser: Date.now(); server: the now() helper.
+            if callee == "now" && args.is_empty() {
+                return if ts { "Date.now()".to_string() } else { "now()".to_string() };
+            }
+            let a: Vec<String> = args.iter().map(|x| emit_expr(x, ts)).collect();
+            let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
+            // math stdlib (tier-specific spelling)
+            match callee.as_str() {
+                "abs" if ts => return format!("Math.abs({})", arg(0)),
+                "abs" => return format!("({}).abs()", arg(0)),
+                "min" if ts => return format!("Math.min({}, {})", arg(0), arg(1)),
+                "min" => return format!("({}).min({})", arg(0), arg(1)),
+                "max" if ts => return format!("Math.max({}, {})", arg(0), arg(1)),
+                "max" => return format!("({}).max({})", arg(0), arg(1)),
+                _ => {}
+            }
+            format!("{}({})", callee, a.join(", "))
         }
         Expr::Unary { op, expr } => {
             let sym = match op {
@@ -1489,7 +1662,7 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
             format!("({} {} {})", emit_expr(left, ts), binop_sym(*op), emit_expr(right, ts))
         }
         // declassify is a server-only, audited identity at the value level.
-        Expr::Declassify(inner) => emit_expr(inner, ts),
+        Expr::Declassify(inner) | Expr::Raw(inner) => emit_expr(inner, ts),
         Expr::Await(inner) => format!("await {}", emit_expr(inner, ts)),
         Expr::MethodCall { receiver, method, args } => {
             // `db.*` compiles to Postgres helper calls (server tier only).
@@ -1512,8 +1685,13 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     format!("{}.clone().unwrap_or({})", r, d)
                 };
             }
-            let a = args.iter().map(|x| emit_expr(x, ts)).collect::<Vec<_>>().join(", ");
-            format!("{}.{}({})", emit_expr(receiver, ts), method, a)
+            let recv = emit_expr(receiver, ts);
+            let a: Vec<String> = args.iter().map(|x| emit_expr(x, ts)).collect();
+            // String stdlib methods (tier-specific spelling).
+            if let Some(s) = emit_string_method(&recv, method, &a, ts) {
+                return s;
+            }
+            format!("{}.{}({})", recv, method, a.join(", "))
         }
         Expr::NoneLit => if ts { "null".to_string() } else { "None".to_string() },
         Expr::ListLit(items) => {
@@ -1615,6 +1793,42 @@ fn emit_stmt(s: &Stmt, let_kw: &str, ts: bool) -> String {
         }
         Stmt::Break => "break;".to_string(),
         Stmt::Continue => "continue;".to_string(),
+        // enums are string-backed: TS switches on the string, Rust matches the
+        // variant strings via `.as_str()` (with a `_` arm for exhaustiveness).
+        Stmt::Match { scrutinee, arms } => {
+            if ts {
+                let mut out = format!("switch ({}) {{ ", emit_expr(scrutinee, ts));
+                for arm in arms {
+                    match &arm.pattern {
+                        MatchPat::Wildcard => out.push_str("default: { "),
+                        MatchPat::Variant(v) => out.push_str(&format!("case {:?}: {{ ", v)),
+                    }
+                    out.push_str(&block(&arm.body));
+                    out.push_str(" break; } ");
+                }
+                out.push('}');
+                out
+            } else {
+                let mut out = format!("match ({}).as_str() {{ ", emit_expr(scrutinee, ts));
+                let mut has_wild = false;
+                for arm in arms {
+                    match &arm.pattern {
+                        MatchPat::Wildcard => {
+                            out.push_str("_ => { ");
+                            has_wild = true;
+                        }
+                        MatchPat::Variant(v) => out.push_str(&format!("{:?} => {{ ", v)),
+                    }
+                    out.push_str(&block(&arm.body));
+                    out.push_str(" } ");
+                }
+                if !has_wild {
+                    out.push_str("_ => {} ");
+                }
+                out.push('}');
+                out
+            }
+        }
     }
 }
 
@@ -1749,6 +1963,32 @@ fn db_query(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Vec<postgres::Row> {
 }
 "#;
 
+/// String stdlib methods, spelled for each tier (`recv`/`args` are already
+/// emitted). Returns None if `method` isn't a String method.
+fn emit_string_method(recv: &str, method: &str, args: &[String], ts: bool) -> Option<String> {
+    let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
+    Some(match (method, ts) {
+        ("trim", true) => format!("{}.trim()", recv),
+        ("trim", false) => format!("{}.trim().to_string()", recv),
+        ("upper", true) => format!("{}.toUpperCase()", recv),
+        ("upper", false) => format!("{}.to_uppercase()", recv),
+        ("lower", true) => format!("{}.toLowerCase()", recv),
+        ("lower", false) => format!("{}.to_lowercase()", recv),
+        ("length", true) => format!("{}.length", recv),
+        ("length", false) => format!("({}.chars().count() as i64)", recv),
+        ("contains", true) => format!("{}.includes({})", recv, arg(0)),
+        ("contains", false) => format!("{}.contains({}.as_str())", recv, arg(0)),
+        ("split", true) => format!("{}.split({})", recv, arg(0)),
+        ("split", false) => {
+            format!("{}.split({}.as_str()).map(|__p| __p.to_string()).collect::<Vec<String>>()", recv, arg(0))
+        }
+        // replace-all on both tiers
+        ("replace", true) => format!("{}.split({}).join({})", recv, arg(0), arg(1)),
+        ("replace", false) => format!("{}.replace({}.as_str(), {}.as_str())", recv, arg(0), arg(1)),
+        _ => return None,
+    })
+}
+
 fn binop_sym(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
@@ -1785,6 +2025,8 @@ fn map_rust_type(name: &str) -> String {
         "Int" => "i64".to_string(),
         "Float" => "f64".to_string(),
         "Bool" => "bool".to_string(),
+        // DateTime is epoch milliseconds — an i64 over the wire/db.
+        "DateTime" => "i64".to_string(),
         other => other.to_string(),
     }
 }
@@ -1798,7 +2040,7 @@ fn map_ts_type(name: &str) -> String {
     }
     match name {
         "String" => "string".to_string(),
-        "Int" | "Float" => "number".to_string(),
+        "Int" | "Float" | "DateTime" => "number".to_string(),
         "Bool" => "boolean".to_string(),
         other => other.to_string(),
     }

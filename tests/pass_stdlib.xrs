@@ -1,0 +1,27 @@
+// String stdlib (trim/upper/lower/length/contains/split/replace) + math
+// (abs/min/max), exercised on both tiers: a server fn (Rust spelling) and a
+// ui handler (TS spelling).
+server fn clean(name: String) -> String {
+  return name.trim().upper().lower()
+}
+server fn parts(csv: String) -> List<String> {
+  return csv.split(",")
+}
+server fn span(a: Int, b: Int) -> Int {
+  return abs(max(a, b) - min(a, b))
+}
+
+ui screen S {
+  state txt: String = "  Hi  "
+  state n: Int = 0
+  state msg: String = ""
+  view {
+    column {
+      button "go" -> {
+        msg = txt.replace("H", "J")
+        n = txt.length()
+        if txt.contains("Hi") { msg = "yes" }
+      }
+    }
+  }
+}

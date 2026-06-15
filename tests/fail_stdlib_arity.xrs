@@ -1,0 +1,4 @@
+// R21 — `.contains()` takes exactly one argument; zero is rejected.
+server fn bad(s: String) -> Bool {
+  return s.contains()
+}

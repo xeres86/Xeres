@@ -1,0 +1,7 @@
+// a match that doesn't cover all variants and has no `_` is rejected (R20)
+enum E { A B C }
+server fn f(x: E) -> Int {
+  match x { A -> { return 1 } B -> { return 2 } }
+  return 0
+}
+ui screen S { view { column { text "x" } } }

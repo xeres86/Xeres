@@ -1,0 +1,5 @@
+// R24 — an `auth` fn that never consults `session` is the "I forgot the auth
+// check" bug, so it does not compile.
+auth server fn whoami() -> String {
+  return "anonymous"
+}

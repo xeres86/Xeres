@@ -52,6 +52,9 @@ pub enum Expr {
     Unary { op: UnOp, expr: Box<Expr> },
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     Declassify(Box<Expr>),
+    /// `raw(html)` — the single audited sink that bypasses default view
+    /// escaping (R22). Like `declassify`: greppable, reviewable, deliberate.
+    Raw(Box<Expr>),
     Await(Box<Expr>),
     MethodCall { receiver: Box<Expr>, method: String, args: Vec<Expr> },
     Record { name: String, fields: Vec<(String, Expr)> },
@@ -82,11 +85,29 @@ pub enum Stmt {
     While { cond: Expr, body: Vec<Stmt> },
     Break,
     Continue,
+    /// `match expr { Variant -> { ... } _ -> { ... } }` over an enum.
+    Match { scrutinee: Expr, arms: Vec<MatchArm> },
+}
+
+#[derive(Debug)]
+pub struct MatchArm {
+    pub pattern: MatchPat,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug)]
+pub enum MatchPat {
+    /// a bare enum variant name (the enum is known from the scrutinee)
+    Variant(String),
+    /// `_`
+    Wildcard,
 }
 
 #[derive(Debug)]
 pub struct FunctionNode {
     pub env: EnvModifier,
+    /// `auth server fn` — must consult `session` (R24). Server-only.
+    pub is_auth: bool,
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Option<String>,
@@ -158,9 +179,19 @@ pub struct ScreenNode {
     pub is_component: bool,
 }
 
+/// `enum Name { Variant1 Variant2 ... }` — a closed set of unit variants.
+/// String-backed end to end (wire/db = the variant name).
+#[derive(Debug)]
+pub struct EnumNode {
+    pub name: String,
+    pub variants: Vec<String>,
+    pub line: usize,
+}
+
 #[derive(Debug)]
 pub struct XeresProgram {
     pub models: Vec<ModelNode>,
+    pub enums: Vec<EnumNode>,
     pub functions: Vec<FunctionNode>,
     pub states: Vec<SyncedStateNode>,
     pub screens: Vec<ScreenNode>,
@@ -205,9 +236,18 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_program(&mut self) -> XeresProgram {
-        let mut program = XeresProgram { models: vec![], functions: vec![], states: vec![], screens: vec![] };
+        let mut program = XeresProgram {
+            models: vec![], enums: vec![], functions: vec![], states: vec![], screens: vec![],
+        };
 
         while self.current_token != Token::EOF {
+            // `enum` is a contextual keyword (top-level only).
+            if self.cur_is_kw("enum") {
+                if let Some(e) = self.parse_enum() {
+                    program.enums.push(e);
+                }
+                continue;
+            }
             match self.current_token {
                 Token::Model => {
                     if let Some(m) = self.parse_model() { program.models.push(m); }
@@ -222,7 +262,7 @@ impl<'a> Parser<'a> {
                         program.functions.push(f);
                     }
                 }
-                Token::Server | Token::Fn => {
+                Token::Server | Token::Fn | Token::Auth => {
                     if let Some(f) = self.parse_function() { program.functions.push(f); }
                 }
                 Token::Synced => {
@@ -275,8 +315,46 @@ impl<'a> Parser<'a> {
         Some(ModelNode { name, properties, line: model_line })
     }
 
+    /// `enum Name { Variant1 Variant2 ... }` — variants are bare identifiers,
+    /// whitespace- or comma-separated.
+    fn parse_enum(&mut self) -> Option<EnumNode> {
+        let line = self.cur_line;
+        self.next_token(); // consume 'enum'
+        let name = match &self.current_token {
+            Token::Identifier(n) => n.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume name
+        if self.current_token != Token::LBrace {
+            return None;
+        }
+        self.next_token(); // consume '{'
+        let mut variants = Vec::new();
+        while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+            match &self.current_token {
+                Token::Identifier(v) => {
+                    variants.push(v.clone());
+                    self.next_token();
+                }
+                Token::Comma => self.next_token(),
+                _ => break,
+            }
+        }
+        if self.current_token == Token::RBrace {
+            self.next_token();
+        }
+        Some(EnumNode { name, variants, line })
+    }
+
     fn parse_function(&mut self) -> Option<FunctionNode> {
         let fn_line = self.cur_line;
+        // `auth` modifier precedes the tier: `auth server fn …`.
+        let is_auth = if self.current_token == Token::Auth {
+            self.next_token();
+            true
+        } else {
+            false
+        };
         let env = match self.current_token {
             Token::Server => { self.next_token(); EnvModifier::Server }
             Token::Ui => { self.next_token(); EnvModifier::Ui }
@@ -316,7 +394,7 @@ impl<'a> Parser<'a> {
             if self.current_token == Token::RBrace { self.next_token(); }
         }
 
-        Some(FunctionNode { env, name, params, return_type, body, line: fn_line })
+        Some(FunctionNode { env, is_auth, name, params, return_type, body, line: fn_line })
     }
 
     /// Parse a type name: `Ident` or a one-level generic `Ident<Ident>`
@@ -443,6 +521,42 @@ impl<'a> Parser<'a> {
         Some(Stmt::For { var, iter, body })
     }
 
+    /// `match expr { Variant -> { ... } _ -> { ... } }` in statement position.
+    fn parse_match_stmt(&mut self) -> Option<Stmt> {
+        self.next_token(); // consume 'match'
+        self.allow_record = false;
+        let scrutinee = self.parse_expr()?;
+        if self.current_token != Token::LBrace {
+            return None;
+        }
+        self.next_token(); // consume '{'
+        let mut arms = Vec::new();
+        while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+            let pattern = match &self.current_token {
+                Token::Identifier(p) if p == "_" => {
+                    self.next_token();
+                    MatchPat::Wildcard
+                }
+                Token::Identifier(p) => {
+                    let v = p.clone();
+                    self.next_token();
+                    MatchPat::Variant(v)
+                }
+                _ => break,
+            };
+            if self.current_token != Token::Arrow {
+                break;
+            }
+            self.next_token(); // consume '->'
+            let body = self.parse_stmt_block();
+            arms.push(MatchArm { pattern, body });
+        }
+        if self.current_token == Token::RBrace {
+            self.next_token();
+        }
+        Some(Stmt::Match { scrutinee, arms })
+    }
+
     /// `while cond { ... }` in statement position.
     fn parse_while_stmt(&mut self) -> Option<Stmt> {
         self.next_token(); // consume 'while'
@@ -461,6 +575,7 @@ impl<'a> Parser<'a> {
                 "if" => return self.parse_if_stmt(),
                 "for" => return self.parse_for_stmt(),
                 "while" => return self.parse_while_stmt(),
+                "match" => return self.parse_match_stmt(),
                 "break" => {
                     self.next_token();
                     return Some(Stmt::Break);
@@ -649,6 +764,15 @@ impl<'a> Parser<'a> {
                 if self.current_token != Token::RParen { return None; }
                 self.next_token(); // consume ')'
                 Some(Expr::Declassify(Box::new(inner)))
+            }
+            Token::Raw => {
+                self.next_token(); // consume 'raw'
+                if self.current_token != Token::LParen { return None; }
+                self.next_token(); // consume '('
+                let inner = self.parse_expr()?;
+                if self.current_token != Token::RParen { return None; }
+                self.next_token(); // consume ')'
+                Some(Expr::Raw(Box::new(inner)))
             }
             Token::NoneLit => {
                 self.next_token();
@@ -933,6 +1057,7 @@ impl<'a> Parser<'a> {
             self.current_token,
             Token::Str(_) | Token::Int(_) | Token::Float(_) | Token::True | Token::False
                 | Token::Identifier(_) | Token::LParen | Token::Minus | Token::Bang
+                | Token::Raw  // `text raw(html)` — the audited un-escaped sink
         )
     }
 

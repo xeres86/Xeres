@@ -63,6 +63,39 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
    they don't widen the tier boundary. Drove the `dashboard` + `acme` reference
    apps (dogfooding).
 
+## v0.3 — language foundations + security hardening
+Rounding out the core language *and* moving web-app security from developer
+discipline into compiler-enforced impossibility (see `SECURITY-HARDENING.md`).
+Rules now span **R1–R25**.
+
+Landed:
+- **Primitives & stdlib** — `DateTime` + `now()`; `enum` + exhaustive `match`
+  (R20); a String stdlib (`trim`/`upper`/`lower`/`length`/`contains`/`split`/
+  `replace`) + math (`abs`/`min`/`max`) (R21).
+- **XSS escaping (R22)** — every interpolated view value is HTML-escaped by
+  default; `raw(html)` is the single audited opt-out. Backstopped by a strict
+  CSP + `nosniff`/`Referrer-Policy`/`X-Frame-Options` on every response (no
+  opt-in); the client bootstrap is external so the CSP forbids all inline script.
+- **SQL injection inexpressible (R23)** — `db.*` queries must be string literals;
+  user values flow only through `$1`,`$2`,… params.
+- **Session + authn (R24)** — server-only Located `session` capability
+  (`session.actor`, `session.login`/`logout`) backed by an HMAC-signed
+  `HttpOnly; Secure; SameSite=Strict` cookie; the `auth server fn` modifier must
+  consult `session` or it won't compile. Interpreter-proven; eject guarded by a
+  `compile_error!` pending cookie-threading in the generated server.
+- **R25 actor-scope** (anti-IDOR) — in an `auth` fn, a parameterized `db` query
+  must bind `session.actor` (an ownership predicate); a fetch/mutation scoped
+  only by a caller-supplied id doesn't compile.
+
+Remaining (next, in sequence):
+- **Default S1 CSRF** (double-submit token) + **Default S2 TLS/HSTS**.
+- **R26 `endpoint` egress allowlist** (anti-SSRF): outbound HTTP only through a
+  declared, host-fixed `endpoint`.
+- **R27 `log` primitive + log-no-secret**: structured server logging where a
+  Located value (secret/`db`/`session`) can't be logged.
+- Ejected-server session runtime (lift the `compile_error!` guard).
+- Primitives: `on load` lifecycle, form controls, client router.
+
 ## Later
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword
   already reserves the surface).

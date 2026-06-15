@@ -1,0 +1,29 @@
+// enum declarations, Enum.Variant values, match statement (server fn + handler),
+// == comparison; enum field in a model
+enum Color { Red Green Blue }
+model Item { id: String  color: Color }
+
+server fn name(c: Color) -> String {
+  match c {
+    Red -> { return "red" }
+    Green -> { return "green" }
+    _ -> { return "other" }
+  }
+  return "?"
+}
+server fn make(c: Color) -> Item {
+  return Item { id: uid(), color: c }
+}
+
+ui screen S {
+  state c: Color = Color.Red
+  state msg: String = ""
+  view {
+    column {
+      button "go" -> {
+        if c == Color.Red { msg = "is red" } else { msg = "not red" }
+        match c { Red -> { msg = "R" } Green -> { msg = "G" } Blue -> { msg = "B" } }
+      }
+    }
+  }
+}

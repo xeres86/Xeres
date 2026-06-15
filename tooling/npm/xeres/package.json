@@ -1,6 +1,6 @@
 {
   "name": "xeres-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The Xeres compiler CLI — installs a prebuilt binary for your platform.",
   "type": "module",
   "bin": {

@@ -161,6 +161,22 @@ server fn total(items: List<Int>) -> Int {
 }
 ```
 
+Enums (string-backed) pair with `match` — exhaustiveness is compiler-checked
+(**R20**), and a `DateTime` (epoch ms) + `now()` round out the primitives:
+
+```xeres
+enum Status { Active Suspended Closed }
+
+server fn describe(s: Status) -> String {
+  match s {
+    Active    -> { return "active" }
+    Suspended -> { return "suspended" }
+    Closed    -> { return "closed" }
+  }
+  return "?"
+}
+```
+
 ### Views: state, binding, lists, conditionals
 
 ```xeres
@@ -366,6 +382,7 @@ Every program is checked against these. A violation is a compile error.
 | **R17** component | a `ui component` is Capitalized; an invocation names a known component with args supplied once, type-compatible, required ones present (R3/R8 still apply inside its view) |
 | **R18** conditional-branch | both branches of `cond ? a : b` have one type (no silent mixing) |
 | **R19** auth-builtin | `hash()` / `verify()` are server-only (no client-side hashing; the secret hash is compared on the server) |
+| **R20** match | a `match` scrutinee is an enum, each arm is a real variant, and the arms are exhaustive (all variants, or `_`); `Enum.Variant` must exist |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,
@@ -376,7 +393,7 @@ valid only server-side.
 ## How it compiles
 
 ```
-app.xrs ──► lexer ──► parser ──► checker (R1–R19) ──► codegen
+app.xrs ──► lexer ──► parser ──► checker (R1–R20) ──► codegen
                                                        ├─► out/server/         a self-contained Rust crate
                                                        │     ├─ src/main.rs      std-only HTTP server: router,
                                                        │     │                   RPC, secret-stripping, sync

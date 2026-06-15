@@ -1,11 +1,14 @@
 // src/checker.rs
 use crate::parser::{
-    BinOp, EnvModifier, Expr, FunctionNode, Handler, ModelNode, ScreenNode, Stmt, SyncedStateNode,
-    ViewNode, XeresProgram,
+    BinOp, EnumNode, EnvModifier, Expr, FunctionNode, Handler, MatchArm, MatchPat, ModelNode,
+    ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
 };
 use std::collections::{HashMap, HashSet};
 
-const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool"];
+const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime"];
+
+/// Stdlib methods on a `String` receiver.
+const STRING_METHODS: &[&str] = &["trim", "upper", "lower", "length", "contains", "split", "replace"];
 
 pub struct SemanticError {
     pub rule: &'static str,
@@ -25,6 +28,7 @@ struct FnSig {
 
 struct SymbolTable<'a> {
     models: HashMap<String, &'a ModelNode>,
+    enums: HashMap<String, &'a EnumNode>,
     fns: HashMap<String, FnSig>,
     states: HashMap<String, &'a SyncedStateNode>,
     /// Reusable `ui component`s, keyed by name (for invocation checking).
@@ -44,11 +48,72 @@ fn starts_uppercase(name: &str) -> bool {
     name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
 }
 
+/// R20 — a `match` scrutinee must be an enum; every arm names a real variant;
+/// and the arms are exhaustive (cover all variants, or include `_`).
+fn check_match_patterns(
+    scrutinee: &Expr,
+    arms: &[MatchArm],
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+    line: usize,
+    errors: &mut Vec<SemanticError>,
+) {
+    let enum_name = match resolve_type(scrutinee, locals, table) {
+        Some(t) if table.enums.contains_key(&t) => t,
+        Some(t) => {
+            errors.push(SemanticError {
+                rule: "R20 match",
+                message: format!("`match` expects an enum, got `{}`.", t),
+                line,
+            });
+            return;
+        }
+        None => return, // unresolvable — leave to R1
+    };
+    let en = table.enums[&enum_name];
+    let mut covered: HashSet<&str> = HashSet::new();
+    let mut has_wildcard = false;
+    for arm in arms {
+        match &arm.pattern {
+            MatchPat::Wildcard => has_wildcard = true,
+            MatchPat::Variant(v) => {
+                if !en.variants.iter().any(|x| x == v) {
+                    errors.push(SemanticError {
+                        rule: "R20 match",
+                        message: format!("enum `{}` has no variant `{}`.", enum_name, v),
+                        line,
+                    });
+                }
+                covered.insert(v.as_str());
+            }
+        }
+    }
+    if !has_wildcard {
+        let missing: Vec<&str> = en
+            .variants
+            .iter()
+            .map(String::as_str)
+            .filter(|v| !covered.contains(v))
+            .collect();
+        if !missing.is_empty() {
+            errors.push(SemanticError {
+                rule: "R20 match",
+                message: format!(
+                    "`match` on `{}` is not exhaustive — missing {} (add it, or `_`).",
+                    enum_name,
+                    missing.join(", ")
+                ),
+                line,
+            });
+        }
+    }
+}
+
 fn is_known_type(name: &str, table: &SymbolTable) -> bool {
     if let Some(inner) = generic_inner("List", name).or_else(|| generic_inner("Optional", name)) {
         return is_known_type(inner, table);
     }
-    BUILTINS.contains(&name) || table.models.contains_key(name)
+    BUILTINS.contains(&name) || table.models.contains_key(name) || table.enums.contains_key(name)
 }
 
 fn is_bool_op(op: BinOp) -> bool {
@@ -67,14 +132,31 @@ fn resolve_type(
         Expr::Bool(_) => Some("Bool".into()),
         Expr::Ident(v) => locals.get(v).and_then(|(t, _)| t.clone()),
         Expr::Field { base, field } => {
+            // `session.actor` — the authenticated actor id, or none.
+            if matches!(base.as_ref(), Expr::Ident(n) if n == "session") && field == "actor" {
+                return Some("Optional<String>".into());
+            }
+            // enum variant access: `Status.Active` is a value of type `Status`.
+            if let Expr::Ident(name) = base.as_ref() {
+                if table.enums.contains_key(name) {
+                    return Some(name.clone());
+                }
+            }
             let base_ty = resolve_type(base, locals, table)?;
             let model = table.models.get(&base_ty)?;
             model.field(field).map(|p| p.data_type.clone())
         }
-        Expr::Call { callee, .. } => match callee.as_str() {
-            // builtins: uid() unique id, hash() password hash, verify() check
+        Expr::Call { callee, args } => match callee.as_str() {
+            // builtins: uid() unique id, hash() password hash, verify() check,
+            // now() current timestamp.
             "uid" | "hash" => Some("String".into()),
             "verify" => Some("Bool".into()),
+            "now" => Some("DateTime".into()),
+            // math: result type follows the (numeric) argument
+            "abs" | "min" | "max" => args
+                .first()
+                .and_then(|a| resolve_type(a, locals, table))
+                .or_else(|| Some("Int".into())),
             _ => table.fns.get(callee).and_then(|s| s.ret.clone()),
         },
         Expr::Unary { op, expr } => match op {
@@ -90,10 +172,18 @@ fn resolve_type(
             match (lt.as_deref(), rt.as_deref()) {
                 (Some("Int"), Some("Int")) => Some("Int".into()),
                 (Some("Float"), _) | (_, Some("Float")) => Some("Float".into()),
+                // temporal: `DateTime - DateTime` is the elapsed milliseconds
+                // (Int); shifting a `DateTime` by `Int` ms yields a `DateTime`.
+                (Some("DateTime"), Some("DateTime")) if matches!(*op, BinOp::Sub) => Some("Int".into()),
+                (Some("DateTime"), Some("Int")) if matches!(*op, BinOp::Add | BinOp::Sub) => {
+                    Some("DateTime".into())
+                }
+                (Some("Int"), Some("DateTime")) if matches!(*op, BinOp::Add) => Some("DateTime".into()),
                 _ => None,
             }
         }
         Expr::Declassify(inner) => resolve_type(inner, locals, table),
+        Expr::Raw(inner) => resolve_type(inner, locals, table),
         Expr::Await(inner) => resolve_type(inner, locals, table),
         Expr::MethodCall { receiver, method, args: _ } => {
             if let Expr::Ident(name) = receiver.as_ref() {
@@ -116,6 +206,15 @@ fn resolve_type(
                         return Some(inner.to_string());
                     }
                 }
+            }
+            // String stdlib methods.
+            if STRING_METHODS.contains(&method.as_str()) {
+                return match method.as_str() {
+                    "length" => Some("Int".into()),
+                    "contains" => Some("Bool".into()),
+                    "split" => Some("List<String>".into()),
+                    _ => Some("String".into()), // trim, upper, lower, replace
+                };
             }
             None
         }
@@ -163,6 +262,9 @@ fn is_tainted(
                 || is_tainted(right, locals, table, returns_secret)
         }
         Expr::Declassify(_) => false,
+        // `raw()` is an HTML-trust marker, orthogonal to secret taint: it does
+        // NOT launder a secret, so propagate the inner expression's taint.
+        Expr::Raw(inner) => is_tainted(inner, locals, table, returns_secret),
         // An awaited value crossed the wire (secrets stripped) — it is clean.
         Expr::Await(_) => false,
         Expr::MethodCall { .. } => false,
@@ -245,6 +347,12 @@ fn taint_scan(
             Stmt::While { cond: _, body } => {
                 let mut inner = locals.clone();
                 tainted_return |= taint_scan(body, &mut inner, table, returns_secret);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    let mut inner = locals.clone();
+                    tainted_return |= taint_scan(&arm.body, &mut inner, table, returns_secret);
+                }
             }
             Stmt::Assign { .. } | Stmt::Expr(_) | Stmt::Break | Stmt::Continue => {}
         }
@@ -350,6 +458,15 @@ fn check_flow_stmts(
                 }
                 let mut inner = locals.clone();
                 check_flow_stmts(body, &mut inner, f, table, errors);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                check_expr(scrutinee, locals, f.env, &f.name, f.line, table, errors);
+                check_await(scrutinee, false, in_browser, &f.name, f.line, table, errors);
+                check_match_patterns(scrutinee, arms, locals, table, f.line, errors);
+                for arm in arms {
+                    let mut inner = locals.clone();
+                    check_flow_stmts(&arm.body, &mut inner, f, table, errors);
+                }
             }
             Stmt::Break | Stmt::Continue => {}
         }
@@ -698,6 +815,13 @@ fn check_handler_block(
                 check_screen_expr(cond, &local, sname, sline, table, errors);
                 check_handler_block(body, &local, sname, sline, table, errors);
             }
+            Stmt::Match { scrutinee, arms } => {
+                check_screen_expr(scrutinee, &local, sname, sline, table, errors);
+                check_match_patterns(scrutinee, arms, &local, table, sline, errors);
+                for arm in arms {
+                    check_handler_block(&arm.body, &local, sname, sline, table, errors);
+                }
+            }
             Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -743,7 +867,15 @@ fn check_bindings(
                 });
             }
         }
-        Expr::Field { base, .. } => check_bindings(base, locals, sname, sline, table, errors),
+        Expr::Field { base, .. } => {
+            // `Enum.Variant` — the base is a type name, not a value binding.
+            if let Expr::Ident(name) = base.as_ref() {
+                if table.enums.contains_key(name) {
+                    return;
+                }
+            }
+            check_bindings(base, locals, sname, sline, table, errors)
+        }
         Expr::Call { args, .. } => {
             for a in args {
                 check_bindings(a, locals, sname, sline, table, errors);
@@ -755,6 +887,7 @@ fn check_bindings(
             check_bindings(right, locals, sname, sline, table, errors);
         }
         Expr::Declassify(inner) => check_bindings(inner, locals, sname, sline, table, errors),
+        Expr::Raw(inner) => check_bindings(inner, locals, sname, sline, table, errors),
         Expr::Await(inner) => check_bindings(inner, locals, sname, sline, table, errors),
         Expr::MethodCall { receiver, args, .. } => {
             check_bindings(receiver, locals, sname, sline, table, errors);
@@ -817,6 +950,24 @@ fn check_expr(
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => {}
         Expr::Field { base, field } => {
+            // `session` capability: a server-only Located read of `.actor` (R24).
+            if matches!(base.as_ref(), Expr::Ident(n) if n == "session") {
+                check_session_member(field, 0, fn_env, fn_name, fn_line, errors);
+                return;
+            }
+            // enum variant access: validate the variant exists (R20).
+            if let Expr::Ident(name) = base.as_ref() {
+                if let Some(en) = table.enums.get(name) {
+                    if !en.variants.iter().any(|v| v == field) {
+                        errors.push(SemanticError {
+                            rule: "R20 match",
+                            message: format!("enum `{}` has no variant `{}`.", name, field),
+                            line: fn_line,
+                        });
+                    }
+                    return;
+                }
+            }
             check_expr(base, locals, fn_env, fn_name, fn_line, table, errors);
             if let Some(model_name) = resolve_type(base, locals, table) {
                 if let Some(model) = table.models.get(&model_name) {
@@ -889,18 +1040,25 @@ fn check_expr(
             check_expr(inner, locals, fn_env, fn_name, fn_line, table, errors);
         }
         Expr::Await(inner) => check_expr(inner, locals, fn_env, fn_name, fn_line, table, errors),
+        // `raw(...)` has no tier rule (it's a view-escaping sink, not a secret
+        // downgrade) — just check the inner expression.
+        Expr::Raw(inner) => check_expr(inner, locals, fn_env, fn_name, fn_line, table, errors),
         Expr::MethodCall { receiver, method, args } => {
-            // `db.*` is the server-only database capability; everything else is
-            // a synced-collection method. (Don't recurse into `db` as a value.)
+            // `db.*` / `session.*` are server-only capabilities; everything else
+            // is a synced-collection method. (Don't recurse into the capability
+            // ident as a value.)
             let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
-            if !is_db {
+            let is_session = matches!(receiver.as_ref(), Expr::Ident(n) if n == "session");
+            if !is_db && !is_session {
                 check_expr(receiver, locals, fn_env, fn_name, fn_line, table, errors);
             }
             for a in args {
                 check_expr(a, locals, fn_env, fn_name, fn_line, table, errors);
             }
-            if is_db {
-                check_db_method(method, fn_env, fn_name, fn_line, errors);
+            if is_session {
+                check_session_member(method, args.len(), fn_env, fn_name, fn_line, errors);
+            } else if is_db {
+                check_db_method(method, args, fn_env, fn_name, fn_line, errors);
             } else if method == "or"
                 && resolve_type(receiver, locals, table)
                     .as_deref()
@@ -927,6 +1085,8 @@ fn check_expr(
                         });
                     }
                 }
+            } else if STRING_METHODS.contains(&method.as_str()) {
+                check_string_method(receiver, method, args, locals, fn_name, fn_line, table, errors);
             } else {
                 check_collection_method(receiver, method, args, locals, fn_env, fn_name, fn_line, table, errors);
             }
@@ -986,8 +1146,13 @@ fn check_expr(
 
 /// R15 — `db` is a server-only `Located` capability (the connection + creds
 /// can never reach the browser). Its methods: query_one, query, exec.
+/// R23 — the query argument must be a string literal; user values may flow
+/// only through the trailing `$1`, `$2`, … parameters, so SQL injection is not
+/// expressible (concatenation/interpolation/a variable in query position is a
+/// compile error).
 fn check_db_method(
     method: &str,
+    args: &[Expr],
     fn_env: EnvModifier,
     fn_name: &str,
     line: usize,
@@ -1007,6 +1172,235 @@ fn check_db_method(
         errors.push(SemanticError {
             rule: "R15 db-capability",
             message: format!("`db` has no method `{}` (use query_one, query, exec).", method),
+            line,
+        });
+        return;
+    }
+    // R23: the SQL must be a literal — never built from user input.
+    if !matches!(args.first(), Some(Expr::Str(_))) {
+        errors.push(SemanticError {
+            rule: "R23 sql-literal",
+            message: format!(
+                "`db.{}(...)` requires a string-literal query. Pass user values as $1, $2, … parameters — never build SQL from a variable, concatenation, or interpolation.",
+                method
+            ),
+            line,
+        });
+    }
+}
+
+/// R24 — `session` is a server-only `Located` capability (like `db`): the actor
+/// and the HMAC signing key never reach the browser. Members are `.actor` (read
+/// the authenticated actor id, an `Optional<String>`), `.login(id)` and
+/// `.logout()` (mint / clear the signed `HttpOnly; Secure; SameSite=Strict`
+/// session cookie).
+fn check_session_member(
+    member: &str,
+    argc: usize,
+    fn_env: EnvModifier,
+    fn_name: &str,
+    line: usize,
+    errors: &mut Vec<SemanticError>,
+) {
+    if fn_env != EnvModifier::Server {
+        errors.push(SemanticError {
+            rule: "R24 authn-required",
+            message: format!(
+                "`session` is a server-only capability; `{}` runs {}. The actor and signing key cannot reach the browser.",
+                fn_name, env_label(fn_env)
+            ),
+            line,
+        });
+    }
+    let want = match member {
+        "actor" => return, // a field read, no args
+        "login" => 1,
+        "logout" => 0,
+        _ => {
+            errors.push(SemanticError {
+                rule: "R24 authn-required",
+                message: format!("`session` has no member `{}` (use actor, login, logout).", member),
+                line,
+            });
+            return;
+        }
+    };
+    if argc != want {
+        errors.push(SemanticError {
+            rule: "R24 authn-required",
+            message: format!("`session.{}(...)` takes {} argument(s).", member, want),
+            line,
+        });
+    }
+}
+
+/// Does any statement in this body consult `session` (R24)? An `auth` fn that
+/// never reads `session.actor` is the "I forgot the auth check" bug — so it must
+/// not compile.
+/// R25 — actor-scope (anti-IDOR). In an `auth` fn, a `db.query/query_one/exec`
+/// that binds any parameter must include `session.actor` among those params, so
+/// a protected resource can't be fetched or mutated by a caller-supplied id
+/// alone (the common IDOR omission stops compiling).
+fn check_actor_scope(stmts: &[Stmt], fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+    for s in stmts {
+        stmt_actor_scope(s, fn_name, line, errors);
+    }
+}
+
+fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+    match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::Return(value)
+        | Stmt::Expr(value) => expr_actor_scope(value, fn_name, line, errors),
+        Stmt::Try { body, handler } => {
+            check_actor_scope(body, fn_name, line, errors);
+            check_actor_scope(handler, fn_name, line, errors);
+        }
+        Stmt::If { cond, then_body, else_body } => {
+            expr_actor_scope(cond, fn_name, line, errors);
+            check_actor_scope(then_body, fn_name, line, errors);
+            check_actor_scope(else_body, fn_name, line, errors);
+        }
+        Stmt::For { iter, body, .. } => {
+            expr_actor_scope(iter, fn_name, line, errors);
+            check_actor_scope(body, fn_name, line, errors);
+        }
+        Stmt::While { cond, body } => {
+            expr_actor_scope(cond, fn_name, line, errors);
+            check_actor_scope(body, fn_name, line, errors);
+        }
+        Stmt::Match { scrutinee, arms } => {
+            expr_actor_scope(scrutinee, fn_name, line, errors);
+            for a in arms {
+                check_actor_scope(&a.body, fn_name, line, errors);
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
+    }
+}
+
+fn expr_actor_scope(e: &Expr, fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+    if let Expr::MethodCall { receiver, method, args } = e {
+        let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
+        if is_db && matches!(method.as_str(), "query" | "query_one" | "exec") {
+            // args[0] is the SQL literal; args[1..] are the bound parameters.
+            let params = args.get(1..).unwrap_or(&[]);
+            if !params.is_empty() && !params.iter().any(expr_uses_session) {
+                errors.push(SemanticError {
+                    rule: "R25 actor-scope",
+                    message: format!(
+                        "`db.{}` in `auth fn {}` binds a caller-supplied value but not `session.actor`. Add an ownership predicate bound to the actor (e.g. `… where id = $1 and owner = $2`, …, session.actor) — a protected query scoped only by a caller id is an IDOR.",
+                        method, fn_name
+                    ),
+                    line,
+                });
+            }
+        }
+    }
+    match e {
+        Expr::Field { base, .. } => expr_actor_scope(base, fn_name, line, errors),
+        Expr::Call { args, .. } => args.iter().for_each(|a| expr_actor_scope(a, fn_name, line, errors)),
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_actor_scope(receiver, fn_name, line, errors);
+            args.iter().for_each(|a| expr_actor_scope(a, fn_name, line, errors));
+        }
+        Expr::Unary { expr, .. } => expr_actor_scope(expr, fn_name, line, errors),
+        Expr::Binary { left, right, .. } => {
+            expr_actor_scope(left, fn_name, line, errors);
+            expr_actor_scope(right, fn_name, line, errors);
+        }
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_actor_scope(i, fn_name, line, errors),
+        Expr::Record { fields, .. } => {
+            fields.iter().for_each(|(_, v)| expr_actor_scope(v, fn_name, line, errors))
+        }
+        Expr::ListLit(items) => items.iter().for_each(|i| expr_actor_scope(i, fn_name, line, errors)),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_actor_scope(cond, fn_name, line, errors);
+            expr_actor_scope(then, fn_name, line, errors);
+            expr_actor_scope(otherwise, fn_name, line, errors);
+        }
+        Expr::Range { start, end } => {
+            expr_actor_scope(start, fn_name, line, errors);
+            expr_actor_scope(end, fn_name, line, errors);
+        }
+        _ => {}
+    }
+}
+
+fn stmts_use_session(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_uses_session)
+}
+
+fn stmt_uses_session(s: &Stmt) -> bool {
+    match s {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Return(value)
+        | Stmt::Expr(value) => expr_uses_session(value),
+        Stmt::Try { body, handler } => stmts_use_session(body) || stmts_use_session(handler),
+        Stmt::If { cond, then_body, else_body } => {
+            expr_uses_session(cond) || stmts_use_session(then_body) || stmts_use_session(else_body)
+        }
+        Stmt::For { iter, body, .. } => expr_uses_session(iter) || stmts_use_session(body),
+        Stmt::While { cond, body } => expr_uses_session(cond) || stmts_use_session(body),
+        Stmt::Match { scrutinee, arms } => {
+            expr_uses_session(scrutinee) || arms.iter().any(|a| stmts_use_session(&a.body))
+        }
+        Stmt::Break | Stmt::Continue => false,
+    }
+}
+
+fn expr_uses_session(e: &Expr) -> bool {
+    let is_session = |x: &Expr| matches!(x, Expr::Ident(n) if n == "session");
+    match e {
+        Expr::Field { base, .. } => is_session(base) || expr_uses_session(base),
+        Expr::MethodCall { receiver, args, .. } => {
+            is_session(receiver) || expr_uses_session(receiver) || args.iter().any(expr_uses_session)
+        }
+        Expr::Call { args, .. } => args.iter().any(expr_uses_session),
+        Expr::Unary { expr, .. } => expr_uses_session(expr),
+        Expr::Binary { left, right, .. } => expr_uses_session(left) || expr_uses_session(right),
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_uses_session(i),
+        Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_session(v)),
+        Expr::ListLit(items) => items.iter().any(expr_uses_session),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_uses_session(cond) || expr_uses_session(then) || expr_uses_session(otherwise)
+        }
+        Expr::Range { start, end } => expr_uses_session(start) || expr_uses_session(end),
+        _ => false,
+    }
+}
+
+/// R21 — String stdlib methods: the receiver must be a `String` and the arg
+/// count must match (`contains`/`split` take 1, `replace` 2, the rest 0).
+#[allow(clippy::too_many_arguments)]
+fn check_string_method(
+    receiver: &Expr,
+    method: &str,
+    args: &[Expr],
+    locals: &HashMap<String, (Option<String>, bool)>,
+    fn_name: &str,
+    line: usize,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
+    if let Some(rt) = resolve_type(receiver, locals, table) {
+        if rt != "String" {
+            errors.push(SemanticError {
+                rule: "R21 stdlib",
+                message: format!("`.{}()` is a String method, but the receiver in `{}` is `{}`.", method, fn_name, rt),
+                line,
+            });
+        }
+    }
+    let want = match method {
+        "contains" | "split" => 1,
+        "replace" => 2,
+        _ => 0,
+    };
+    if args.len() != want {
+        errors.push(SemanticError {
+            rule: "R21 stdlib",
+            message: format!("`.{}()` takes {} argument(s).", method, want),
             line,
         });
     }
@@ -1133,6 +1527,7 @@ fn check_await(
             check_await(right, false, in_browser, fn_name, line, table, errors);
         }
         Expr::Declassify(inner) => check_await(inner, false, in_browser, fn_name, line, table, errors),
+        Expr::Raw(inner) => check_await(inner, false, in_browser, fn_name, line, table, errors),
         Expr::MethodCall { receiver, args, .. } => {
             check_await(receiver, false, in_browser, fn_name, line, table, errors);
             for a in args {
@@ -1243,10 +1638,32 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     let mut errors = Vec::new();
     let mut table = SymbolTable {
         models: HashMap::new(),
+        enums: HashMap::new(),
         fns: HashMap::new(),
         states: HashMap::new(),
         components: HashMap::new(),
     };
+
+    // Enums: register, and reject duplicate enum names / duplicate variants (R2).
+    for e in &program.enums {
+        if table.enums.insert(e.name.clone(), e).is_some() || table.models.contains_key(&e.name) {
+            errors.push(SemanticError {
+                rule: "R2 duplicate-decl",
+                message: format!("type `{}` is declared more than once.", e.name),
+                line: e.line,
+            });
+        }
+        let mut seen = HashSet::new();
+        for v in &e.variants {
+            if !seen.insert(v) {
+                errors.push(SemanticError {
+                    rule: "R2 duplicate-decl",
+                    message: format!("variant `{}` is declared twice in enum `{}`.", v, e.name),
+                    line: e.line,
+                });
+            }
+        }
+    }
 
     // Screens and components compile to render functions in one namespace and
     // are mounted/invoked by name — so names must be unique (R2), and a
@@ -1362,6 +1779,33 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
                 });
             }
         }
+    }
+
+    // R24 — an `auth` fn must be server-side and must consult `session`.
+    for f in &program.functions {
+        if !f.is_auth {
+            continue;
+        }
+        if f.env != EnvModifier::Server {
+            errors.push(SemanticError {
+                rule: "R24 authn-required",
+                message: format!("`auth` is a server-only modifier, but `{}` runs {}.", f.name, env_label(f.env)),
+                line: f.line,
+            });
+        }
+        if !stmts_use_session(&f.body) {
+            errors.push(SemanticError {
+                rule: "R24 authn-required",
+                message: format!(
+                    "`auth fn {}` never consults `session`. Read `session.actor` to authenticate the caller — an `auth` fn that ignores the session is the 'forgot the auth check' bug.",
+                    f.name
+                ),
+                line: f.line,
+            });
+        }
+        // R25 — a parameterized `db` query in this protected fn must bind the
+        // actor (anti-IDOR).
+        check_actor_scope(&f.body, &f.name, f.line, &mut errors);
     }
 
     for f in &program.functions {

@@ -1,0 +1,6 @@
+// referencing a non-existent enum variant is rejected (R20)
+enum E { A B }
+server fn f() -> E {
+  return E.C
+}
+ui screen S { view { column { text "x" } } }

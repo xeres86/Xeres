@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.3.0 — 2026-06-15 — language foundations + security hardening (R20–R25)
+
+Rounding out the core language so it can express real business logic. Same
+tier-safe boundary; new constructs go through the same checker.
+
+- **`DateTime` primitive + `now()`** — a timestamp type (epoch milliseconds,
+  carried as `i64`/`number` over the wire and DB) and a `now()` builtin in both
+  tiers. Temporal arithmetic: `DateTime - DateTime` is the elapsed `Int` (ms),
+  `DateTime ± Int` shifts a timestamp; comparisons work. Dependency-free.
+- **`enum` + `match`** — `enum Status { Active Inactive Pending }` (unit
+  variants), values via `Status.Active`, and a `match` statement
+  (`match s { Active -> { … } _ -> { … } }`) in fn bodies + handlers. Enums are
+  **string-backed** end to end: a Rust `type X = String` alias, a TS string
+  union (`"Active" | …`), `Value::Str` in the interpreter, and the variant name
+  on the wire/DB. `==` works. New rule **R20**: a `match` scrutinee must be an
+  enum, every arm is a real variant, and the arms are **exhaustive** (cover all
+  variants or include `_`); an unknown `Enum.Variant` is also R20.
+- **String stdlib + math builtins** — String methods `trim` / `upper` / `lower`
+  / `length` / `contains` / `split` / `replace`, and numeric `abs` / `min` /
+  `max`, each spelled for its tier (Rust on the server, TS on the client) and
+  run in the interpreter. New rule **R21**: a String method's receiver must be a
+  `String` and its argument count must match (`contains`/`split` take 1,
+  `replace` 2, the rest 0). `abs`/`min`/`max` stay `Int` when all arguments are
+  `Int`, else `Float`.
+- **View XSS escaping (R22) + secure-by-default headers** — every value
+  interpolated into a view is HTML-escaped before it reaches the DOM (text
+  content, `value="…"` attributes, and per-item `data-key`s), so `text userInput`
+  can never inject markup: *escaping is the default, not a thing the developer has
+  to remember*. The single audited opt-out is **`raw(html)`** — a keyword in the
+  spirit of `declassify` (greppable, reviewable) for the rare trusted-HTML case.
+  Backstopped by a strict **Content-Security-Policy** (no inline/external script
+  except `'self'`; inline style allowed for the language's `<style>`/`style=""`),
+  shipped with `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`
+  and `X-Frame-Options: DENY` on **every** response from both the `xeres serve`
+  runtime and the ejected server — no opt-in. The client bootstrap moved out of an
+  inline `<script>` (`client.js` now self-starts) so the CSP needs no script
+  exceptions.
+- **SQL injection made inexpressible (R23)** — the query argument to
+  `db.query` / `db.query_one` / `db.exec` must be a **string literal**. A
+  variable, concatenation, or interpolation in query position is a compile error;
+  user values may flow only through the trailing `$1`, `$2`, … parameters. So
+  `"… where name='" + name + "'"` simply does not compile — the unsafe form is
+  gone, not merely discouraged.
+- **Server-only `session` capability + authn-required (R24)** — a Located,
+  server-only `session` (the same machinery as `db`): `session.actor` reads the
+  authenticated actor id (`Optional<String>`) from a verified cookie, and
+  `session.login(id)` / `session.logout()` mint and clear it. The cookie is
+  **HMAC-SHA256-signed** over a server secret (`SESSION_SECRET`) and set
+  `HttpOnly; Secure; SameSite=Strict`, so it can't be read by JS, forged, or
+  sent cross-site. New modifier **`auth server fn`** and rule **R24**: an `auth`
+  fn must be server-side and must consult `session` — a protected fn that never
+  reads `session.actor` (the "I forgot the auth check" bug) does not compile, and
+  touching `session` from the browser is rejected (Located). Proven live on the
+  `xeres serve` interpreter: login mints the signed cookie, the actor populates on
+  the next request, and a tampered cookie is rejected. Signing uses `hmac`/`sha2`
+  behind the existing `auth` feature. Eject (`xeres build`) guards a session app
+  with a `compile_error!` for now — the interpreter is the supported session
+  runtime. Fixtures: pass_session, fail_protected_no_auth, fail_session_in_ui.
+- **Actor-scope, anti-IDOR (R25)** — in an `auth` fn, a `db` query that binds any
+  parameter must also bind `session.actor` as an ownership predicate. A protected
+  fetch or mutation scoped only by a caller-supplied id (`… where id = $1`,
+  note_id) is a probable IDOR and does not compile; the actor-scoped form
+  (`… where id = $1 and owner = $2`, note_id, session.actor) is required. This
+  makes the common "forgot the ownership check" omission non-compiling. Fixtures:
+  pass_owner_scope, fail_idor_no_owner.
+
 ## 0.2.0 — view & component layer
 
 A larger, still tier-safe view vocabulary. The server/client boundary is

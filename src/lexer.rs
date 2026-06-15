@@ -106,7 +106,7 @@ impl Lexer {
             '"' => return Token::Str(self.read_string()),
             '\0' => Token::EOF,
             _ => {
-                if self.ch.is_alphabetic() {
+                if self.ch.is_alphabetic() || self.ch == '_' {
                     let ident = self.read_identifier();
                     return self.lookup_keyword(&ident);
                 } else if self.ch.is_ascii_digit() {
@@ -172,6 +172,8 @@ impl Lexer {
             "model" => Token::Model,
             "state" => Token::State,
             "declassify" => Token::Declassify,
+            "raw" => Token::Raw,
+            "auth" => Token::Auth,
             "await" => Token::Await,
             "try" => Token::Try,
             "catch" => Token::Catch,
