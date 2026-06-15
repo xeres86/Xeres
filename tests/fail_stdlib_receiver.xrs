@@ -1,0 +1,4 @@
+// R21 — a String method on a non-String receiver is rejected.
+server fn bad(n: Int) -> String {
+  return n.upper()
+}

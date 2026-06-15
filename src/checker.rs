@@ -7,6 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime"];
 
+/// Stdlib methods on a `String` receiver.
+const STRING_METHODS: &[&str] = &["trim", "upper", "lower", "length", "contains", "split", "replace"];
+
 pub struct SemanticError {
     pub rule: &'static str,
     pub message: String,
@@ -139,12 +142,17 @@ fn resolve_type(
             let model = table.models.get(&base_ty)?;
             model.field(field).map(|p| p.data_type.clone())
         }
-        Expr::Call { callee, .. } => match callee.as_str() {
+        Expr::Call { callee, args } => match callee.as_str() {
             // builtins: uid() unique id, hash() password hash, verify() check,
             // now() current timestamp.
             "uid" | "hash" => Some("String".into()),
             "verify" => Some("Bool".into()),
             "now" => Some("DateTime".into()),
+            // math: result type follows the (numeric) argument
+            "abs" | "min" | "max" => args
+                .first()
+                .and_then(|a| resolve_type(a, locals, table))
+                .or_else(|| Some("Int".into())),
             _ => table.fns.get(callee).and_then(|s| s.ret.clone()),
         },
         Expr::Unary { op, expr } => match op {
@@ -193,6 +201,15 @@ fn resolve_type(
                         return Some(inner.to_string());
                     }
                 }
+            }
+            // String stdlib methods.
+            if STRING_METHODS.contains(&method.as_str()) {
+                return match method.as_str() {
+                    "length" => Some("Int".into()),
+                    "contains" => Some("Bool".into()),
+                    "split" => Some("List<String>".into()),
+                    _ => Some("String".into()), // trim, upper, lower, replace
+                };
             }
             None
         }
@@ -1047,6 +1064,8 @@ fn check_expr(
                         });
                     }
                 }
+            } else if STRING_METHODS.contains(&method.as_str()) {
+                check_string_method(receiver, method, args, locals, fn_name, fn_line, table, errors);
             } else {
                 check_collection_method(receiver, method, args, locals, fn_env, fn_name, fn_line, table, errors);
             }
@@ -1127,6 +1146,42 @@ fn check_db_method(
         errors.push(SemanticError {
             rule: "R15 db-capability",
             message: format!("`db` has no method `{}` (use query_one, query, exec).", method),
+            line,
+        });
+    }
+}
+
+/// R21 — String stdlib methods: the receiver must be a `String` and the arg
+/// count must match (`contains`/`split` take 1, `replace` 2, the rest 0).
+#[allow(clippy::too_many_arguments)]
+fn check_string_method(
+    receiver: &Expr,
+    method: &str,
+    args: &[Expr],
+    locals: &HashMap<String, (Option<String>, bool)>,
+    fn_name: &str,
+    line: usize,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
+    if let Some(rt) = resolve_type(receiver, locals, table) {
+        if rt != "String" {
+            errors.push(SemanticError {
+                rule: "R21 stdlib",
+                message: format!("`.{}()` is a String method, but the receiver in `{}` is `{}`.", method, fn_name, rt),
+                line,
+            });
+        }
+    }
+    let want = match method {
+        "contains" | "split" => 1,
+        "replace" => 2,
+        _ => 0,
+    };
+    if args.len() != want {
+        errors.push(SemanticError {
+            rule: "R21 stdlib",
+            message: format!("`.{}()` takes {} argument(s).", method, want),
             line,
         });
     }

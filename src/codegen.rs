@@ -1153,12 +1153,15 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
             if callee == "now" && args.is_empty() {
                 return "Date.now()".to_string();
             }
-            let a = args
-                .iter()
-                .map(|x| emit_h_expr(x, screen, sv))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{}({})", callee, a)
+            let a: Vec<String> = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect();
+            let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
+            match callee.as_str() {
+                "abs" => return format!("Math.abs({})", arg(0)),
+                "min" => return format!("Math.min({}, {})", arg(0), arg(1)),
+                "max" => return format!("Math.max({}, {})", arg(0), arg(1)),
+                _ => {}
+            }
+            format!("{}({})", callee, a.join(", "))
         }
         Expr::Unary { op, expr } => {
             let sym = match op {
@@ -1183,8 +1186,12 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
                     emit_h_expr(&args[0], screen, sv)
                 );
             }
-            let a = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect::<Vec<_>>().join(", ");
-            format!("{}.{}({})", emit_h_expr(receiver, screen, sv), method, a)
+            let recv = emit_h_expr(receiver, screen, sv);
+            let a: Vec<String> = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect();
+            if let Some(s) = emit_string_method(&recv, method, &a, true) {
+                return s;
+            }
+            format!("{}.{}({})", recv, method, a.join(", "))
         }
         Expr::NoneLit => "null".to_string(),
         Expr::ListLit(items) => {
@@ -1551,8 +1558,19 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
             if callee == "now" && args.is_empty() {
                 return if ts { "Date.now()".to_string() } else { "now()".to_string() };
             }
-            let a = args.iter().map(|x| emit_expr(x, ts)).collect::<Vec<_>>().join(", ");
-            format!("{}({})", callee, a)
+            let a: Vec<String> = args.iter().map(|x| emit_expr(x, ts)).collect();
+            let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
+            // math stdlib (tier-specific spelling)
+            match callee.as_str() {
+                "abs" if ts => return format!("Math.abs({})", arg(0)),
+                "abs" => return format!("({}).abs()", arg(0)),
+                "min" if ts => return format!("Math.min({}, {})", arg(0), arg(1)),
+                "min" => return format!("({}).min({})", arg(0), arg(1)),
+                "max" if ts => return format!("Math.max({}, {})", arg(0), arg(1)),
+                "max" => return format!("({}).max({})", arg(0), arg(1)),
+                _ => {}
+            }
+            format!("{}({})", callee, a.join(", "))
         }
         Expr::Unary { op, expr } => {
             let sym = match op {
@@ -1588,8 +1606,13 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     format!("{}.clone().unwrap_or({})", r, d)
                 };
             }
-            let a = args.iter().map(|x| emit_expr(x, ts)).collect::<Vec<_>>().join(", ");
-            format!("{}.{}({})", emit_expr(receiver, ts), method, a)
+            let recv = emit_expr(receiver, ts);
+            let a: Vec<String> = args.iter().map(|x| emit_expr(x, ts)).collect();
+            // String stdlib methods (tier-specific spelling).
+            if let Some(s) = emit_string_method(&recv, method, &a, ts) {
+                return s;
+            }
+            format!("{}.{}({})", recv, method, a.join(", "))
         }
         Expr::NoneLit => if ts { "null".to_string() } else { "None".to_string() },
         Expr::ListLit(items) => {
@@ -1860,6 +1883,32 @@ fn db_query(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Vec<postgres::Row> {
     db_client().query(sql, params).expect("xeres: database query failed")
 }
 "#;
+
+/// String stdlib methods, spelled for each tier (`recv`/`args` are already
+/// emitted). Returns None if `method` isn't a String method.
+fn emit_string_method(recv: &str, method: &str, args: &[String], ts: bool) -> Option<String> {
+    let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
+    Some(match (method, ts) {
+        ("trim", true) => format!("{}.trim()", recv),
+        ("trim", false) => format!("{}.trim().to_string()", recv),
+        ("upper", true) => format!("{}.toUpperCase()", recv),
+        ("upper", false) => format!("{}.to_uppercase()", recv),
+        ("lower", true) => format!("{}.toLowerCase()", recv),
+        ("lower", false) => format!("{}.to_lowercase()", recv),
+        ("length", true) => format!("{}.length", recv),
+        ("length", false) => format!("({}.chars().count() as i64)", recv),
+        ("contains", true) => format!("{}.includes({})", recv, arg(0)),
+        ("contains", false) => format!("{}.contains({}.as_str())", recv, arg(0)),
+        ("split", true) => format!("{}.split({})", recv, arg(0)),
+        ("split", false) => {
+            format!("{}.split({}.as_str()).map(|__p| __p.to_string()).collect::<Vec<String>>()", recv, arg(0))
+        }
+        // replace-all on both tiers
+        ("replace", true) => format!("{}.split({}).join({})", recv, arg(0), arg(1)),
+        ("replace", false) => format!("{}.replace({}.as_str(), {}.as_str())", recv, arg(0), arg(1)),
+        _ => return None,
+    })
+}
 
 fn binop_sym(op: BinOp) -> &'static str {
     match op {

@@ -17,6 +17,13 @@ tier-safe boundary; new constructs go through the same checker.
   on the wire/DB. `==` works. New rule **R20**: a `match` scrutinee must be an
   enum, every arm is a real variant, and the arms are **exhaustive** (cover all
   variants or include `_`); an unknown `Enum.Variant` is also R20.
+- **String stdlib + math builtins** — String methods `trim` / `upper` / `lower`
+  / `length` / `contains` / `split` / `replace`, and numeric `abs` / `min` /
+  `max`, each spelled for its tier (Rust on the server, TS on the client) and
+  run in the interpreter. New rule **R21**: a String method's receiver must be a
+  `String` and its argument count must match (`contains`/`split` take 1,
+  `replace` 2, the rest 0). `abs`/`min`/`max` stay `Int` when all arguments are
+  `Int`, else `Float`.
 
 ## 0.2.0 — view & component layer
 

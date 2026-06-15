@@ -48,6 +48,9 @@ impl<'a> Interp<'a> {
         if fn_name == "now" {
             return Ok(Value::Int(now_millis()));
         }
+        if matches!(fn_name, "abs" | "min" | "max") {
+            return math_fn(fn_name, &args);
+        }
         let f = self
             .program
             .functions
@@ -253,6 +256,22 @@ impl<'a> Interp<'a> {
             Expr::MethodCall { receiver, method, args } => {
                 if is_db(receiver) && method == "exec" {
                     return self.db_exec(args, env);
+                }
+                let recv = self.eval(receiver, env)?;
+                // String stdlib methods.
+                if let Value::Str(s) = &recv {
+                    let argv = args
+                        .iter()
+                        .map(|a| self.eval(a, env))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return string_method(s, method, &argv);
+                }
+                // `optional.or(default)` — null falls back to the default.
+                if method == "or" {
+                    return match recv {
+                        Value::Null => self.eval(args.first().ok_or("`or` needs a default")?, env),
+                        other => Ok(other),
+                    };
                 }
                 Err("unsupported method call in server runtime".into())
             }
@@ -513,6 +532,44 @@ pub fn uid() -> String {
 fn now_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// String stdlib methods (the interpreter half of the codegen spellings).
+fn string_method(s: &str, method: &str, args: &[Value]) -> Result<Value, String> {
+    let sarg = |i: usize| match args.get(i) {
+        Some(Value::Str(x)) => Ok(x.clone()),
+        _ => Err(format!("`.{}()` argument must be a String", method)),
+    };
+    Ok(match method {
+        "trim" => Value::Str(s.trim().to_string()),
+        "upper" => Value::Str(s.to_uppercase()),
+        "lower" => Value::Str(s.to_lowercase()),
+        "length" => Value::Int(s.chars().count() as i64),
+        "contains" => Value::Bool(s.contains(sarg(0)?.as_str())),
+        "split" => Value::List(s.split(sarg(0)?.as_str()).map(|p| Value::Str(p.to_string())).collect()),
+        "replace" => Value::Str(s.replace(sarg(0)?.as_str(), sarg(1)?.as_str())),
+        other => return Err(format!("unknown String method `{}`", other)),
+    })
+}
+
+/// Math builtins abs/min/max. Stays Int when all args are Int, else Float.
+fn math_fn(name: &str, args: &[Value]) -> Result<Value, String> {
+    let num = |v: &Value| match v {
+        Value::Int(n) => Some(*n as f64),
+        Value::Float(f) => Some(*f),
+        _ => None,
+    };
+    let all_int = args.iter().all(|v| matches!(v, Value::Int(_)));
+    let wrap = |x: f64| if all_int { Value::Int(x as i64) } else { Value::Float(x) };
+    let a = num(args.first().ok_or("math fn needs an argument")?).ok_or("math fn needs a number")?;
+    match name {
+        "abs" => Ok(wrap(a.abs())),
+        "min" | "max" => {
+            let b = num(args.get(1).ok_or("min/max need two arguments")?).ok_or("min/max need numbers")?;
+            Ok(wrap(if name == "min" { a.min(b) } else { a.max(b) }))
+        }
+        _ => Err(format!("unknown math fn `{}`", name)),
+    }
 }
 
 // ---- auth builtins (feature-gated) ----
