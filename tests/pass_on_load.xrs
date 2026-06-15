@@ -1,0 +1,21 @@
+// P1 — `on load` runs once on mount and may await a server fn, so a screen can
+// fetch its own data on open (the await discipline R4 applies to the block).
+model User {
+  id: String
+  name: String
+}
+
+server fn list_users() -> List<User> {
+  return db.query("select id, name from users")
+}
+
+ui screen Users {
+  state users: List<User> = []
+  on load { users = await list_users() }
+  view {
+    column {
+      heading "Users"
+      for u in users { text u.name }
+    }
+  }
+}

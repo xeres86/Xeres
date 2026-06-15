@@ -172,6 +172,9 @@ pub struct ScreenNode {
     pub name: String,
     pub params: Vec<Param>,
     pub states: Vec<StateDecl>,
+    /// `on load { … }` — statements run once on mount (may `await` server fns).
+    /// A browser handler context (P1); empty when absent.
+    pub load: Vec<Stmt>,
     pub body: Vec<ViewNode>,
     pub line: usize,
     /// `ui component` (reusable, invoked by name) vs `ui screen` (a page that
@@ -919,6 +922,14 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // optional `on load { … }` lifecycle block (runs on mount; may await).
+        let mut load = Vec::new();
+        if self.cur_is_kw("on") && self.peek_token == Token::Identifier("load".to_string()) {
+            self.next_token(); // consume 'on'
+            self.next_token(); // consume 'load'
+            load = self.parse_stmt_block();
+        }
+
         let mut body = Vec::new();
         // expect a `view { ... }` block
         if let Token::Identifier(k) = &self.current_token {
@@ -933,7 +944,7 @@ impl<'a> Parser<'a> {
         }
 
         if self.current_token == Token::RBrace { self.next_token(); } // close screen
-        Some(ScreenNode { name, params, states, body, line: screen_line, is_component })
+        Some(ScreenNode { name, params, states, load, body, line: screen_line, is_component })
     }
 
     fn parse_state_decl(&mut self) -> Option<StateDecl> {

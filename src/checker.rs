@@ -588,6 +588,22 @@ fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<SemanticEr
     for v in &s.body {
         check_view(v, &locals, &state_names, &s.name, s.line, table, errors);
     }
+
+    // `on load { … }` runs in the browser on mount: check it as a ui handler so
+    // the await discipline (R4) and `try` rule (R16) apply. A synthetic ui fn
+    // carries the env/name; locals already hold the props + state cells.
+    if !s.load.is_empty() {
+        let synthetic = FunctionNode {
+            env: EnvModifier::Ui,
+            is_auth: false,
+            name: format!("{} on load", s.name),
+            params: vec![],
+            return_type: None,
+            body: vec![],
+            line: s.line,
+        };
+        check_flow_stmts(&s.load, &mut locals, &synthetic, table, errors);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

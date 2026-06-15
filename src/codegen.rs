@@ -900,13 +900,19 @@ fn gen_client(program: &XeresProgram) -> String {
             ));
         }
         if let Some(sc) = program.screens.iter().find(|s| !s.is_component && s.params.is_empty()) {
+            let load_call = if sc.load.is_empty() {
+                String::new()
+            } else {
+                format!("\x20 {}__load();\n", sc.name)
+            };
             out.push_str(&format!(
                 "\nexport function __start(rootId: string): void {{\n\
                  \x20 const el = document.getElementById(rootId);\n\
                  \x20 if (el) mount(el, () => {screen}());\n\
-                 }}\n\
+                 {load}}}\n\
                  __start(\"app\");\n",
-                screen = sc.name
+                screen = sc.name,
+                load = load_call
             ));
         }
     }
@@ -967,6 +973,23 @@ fn gen_screen(
         "export function {}({}): string {{\n{}  return {};\n}}\n\n",
         sc.name, props, destr, render_expr
     ));
+
+    // `on load { … }` — an async lifecycle fn run once on mount (P1). It may
+    // await server fns; after it settles it triggers a redraw so fetched data
+    // shows. State assignments rewrite to `<Screen>_state.x` via emit_h_stmt.
+    if !sc.load.is_empty() {
+        let body = sc
+            .load
+            .iter()
+            .map(|s| emit_h_stmt(s, &sc.name, &em.state_vars))
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        out.push_str(&format!(
+            "export async function {sc}__load(): Promise<void> {{\n  {body}\n  if (__draw) __draw();\n}}\n\n",
+            sc = sc.name,
+            body = body
+        ));
+    }
     out
 }
 

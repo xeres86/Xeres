@@ -31,6 +31,12 @@ Finishing the secure-by-default posture and the remaining capability gaps.
   `<NAME>_<FIELD>`, sent as a bearer token) never crosses the wire. Behaviour in
   both backends via `ureq` behind a new optional `http` feature (in `full`).
   Fixtures: pass_endpoint, fail_endpoint_in_ui, fail_endpoint_path.
+- **`on load` lifecycle hook (P1)** — a screen-level `on load { … }` block that
+  runs once on mount and may `await` server fns, so a screen fetches its own data
+  on open (`on load { users = await list_users() }`), then redraws. It's a
+  browser handler context, so the await discipline (R4) and `try` rule (R16)
+  apply — a non-awaited server call in `on load` does not compile. The
+  most-requested missing piece. Fixtures: pass_on_load, fail_on_load_sync.
 
 ## 0.3.0 — 2026-06-15 — language foundations + security hardening (R20–R25)
 
