@@ -81,8 +81,9 @@ Landed:
 - **Session + authn (R24)** — server-only Located `session` capability
   (`session.actor`, `session.login`/`logout`) backed by an HMAC-signed
   `HttpOnly; Secure; SameSite=Strict` cookie; the `auth server fn` modifier must
-  consult `session` or it won't compile. Interpreter-proven; eject guarded by a
-  `compile_error!` pending cookie-threading in the generated server.
+  consult `session` or it won't compile. Works in **both run modes** — the
+  ejected server (`xeres build`) threads the same signed cookie as `xeres serve`,
+  so a cookie minted by one verifies under the other.
 - **R25 actor-scope** (anti-IDOR) — in an `auth` fn, a parameterized `db` query
   must bind `session.actor` (an ownership predicate); a fetch/mutation scoped
   only by a caller-supplied id doesn't compile.
@@ -109,8 +110,11 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   reload; a screen's `on load` runs on each navigation. New rule **R28**
   (navigation target must be a prop-less, non-component screen; browser-only).
   Rules now span **R1–R28**.
+- ~~Lift the ejected-server `session` `compile_error!` guard.~~ ✅ done — the
+  generated server now threads the HMAC-signed cookie, so `build` ≡ `serve` for
+  session apps.
 - Light touch: `cargo audit` in CI; real TLS for the app server (HSTS already
-  set); lift the ejected-server `session` `compile_error!` guard.
+  set).
 
 ## Later
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword

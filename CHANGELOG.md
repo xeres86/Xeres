@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — session support in the ejected server (run-mode parity)
+
+Closes the gap where `build` ≠ `serve`: a `session` app now ejects.
+
+- **Ejected `session` support (R24, run-mode parity)** — `xeres build` no longer
+  emits a `compile_error!` for a program that touches `session`; the generated
+  std-only server now threads the same HMAC-SHA256–signed `xeres_session` cookie
+  the interpreter does. The signer/verifier is a verbatim port of `src/interp.rs`,
+  so the cookie is **byte-identical across run modes** — one minted by `xeres
+  serve` verifies under `xeres build` and vice-versa. The actor is recovered from
+  a verified cookie into a per-request store and read by `session.actor`;
+  `session.login(id)` / `session.logout()` record a pending `Set-Cookie`
+  (`HttpOnly; Secure; SameSite=Strict`) emitted after the call. Crypto rides the
+  existing `auth` feature (the generated `Cargo.toml` gains `hmac`/`sha2` as
+  optional `auth`-feature deps; a non-`auth` build gets the same inert stubs as
+  the interpreter). Proven live: built the emitted crate with `--features auth`,
+  logged in, confirmed the signed cookie round-trips (`session.actor` returns the
+  actor) and a tampered cookie is rejected. No language-surface or checker change
+  (R24/R25 already cover the failure modes); reuses the `pass_session` fixture.
+
 ## 0.5.1 — 2026-06-16 — client router (P2)
 
 Multi-screen apps with real URLs and zero framework runtime.
