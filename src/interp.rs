@@ -145,6 +145,11 @@ impl<'a> Interp<'a> {
         if fn_name == "now" {
             return Ok(Value::Int(now_millis()));
         }
+        if fn_name == "decimal" {
+            // String-backed exact money value — the constructor is the identity
+            // over its (already-string) argument (the checker enforces R29).
+            return Ok(args.into_iter().next().unwrap_or(Value::Null));
+        }
         if matches!(fn_name, "abs" | "min" | "max") {
             return math_fn(fn_name, &args);
         }

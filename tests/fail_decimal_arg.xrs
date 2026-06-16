@@ -1,0 +1,5 @@
+// R29 — `decimal(...)` takes a String; a Float argument is rejected. This is
+// exactly the Float-into-money mixing the Decimal primitive exists to prevent.
+server fn bad() -> Decimal {
+  return decimal(19.99)
+}

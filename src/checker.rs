@@ -5,7 +5,7 @@ use crate::parser::{
 };
 use std::collections::{HashMap, HashSet};
 
-const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime"];
+const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime", "Decimal"];
 
 /// Stdlib methods on a `String` receiver.
 const STRING_METHODS: &[&str] = &["trim", "upper", "lower", "length", "contains", "split", "replace"];
@@ -157,6 +157,9 @@ fn resolve_type(
             "uid" | "hash" => Some("String".into()),
             "verify" => Some("Bool".into()),
             "now" => Some("DateTime".into()),
+            // decimal("19.99") — a string-backed exact money value, kept
+            // distinct from Float so the two can't silently mix (R29).
+            "decimal" => Some("Decimal".into()),
             // math: result type follows the (numeric) argument
             "abs" | "min" | "max" => args
                 .first()
@@ -1112,6 +1115,32 @@ fn check_expr(
                     check_nav_target(&args[0], "`navigate(...)`", fn_name, fn_line, table, errors);
                 }
                 return; // the screen-name arg is not an ordinary value expression
+            }
+            // R29 — `decimal("19.99")` builds a string-backed exact money value.
+            // It takes exactly one `String` (write the amount as a string so it
+            // never passes through binary floating point); a `Float`/`Int`
+            // argument is the very mixing this primitive exists to prevent.
+            if callee == "decimal" {
+                if args.len() != 1 {
+                    errors.push(SemanticError {
+                        rule: "R29 decimal",
+                        message: "`decimal(...)` takes exactly one string, e.g. `decimal(\"19.99\")`.".into(),
+                        line: fn_line,
+                    });
+                } else if let Some(t) = resolve_type(&args[0], locals, table) {
+                    if t != "String" {
+                        errors.push(SemanticError {
+                            rule: "R29 decimal",
+                            message: format!(
+                                "`decimal(...)` takes a `String`, got `{}`. Write the amount as a string literal: `decimal(\"19.99\")`.",
+                                t
+                            ),
+                            line: fn_line,
+                        });
+                    }
+                }
+                check_expr(&args[0], locals, fn_env, fn_name, fn_line, table, errors);
+                return;
             }
             // R19 — hash()/verify() are server-only crypto builtins: a password
             // hash must be computed (and a secret hash compared) on the server,

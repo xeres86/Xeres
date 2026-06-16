@@ -117,9 +117,20 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   --tls` (and the ejected server behind a `tls` cargo feature) terminates HTTPS
   directly via pure-Rust `rustls`/`ring`, reading `TLS_CERT`/`TLS_KEY`; no proxy
   needed, so the always-on HSTS header is now truthful.
+- ~~**`Decimal` money primitive (R29)**~~ ✅ done (v0.5.3) — exact, string-backed
+  money via `decimal("19.99")`, type-distinct from `Float` so binary-float error
+  can't leak into money math. Cut 1: construct, display (string concat), and
+  `==`/`!=`; usable in model fields, RPC args, DB columns; both run modes
+  (`Decimal` ⇒ a `String` on the wire/DB). **Arithmetic + ordered comparison are
+  a deliberate Cut-2 follow-up** (see Later). Rules now span **R1–R29**.
 - Light touch: `cargo audit` in CI.
 
 ## Later
+- **`Decimal` Cut 2** — arithmetic (`+ - *`) and ordered comparison (`< > <=
+  >=`): server-side via the `rust_decimal` crate behind a new `decimal` cargo
+  feature, browser-side a tiny fixed-point helper. `Decimal × Int → Decimal`,
+  `Decimal ± Decimal → Decimal`; `Decimal` with `Float` stays a compile error.
+  Plus a `9.99d` literal, currency/locale formatting, and rounding modes.
 - TLS follow-ups: HTTP→HTTPS redirect listener, ACME/Let's Encrypt automation,
   and HTTP/2 (v0.5.2 ships TLS termination; these were explicitly out of scope).
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword

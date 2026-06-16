@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.3 — 2026-06-16 — `Decimal` money primitive
+
+The last missing "extended primitive": an exact, string-backed `Decimal` for
+money and other exact fractions, kept type-distinct from `Float` so the two can
+never silently mix.
+
+- **`Decimal` type + `decimal("..")` constructor** — `decimal("19.99")` builds a
+  string-backed exact value (carried as a decimal *string* over the wire / DB /
+  interpreter, mirroring how enums are string-backed), so the browser tier stays
+  zero-dependency and money values never pass through binary floating point.
+  Following the `DateTime` playbook, it needs **no lexer/parser change** — the
+  constructor is an ordinary builtin (like `now()`). `Decimal` is usable in model
+  fields, RPC args, and DB columns, and is implemented identically in **both run
+  modes** (the generated Rust server and the `xeres serve` interpreter): a
+  `Decimal` field maps to a Rust `String` / TS `string` and serializes as a JSON
+  string.
+- **Type-safe by construction (R29)** — `decimal(...)` takes exactly one
+  `String`; a `Float`/`Int` argument is a compile error. And because assignability
+  never widens into `Decimal`, assigning a `Float` (or `Int`) to a `Decimal` — or
+  passing one where a `Decimal` is expected — is rejected (R11/R7). This is the
+  whole point: no silent float error in money math.
+- **Cut 1 scope** — construct, display (string concatenation, e.g. `"Total: $" +
+  total`), and `==`/`!=`. **Arithmetic (`+ - *`) and ordered comparison (`< > <=
+  >=`) are a deliberate follow-up** (Cut 2 — server-side `rust_decimal`,
+  browser-side fixed-point) noted in ROADMAP. Verified: `examples/cart.xrs` builds
+  and `xeres serve` renders `Total: $19.99`, bundles via esbuild, and ejects to a
+  Rust crate where the field is a `String`.
+
 ## 0.5.2 — 2026-06-16 — app-server TLS
 
 Optional, first-class HTTPS — the always-on HSTS header and `Secure` cookies both

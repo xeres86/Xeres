@@ -1,0 +1,10 @@
+// R11 — a Float literal must not initialize a Decimal state. Decimal and Float
+// are kept distinct so money values can't silently inherit binary-float error.
+ui screen S {
+  state total: Decimal = 19.99
+  view {
+    column {
+      text "x"
+    }
+  }
+}

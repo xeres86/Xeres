@@ -271,7 +271,8 @@ fn decode_arg(j: Option<&J>, ty: &str, program: &XeresProgram) -> Value {
         None => return Value::Null,
     };
     match ty {
-        "String" => Value::Str(j.as_string()),
+        // Decimal rides the wire as a string (exact, string-backed).
+        "String" | "Decimal" => Value::Str(j.as_string()),
         "Int" | "DateTime" => Value::Int(j.as_i64()),
         "Float" => Value::Float(j.as_f64()),
         "Bool" => Value::Bool(j.as_bool()),

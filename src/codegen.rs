@@ -471,8 +471,8 @@ fn decode_json_rust(src: &str, ty: &str, program: &XeresProgram, depth: usize) -
             .join(", ");
         return format!("{} {{ {} }}", ty, fields);
     }
-    // String and string-backed enums decode from a JSON string.
-    if ty == "String" || program.enums.iter().any(|e| e.name == ty) {
+    // String, Decimal (string-backed), and string-backed enums decode from JSON.
+    if ty == "String" || ty == "Decimal" || program.enums.iter().any(|e| e.name == ty) {
         return format!("{}.map(|__v| __v.as_string()).unwrap_or_default()", src);
     }
     // scalar (Int, DateTime as i64; Float; Bool)
@@ -1571,6 +1571,13 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
             if callee == "now" && args.is_empty() {
                 return "Date.now()".to_string();
             }
+            // decimal("19.99") — string-backed money; forward the inner string.
+            if callee == "decimal" {
+                return args
+                    .first()
+                    .map(|x| emit_h_expr(x, screen, sv))
+                    .unwrap_or_else(|| "\"\"".to_string());
+            }
             // `navigate(Screen)` — the argument is a screen *name* (R28), lowered
             // to the router's `__navigate("Screen")` (switch screen + URL).
             if callee == "navigate" {
@@ -2004,6 +2011,16 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
             // now() — epoch millis. Browser: Date.now(); server: the now() helper.
             if callee == "now" && args.is_empty() {
                 return if ts { "Date.now()".to_string() } else { "now()".to_string() };
+            }
+            // decimal("19.99") — string-backed money. The constructor is the
+            // identity over its string argument: a `String` literal already
+            // emits as a JS string on the TS tier and `String::from("..")` on
+            // the server tier, so just forward the inner expression.
+            if callee == "decimal" {
+                return args
+                    .first()
+                    .map(|a| emit_expr(a, ts))
+                    .unwrap_or_else(|| if ts { "\"\"".to_string() } else { "String::new()".to_string() });
             }
             // `navigate(Screen)` — browser-only (R28), so only the TS tier emits
             // it; lower to the router's `__navigate("Screen")`.
@@ -2544,7 +2561,9 @@ fn map_rust_type(name: &str) -> String {
         return format!("Option<{}>", map_rust_type(inner));
     }
     match name {
-        "String" => "String".to_string(),
+        // Decimal is a string-backed exact money value — a String end-to-end
+        // (wire/db/interp), never f64, so it can't pick up binary-float error.
+        "String" | "Decimal" => "String".to_string(),
         "Int" => "i64".to_string(),
         "Float" => "f64".to_string(),
         "Bool" => "bool".to_string(),
@@ -2562,7 +2581,8 @@ fn map_ts_type(name: &str) -> String {
         return format!("({} | null)", map_ts_type(inner));
     }
     match name {
-        "String" => "string".to_string(),
+        // Decimal stays a string in the browser tier (zero-dep, exact).
+        "String" | "Decimal" => "string".to_string(),
         "Int" | "Float" | "DateTime" => "number".to_string(),
         "Bool" => "boolean".to_string(),
         other => other.to_string(),

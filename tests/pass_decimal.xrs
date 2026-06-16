@@ -1,0 +1,26 @@
+// Decimal money primitive (string-backed, exact) + the decimal("..") builtin:
+// model field, server fn arg + return, state init, display concat, == compare.
+// Decimal is deliberately NOT interchangeable with Float (see fail_decimal_*).
+// Arithmetic/ordered compare are out of scope here (Cut 2) — only == and display.
+model Invoice { id: String  total: Decimal }
+
+server fn make(total: Decimal) -> Invoice {
+  return Invoice { id: uid(), total: total }
+}
+server fn zero() -> Decimal {
+  return decimal("0.00")
+}
+
+ui screen Cart {
+  state subtotal: Decimal = decimal("0.00")
+  state msg: String = ""
+  view {
+    column {
+      text "Total: " + subtotal
+      button "check" -> {
+        if subtotal == decimal("0.00") { msg = "empty" } else { msg = "has items" }
+      }
+      text msg
+    }
+  }
+}

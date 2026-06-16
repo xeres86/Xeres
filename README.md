@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.1**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.3**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -165,7 +165,9 @@ server fn total(items: List<Int>) -> Int {
 ```
 
 Enums (string-backed) pair with `match` — exhaustiveness is compiler-checked
-(**R20**), and a `DateTime` (epoch ms) + `now()` round out the primitives:
+(**R20**), a `DateTime` (epoch ms) + `now()`, and a `Decimal` (exact,
+string-backed money via `decimal("19.99")` — never mixed with `Float`, **R29**)
+round out the primitives:
 
 ```xeres
 enum Status { Active Suspended Closed }
@@ -423,6 +425,7 @@ Every program is checked against these. A violation is a compile error.
 | **R19** auth-builtin | `hash()` / `verify()` are server-only (no client-side hashing; the secret hash is compared on the server) |
 | **R20** match | a `match` scrutinee is an enum, each arm is a real variant, and the arms are exhaustive (all variants, or `_`); `Enum.Variant` must exist |
 | **R28** navigation | `navigate(X)` / `link … -> X` targets a known, prop-less, non-component screen (a route can't supply props); the imperative `navigate(...)` is browser-only |
+| **R29** decimal | `decimal(...)` takes exactly one `String` (money is written as a string, e.g. `decimal("19.99")`); `Decimal` is never assignable to/from `Float`/`Int`, so binary-float error can't leak into money math |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,
