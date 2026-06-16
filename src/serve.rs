@@ -6,10 +6,16 @@ use crate::interp::{json_str, Interp, Value};
 use crate::parser::{EnvModifier, XeresProgram};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::{Mutex, OnceLock};
 
-pub fn serve(program: &XeresProgram, static_dir: &str, port: u16) {
+/// Paths to a PEM cert chain + private key for `xeres serve --tls`.
+pub struct TlsConfig {
+    pub cert: String,
+    pub key: String,
+}
+
+pub fn serve(program: &XeresProgram, static_dir: &str, port: u16, tls: Option<TlsConfig>) {
     let addr = format!("127.0.0.1:{}", port);
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
@@ -18,6 +24,28 @@ pub fn serve(program: &XeresProgram, static_dir: &str, port: u16) {
             return;
         }
     };
+
+    // With --tls we terminate HTTPS directly: each accepted TcpStream is wrapped
+    // in a rustls server stream and handed to the same `handle_conn` (it only
+    // needs `Read + Write`). The security headers we already send (HSTS, Secure
+    // cookies) finally become truthful. Without --tls it's today's plain path.
+    if let Some(tls) = tls {
+        let config = std::sync::Arc::new(load_tls(&tls.cert, &tls.key));
+        println!("xeres serve: https://{}", addr);
+        std::thread::scope(|s| {
+            for stream in listener.incoming().flatten() {
+                let config = config.clone();
+                s.spawn(move || match rustls::ServerConnection::new(config) {
+                    Ok(conn) => {
+                        let _ = handle_conn(rustls::StreamOwned::new(conn, stream), program, static_dir);
+                    }
+                    Err(e) => eprintln!("xeres serve: tls connection setup failed ({})", e),
+                });
+            }
+        });
+        return;
+    }
+
     println!("xeres serve: http://{}", addr);
 
     // Scoped threads let each connection borrow `program` / `static_dir`.
@@ -30,7 +58,28 @@ pub fn serve(program: &XeresProgram, static_dir: &str, port: u16) {
     });
 }
 
-fn handle_conn(mut stream: TcpStream, program: &XeresProgram, static_dir: &str) -> std::io::Result<()> {
+/// Build a rustls `ServerConfig` from PEM cert-chain + private-key files. Panics
+/// with a clear message on any I/O or parse failure — this runs once at startup,
+/// before the accept loop, so a bad cert should fail loud and immediately.
+fn load_tls(cert: &str, key: &str) -> rustls::ServerConfig {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let cert_file =
+        std::fs::File::open(cert).unwrap_or_else(|e| panic!("xeres serve --tls: cannot open TLS_CERT {} ({})", cert, e));
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+        .collect::<Result<_, _>>()
+        .expect("xeres serve --tls: cannot parse TLS_CERT PEM");
+    let key_file =
+        std::fs::File::open(key).unwrap_or_else(|e| panic!("xeres serve --tls: cannot open TLS_KEY {} ({})", key, e));
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+        .expect("xeres serve --tls: cannot read TLS_KEY PEM")
+        .expect("xeres serve --tls: no private key found in TLS_KEY");
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("xeres serve --tls: invalid certificate/key pair")
+}
+
+fn handle_conn<S: Read + Write>(mut stream: S, program: &XeresProgram, static_dir: &str) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf)?;
     if n == 0 {
@@ -97,8 +146,8 @@ const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\n\
     Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n";
 
 /// Write a response with the security headers + any `Set-Cookie` lines.
-fn write_response(
-    stream: &mut TcpStream,
+fn write_response<S: Write>(
+    stream: &mut S,
     code: u16,
     ctype: &str,
     payload: &str,

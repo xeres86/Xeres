@@ -1,8 +1,26 @@
 # Changelog
 
-## Unreleased — session support in the ejected server (run-mode parity)
+## 0.5.2 — 2026-06-16 — app-server TLS
 
-Closes the gap where `build` ≠ `serve`: a `session` app now ejects.
+Optional, first-class HTTPS — the always-on HSTS header and `Secure` cookies both
+servers already promise stop being aspirational, with no TLS proxy in front.
+(Also ships the previously-unreleased ejected-`session` run-mode parity, below.)
+
+- **App-server TLS (`xeres serve --tls`)** — the `serve` runtime can now
+  terminate HTTPS directly. With `TLS_CERT`/`TLS_KEY` pointing at PEM files,
+  `xeres serve --tls <app>.xrs` listens on TLS and serves `https://`; the
+  always-on `Strict-Transport-Security` header finally becomes truthful. Built on
+  **pure-Rust `rustls`** (the `ring` backend — no OpenSSL/system deps; the app
+  listener's TLS is independent of the `native-tls` the `db` Postgres client
+  pulls in). The connection handler was generalized over `Read + Write`, so one
+  code path serves either a raw `TcpStream` (plain HTTP — the default, unchanged)
+  or a `rustls` stream; `xeres serve` with no flag is byte-for-byte as before. The
+  **ejected server** gains the same HTTPS behind an opt-in `tls` cargo feature
+  (`cargo build --features tls`, reading the same env), with `rustls` an optional
+  dep so a default build of the emitted crate stays HTTP-only and lean. Verified
+  end-to-end on both run modes: `curl -k https://127.0.0.1:8080/` → `200` carrying
+  `Strict-Transport-Security`. HTTP→HTTPS redirect, ACME/Let's Encrypt, and HTTP/2
+  are deferred (see ROADMAP "Later").
 
 - **Ejected `session` support (R24, run-mode parity)** — `xeres build` no longer
   emits a `compile_error!` for a program that touches `session`; the generated

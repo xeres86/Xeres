@@ -113,10 +113,15 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
 - ~~Lift the ejected-server `session` `compile_error!` guard.~~ ✅ done — the
   generated server now threads the HMAC-signed cookie, so `build` ≡ `serve` for
   session apps.
-- Light touch: `cargo audit` in CI; real TLS for the app server (HSTS already
-  set).
+- ~~Real TLS for the app server (HSTS already set).~~ ✅ done — `xeres serve
+  --tls` (and the ejected server behind a `tls` cargo feature) terminates HTTPS
+  directly via pure-Rust `rustls`/`ring`, reading `TLS_CERT`/`TLS_KEY`; no proxy
+  needed, so the always-on HSTS header is now truthful.
+- Light touch: `cargo audit` in CI.
 
 ## Later
+- TLS follow-ups: HTTP→HTTPS redirect listener, ACME/Let's Encrypt automation,
+  and HTTP/2 (v0.5.2 ships TLS termination; these were explicitly out of scope).
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword
   already reserves the surface).
 - LSP (inline R-rule diagnostics in editors), `xeres fmt`.

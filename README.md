@@ -83,8 +83,11 @@ server), so it needs **no cargo / Rust toolchain**. It loads a dotenv-style
 
 Two run modes:
 - **`xeres serve` / `xeres dev`** — run the app directly (no cargo). Default.
+  Add **`--tls`** (with `TLS_CERT`/`TLS_KEY` set to PEM paths) to terminate
+  HTTPS directly — no proxy needed; the always-on HSTS header becomes truthful.
 - **`xeres build`** — emit a standalone Rust server crate (`out/server/`) to
-  compile with cargo, for an eject / max-performance deployment.
+  compile with cargo, for an eject / max-performance deployment. The emitted
+  crate gains the same HTTPS behind a `tls` cargo feature (`--features tls`).
 
 ---
 

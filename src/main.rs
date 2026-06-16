@@ -35,6 +35,7 @@ fn main() {
                 "xeres - the Xeres compiler\n\nusage:\n  \
                  xeres dev   <file.xrs>   serve + rebuild on change (no cargo)\n  \
                  xeres serve <file.xrs>   compile + serve once on :8080 (no cargo)\n  \
+                 xeres serve --tls <file.xrs>   serve over HTTPS (TLS_CERT/TLS_KEY = PEM paths)\n  \
                  xeres build <file.xrs>   emit a standalone Rust server crate (out/server/)"
             );
             exit(2);
@@ -43,7 +44,7 @@ fn main() {
 
     match cmd {
         "dev" => dev_loop(&path),
-        "serve" => serve_once(&path),
+        "serve" => serve_once(&path, parse_tls(&args)),
         _ => {
             if !build(&path) {
                 exit(1);
@@ -119,8 +120,23 @@ fn screen_component_counts(program: &XeresProgram) -> (usize, usize) {
     (program.screens.len() - components, components)
 }
 
+/// Resolve `--tls` into a `TlsConfig` from `TLS_CERT`/`TLS_KEY`. Absent flag ⇒
+/// plain HTTP (today's default). Flag set but env missing ⇒ exit with guidance.
+fn parse_tls(args: &[String]) -> Option<serve::TlsConfig> {
+    if !args.iter().any(|a| a == "--tls") {
+        return None;
+    }
+    match (std::env::var("TLS_CERT"), std::env::var("TLS_KEY")) {
+        (Ok(cert), Ok(key)) => Some(serve::TlsConfig { cert, key }),
+        _ => {
+            eprintln!("xeres serve --tls: set TLS_CERT and TLS_KEY to PEM file paths");
+            exit(2);
+        }
+    }
+}
+
 /// `xeres serve` — compile the client, then run the app in-process (no cargo).
-fn serve_once(path: &str) {
+fn serve_once(path: &str, tls: Option<serve::TlsConfig>) {
     let Some(program) = compile(path) else { return };
     let analysis = checker::analyze(&program);
     let (_server, client_ts, index_html, _cargo) =
@@ -142,7 +158,7 @@ fn serve_once(path: &str) {
         screens,
         components
     );
-    serve::serve(&program, STATIC_DIR, PORT);
+    serve::serve(&program, STATIC_DIR, PORT, tls);
 }
 
 /// `xeres dev` — watch the source; (re)spawn `xeres serve` on change. No cargo.

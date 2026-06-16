@@ -64,16 +64,21 @@ fn gen_cargo(program: &XeresProgram) -> String {
     if !program.endpoints.is_empty() {
         deps.push_str("ureq = \"2\"\n");
     }
+    // App-listener TLS (opt-in via `--features tls`), mirroring the compiler's own
+    // `xeres serve --tls`: pure-Rust rustls on the `ring` backend, no system deps.
+    // Optional, so a default build of the emitted crate stays HTTP-only and lean.
+    deps.push_str("rustls = { version = \"0.23\", default-features = false, features = [\"ring\", \"std\", \"tls12\"], optional = true }\n");
+    deps.push_str("rustls-pemfile = { version = \"2\", optional = true }\n");
     let mut tail = String::new();
     if !deps.is_empty() {
         tail.push_str(&format!("\n[dependencies]\n{}", deps));
     }
+    // `tls` is always offered; `auth` only when the app uses sessions.
+    let mut features = String::from("tls = [\"dep:rustls\", \"dep:rustls-pemfile\"]\n");
     if uses_session(program) {
-        tail.push_str("\n[features]\nauth = [\"dep:hmac\", \"dep:sha2\"]\n");
+        features.push_str("auth = [\"dep:hmac\", \"dep:sha2\"]\n");
     }
-    if tail.is_empty() {
-        tail.push('\n');
-    }
+    tail.push_str(&format!("\n[features]\n{}", features));
     format!(
         "[package]\nname = \"xeres-app\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n\
          [[bin]]\nname = \"xeres-app\"\npath = \"src/main.rs\"\n{}",
@@ -508,7 +513,7 @@ fn wire_serialize(path: &str, ty: &str, models: &HashSet<&str>) -> String {
 }
 
 const SERVER_HEAD: &str = r#"use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 
 /// Minimal JSON string escaping (spike-grade).
 fn json_str(s: &str) -> String {
@@ -698,7 +703,7 @@ fn rand_token() -> String {
 // terminated in front; no Access-Control-Allow-Origin (the app is same-origin).
 const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n";
 
-fn write_response(stream: &mut TcpStream, code: u16, ctype: &str, payload: &str, cookies: &str) -> std::io::Result<()> {
+fn write_response<S: Write>(stream: &mut S, code: u16, ctype: &str, payload: &str, cookies: &str) -> std::io::Result<()> {
     let resp = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         code, reason(code), ctype, SECURITY_HEADERS, cookies, payload.as_bytes().len(), payload
@@ -707,7 +712,7 @@ fn write_response(stream: &mut TcpStream, code: u16, ctype: &str, payload: &str,
     stream.flush()
 }
 
-fn handle_conn(stream: &mut TcpStream) -> std::io::Result<()> {
+fn handle_conn<S: Read + Write>(stream: &mut S) -> std::io::Result<()> {
     let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf)?;
     if n == 0 { return Ok(()); }
@@ -737,17 +742,65 @@ fn handle_conn(stream: &mut TcpStream) -> std::io::Result<()> {
     write_response(stream, code, ctype, &payload, &cookies)
 }
 
-fn main() {
-    let addr = "127.0.0.1:8080";
-    let listener = TcpListener::bind(addr).expect("xeres: cannot bind 127.0.0.1:8080");
+// Plain-HTTP accept loop (the default). One thread per connection so an idle or
+// slow socket can't block accept.
+fn serve_plain(listener: TcpListener, addr: &str) {
     println!("xeres app serving http://{}", addr);
     for stream in listener.incoming() {
         if let Ok(mut s) = stream {
-            // One thread per connection: an idle/slow socket (e.g. a browser's
-            // speculative connection) must not block the accept loop.
             std::thread::spawn(move || { let _ = handle_conn(&mut s); });
         }
     }
+}
+
+// Build a rustls ServerConfig from PEM cert-chain + key files (startup-only;
+// panics loud on a bad cert so it fails before the accept loop).
+#[cfg(feature = "tls")]
+fn load_tls(cert: &str, key: &str) -> rustls::ServerConfig {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let cert_file = std::fs::File::open(cert).unwrap_or_else(|e| panic!("xeres: cannot open TLS_CERT {} ({})", cert, e));
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+        .collect::<Result<_, _>>().expect("xeres: cannot parse TLS_CERT PEM");
+    let key_file = std::fs::File::open(key).unwrap_or_else(|e| panic!("xeres: cannot open TLS_KEY {} ({})", key, e));
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+        .expect("xeres: cannot read TLS_KEY PEM").expect("xeres: no private key in TLS_KEY");
+    rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)
+        .expect("xeres: invalid certificate/key pair")
+}
+
+// With `tls` on and TLS_CERT/TLS_KEY set, terminate HTTPS directly: each accepted
+// TcpStream is wrapped in a rustls stream and handed to the same generic
+// handle_conn. Otherwise (or unset env) fall back to plain HTTP.
+#[cfg(feature = "tls")]
+fn serve_loop(listener: TcpListener, addr: &str) {
+    if let (Ok(cert), Ok(key)) = (std::env::var("TLS_CERT"), std::env::var("TLS_KEY")) {
+        let config = std::sync::Arc::new(load_tls(&cert, &key));
+        println!("xeres app serving https://{}", addr);
+        for stream in listener.incoming() {
+            if let Ok(s) = stream {
+                let config = config.clone();
+                std::thread::spawn(move || {
+                    if let Ok(conn) = rustls::ServerConnection::new(config) {
+                        let mut tls = rustls::StreamOwned::new(conn, s);
+                        let _ = handle_conn(&mut tls);
+                    }
+                });
+            }
+        }
+        return;
+    }
+    serve_plain(listener, addr);
+}
+
+#[cfg(not(feature = "tls"))]
+fn serve_loop(listener: TcpListener, addr: &str) {
+    serve_plain(listener, addr);
+}
+
+fn main() {
+    let addr = "127.0.0.1:8080";
+    let listener = TcpListener::bind(addr).expect("xeres: cannot bind 127.0.0.1:8080");
+    serve_loop(listener, addr);
 }
 "#;
 
