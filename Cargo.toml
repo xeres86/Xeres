@@ -1,6 +1,6 @@
 [package]
 name = "xeres"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 description = "The Xeres compiler — tier-safe (server/ui) web language with a typed, compiler-enforced boundary."
 license = "MIT"

@@ -1,0 +1,18 @@
+// Typed numeric inputs (v0.5.4) — a `number` input binds an Int/Float state cell
+// directly. The runtime coerces the DOM value back to a JS number on write, so
+// the view's arithmetic stays numeric (no bind-a-String-and-parse-by-hand).
+ui screen Order {
+  state qty: Int = 2
+  state price: Float = 9.5
+  view {
+    column {
+      heading "Order"
+      text "Quantity"
+      number bind qty
+      text "Unit price"
+      number bind price
+      button "qty +1" -> { qty = qty + 1 }
+      text "Line total: " + (qty * price)
+    }
+  }
+}

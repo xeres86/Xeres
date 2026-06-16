@@ -123,6 +123,12 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   `==`/`!=`; usable in model fields, RPC args, DB columns; both run modes
   (`Decimal` ⇒ a `String` on the wire/DB). **Arithmetic + ordered comparison are
   a deliberate Cut-2 follow-up** (see Later). Rules now span **R1–R29**.
+- ~~**Typed numeric inputs (`number`)**~~ ✅ done (v0.5.4) — a `number` control
+  binds an `Int`/`Float` `state` cell directly (`<input type="number">`; runtime
+  coerces via `valueAsNumber`, empty → `0`), so a numeric field yields a number,
+  not a string. Extends **R13** to three-way (checkbox→Bool, number→Int/Float,
+  rest→String); a `number` can't bind a `Decimal` (it yields a float). No new
+  rule, no parser change.
 - Light touch: `cargo audit` in CI.
 
 ## Later

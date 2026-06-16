@@ -1,0 +1,14 @@
+// R13 (extended) — a `number` input binds a numeric state cell directly: an
+// `Int` or a `Float` (not a String). The runtime coerces the DOM value back to
+// a JS number on write, so arithmetic in the view stays numeric.
+ui screen Order {
+  state qty: Int = 1
+  state price: Float = 0.0
+  view {
+    column {
+      number bind qty
+      number bind price
+      text "line total " + (qty * price)
+    }
+  }
+}

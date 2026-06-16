@@ -627,18 +627,25 @@ fn check_view(
             if let Some(a) = arg {
                 check_screen_expr(a, locals, sname, sline, table, errors);
             }
-            // R13 — `bind x` requires a matching `state` cell: `checkbox` binds a
-            // `Bool`, every other control (input/password/textarea/select) a `String`.
+            // R13 — `bind x` requires a matching `state` cell. `checkbox` binds a
+            // `Bool`; `number` binds an `Int` or `Float` (the input yields a JS
+            // number — deliberately *not* `Decimal`, whose whole point is to stay
+            // off binary float); every other control (input/password/textarea/
+            // select/radio) binds a `String`.
             if let Some(var) = bind {
-                let want = if tag == "checkbox" { "Bool" } else { "String" };
+                let want: &[&str] = match tag.as_str() {
+                    "checkbox" => &["Bool"],
+                    "number" => &["Int", "Float"],
+                    _ => &["String"],
+                };
                 let ok = states.contains(var)
-                    && matches!(locals.get(var), Some((Some(t), _)) if t == want);
+                    && matches!(locals.get(var), Some((Some(t), _)) if want.contains(&t.as_str()));
                 if !ok {
                     errors.push(SemanticError {
                         rule: "R13 input-binding",
                         message: format!(
                             "`bind {}` on `{}` in screen `{}` requires a `state {}: {}` cell.",
-                            var, tag, sname, var, want
+                            var, tag, sname, var, want.join(" or ")
                         ),
                         line: sline,
                     });

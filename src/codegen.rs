@@ -1311,6 +1311,9 @@ impl ScreenEmit {
                     if tag == "checkbox" {
                         s.push_str(" type=\"checkbox\"");
                     }
+                    if tag == "number" {
+                        s.push_str(" type=\"number\"");
+                    }
                     if tag == "image" {
                         // the (string) arg is the image src — escaped (R22).
                         if let Some(e) = arg {
@@ -1702,10 +1705,10 @@ function __esc(v: unknown): string {
 }
 type XHandler = (key?: string) => void | Promise<void>;
 const __handlers = new Map<string, XHandler>();
-const __binds = new Map<string, (v: string | boolean) => void>();
+const __binds = new Map<string, (v: string | boolean | number) => void>();
 let __draw: (() => void) | null = null;   // set by mount; called on reactive updates
 export function on(name: string, fn: XHandler): void { __handlers.set(name, fn); }
-export function onBind(name: string, fn: (v: string | boolean) => void): void { __binds.set(name, fn); }
+export function onBind(name: string, fn: (v: string | boolean | number) => void): void { __binds.set(name, fn); }
 
 // Render a screen into `el`, then wire events. Clicks re-render afterwards;
 // input binds update state WITHOUT re-rendering (so the field keeps focus).
@@ -1727,6 +1730,12 @@ export function mount(el: HTMLElement, render: () => string): void {
       const b = __binds.get(name);
       if (!b) return;
       if (node.type === "checkbox") { node.onchange = () => b(node.checked); }
+      else if (node.type === "number") {
+        // numeric input -> a real JS number (NaN when empty -> 0), so the bound
+        // Int/Float state cell never silently becomes a string.
+        const num = () => { const n = node.valueAsNumber; b(Number.isNaN(n) ? 0 : n); };
+        node.oninput = num; node.onchange = num;
+      }
       else { node.oninput = () => b(node.value); node.onchange = () => b(node.value); }
     });
   };
@@ -2666,6 +2675,7 @@ fn map_tag(tag: &str) -> &str {
         "button" => "button",
         "password" => "input",
         "checkbox" => "input",  // type="checkbox" added in codegen
+        "number" => "input",    // type="number" added in codegen
         "image" => "img",
         "radio" => "div",       // a <div> wrapping the generated radio-input group
         "link" => "a",          // client-router anchor (href + data-link, see node())

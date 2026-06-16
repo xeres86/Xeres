@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.3**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.4**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -207,8 +207,8 @@ ui screen Login(  ) {
 
 View primitives — **layout**: `column`, `row`, `grid` (CSS grid), `box`
 (unstyled container); **text**: `heading`, `subheading`, `title`, `text`,
-`paragraph`; **controls**: `button`, `input`, `password`, `textarea`,
-`checkbox`, `radio`, `select`, `image`, and `link` (a client-router
+`paragraph`; **controls**: `button`, `input`, `password`, `number` (binds an
+`Int`/`Float`), `textarea`, `checkbox`, `radio`, `select`, `image`, and `link` (a client-router
 anchor — see [Navigation](#navigation-the-client-router)). Control flow:
 `for x in items { ... }`, `if cond { ... } else { ... }`, and the conditional
 expression `cond ? a : b`. `for` iterates a synced `Collection<T>` **or** a
@@ -416,7 +416,7 @@ Every program is checked against these. A violation is a compile error.
 | **R10** sync-key | a `synced` collection's model needs an `id: String` merge key |
 | **R11** state-init / assign | `state` initializers and assignments are type-compatible |
 | **R12** collection-method | `add`/`remove`/`get`/`all` only on synced collections, client-side |
-| **R13** input-binding | `bind x` requires a `String` `state` cell |
+| **R13** input-binding | `bind x` requires a `state` cell of the control's type: `checkbox`→`Bool`, `number`→`Int`/`Float`, everything else→`String` (a `number` can't bind a `Decimal` — it yields a float) |
 | **R14** if-condition | an `if` condition must be `Bool` |
 | **R15** db-capability | `db` is server-only; methods are `query_one`/`query`/`exec` |
 | **R16** try-context | `try`/`catch` is browser-only; server failures surface as a failed `await` |

@@ -1,0 +1,10 @@
+// R13 — a `number` input needs a numeric (`Int`/`Float`) state cell; binding it
+// to a `String` is rejected. Symmetric to fail_checkbox_string.
+ui screen S {
+  state name: String = ""
+  view {
+    column {
+      number bind name
+    }
+  }
+}

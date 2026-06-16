@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.4 — 2026-06-16 — typed numeric inputs (`number`)
+
+A `number` form control that binds an `Int`/`Float` state cell directly — closing
+the last papercut in the v0.5 form-controls work, on the same "a typed field
+yields a typed value" theme as `Decimal`.
+
+- **`number` input (extends R13)** — `number bind qty` binds a numeric `state`
+  cell straight across, instead of forcing the dev to bind a `String` and parse
+  by hand. `number` lowers to `<input type="number">`; the runtime coerces the
+  DOM value back to a real JS number on write (`valueAsNumber`, with empty → `0`),
+  so a `state qty: Int = 1` stays an `Int` and `qty * price` in the view is real
+  arithmetic. Value reflection (`value="${qty}"`) and the `data-bind` wiring reuse
+  the existing control machinery.
+- **R13 is now three-way** — `checkbox` binds a `Bool`, `number` binds an `Int`
+  or `Float`, and every other control (`input`/`password`/`textarea`/`select`/
+  `radio`) binds a `String`. Binding a `number` to a non-numeric cell is a compile
+  error (symmetric to the existing checkbox rule).
+- **Deliberately not `Decimal`** — a `number` input yields a binary float
+  (`valueAsNumber`), so it is *not* allowed to bind a `Decimal`; that would
+  reintroduce exactly the float error `Decimal` (R29) exists to prevent. Money
+  stays text-entry + `decimal("..")`. `input` also stays `String`-only — numeric
+  binding is opt-in via the `number` tag, keeping the type obvious from the tag.
+- Verified: `examples/order.xrs` builds, `xeres serve` bundles via esbuild and
+  serves `<input type="number">` bound to numeric state with live `valueAsNumber`
+  coercion. No new dependency, no parser change.
+
 ## 0.5.3 — 2026-06-16 — `Decimal` money primitive
 
 The last missing "extended primitive": an exact, string-backed `Decimal` for
