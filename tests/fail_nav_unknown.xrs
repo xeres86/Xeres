@@ -1,0 +1,9 @@
+// P2 / R28 — `navigate(X)` must target a known, navigable screen. `Dashboard`
+// is never declared, so this does not compile.
+ui screen Home {
+  view {
+    column {
+      button "Go" -> { navigate(Dashboard) }
+    }
+  }
+}

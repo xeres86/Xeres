@@ -1,6 +1,26 @@
 # Changelog
 
-## 0.5.0 (unreleased) — view & navigation primitives
+## 0.5.1 — 2026-06-16 — client router (P2)
+
+Multi-screen apps with real URLs and zero framework runtime.
+
+- **Client router (P2)** — multi-screen apps with real URLs, no framework
+  runtime. `navigate(Screen)` switches the mounted screen from a handler /
+  `on load`; `link "Label" -> Screen` renders an `<a href>` that navigates with
+  **no full reload** (the click is intercepted, `pushState` syncs the URL). Each
+  prop-less, non-component screen is a route — the first is `/`, the rest
+  `/<name>` — so Back/Forward (`popstate`) and deep-linking / reload both land on
+  the right screen, and a screen's `on load` now runs whenever it's navigated to
+  (generalizing P1's mount hook). Deep links survive a reload via an
+  **SPA fallback**: an extension-less path that isn't a real file serves
+  `index.html` (in both the `xeres serve` runtime and the ejected server), while
+  a missing asset stays a `404`. New rule **R28**: a navigation target must be a
+  known, *prop-less, non-component* screen (a route can't supply props), and the
+  imperative `navigate(...)` is browser-only. Browser-tier only — no new server
+  surface, the boundary is unchanged. Fixtures: pass_router, fail_nav_unknown,
+  fail_nav_props; example [`examples/router.xrs`](examples/router.xrs).
+
+## 0.5.0 — view & navigation primitives (P3 form controls)
 
 The remaining capability gaps for line-of-business apps.
 
@@ -11,7 +31,7 @@ The remaining capability gaps for line-of-business apps.
   from a list arg). All route through the R22 escape path; **R13 is type-aware**
   (`checkbox` needs `Bool`, the rest `String`); list-literal args are now allowed
   in views. Fixtures: pass_form_controls, pass_select, pass_radio,
-  fail_checkbox_string. (`link` lands with the **router** in a later cut.)
+  fail_checkbox_string. (`link` shipped with the **client router**, above.)
 
 ## 0.4.0 — 2026-06-15 — security wave 2 (CSRF, R26 SSRF, R27 logging) + on-load
 

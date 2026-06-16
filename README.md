@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.2.0**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.1**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -202,7 +202,9 @@ ui screen Login(  ) {
 
 View primitives — **layout**: `column`, `row`, `grid` (CSS grid), `box`
 (unstyled container); **text**: `heading`, `subheading`, `title`, `text`,
-`paragraph`; **controls**: `button`, `input`, `password`. Control flow:
+`paragraph`; **controls**: `button`, `input`, `password`, `textarea`,
+`checkbox`, `radio`, `select`, `image`, and `link` (a client-router
+anchor — see [Navigation](#navigation-the-client-router)). Control flow:
 `for x in items { ... }`, `if cond { ... } else { ... }`, and the conditional
 expression `cond ? a : b`. `for` iterates a synced `Collection<T>` **or** a
 plain `List<T>` state cell. Inputs use `bind <stateCell>` for two-way binding.
@@ -280,6 +282,40 @@ position; lowercase tags are built-in elements. The full admin dashboard —
 sidebar with active-nav highlighting, a stats grid, a bar chart, and a status
 table — is [`examples/acme.xrs`](examples/acme.xrs)
 (`xeres dev examples/acme.xrs`).
+
+### Navigation: the client router
+
+Every prop-less screen is a **route**. The first is `/`; the rest are `/<name>`.
+Move between them with a declarative `link` or the imperative `navigate(...)`:
+
+```xeres
+ui screen Home {
+  view {
+    column {
+      heading "Home"
+      link "About us" -> About            // an <a href> — no full reload
+      button "Settings" -> { navigate(Settings) }   // imperative form
+    }
+  }
+}
+
+ui screen About {
+  view { column { heading "About"  link "Back home" -> Home } }
+}
+```
+
+A `link` click is intercepted and `pushState`s the URL, so the screen swaps with
+no reload; the browser **Back/Forward** buttons work (`popstate`), and a
+**deep link or reload** of `/about` boots straight to that screen (the server
+serves `index.html` for client routes; real assets still 404 if missing). A
+screen's `on load` runs each time it's navigated to, so a screen fetches its own
+data on open. Navigation is browser-tier only — no new server surface.
+
+Rule **R28**: a target must be a known, **prop-less, non-component** screen (a
+route can't supply props — have the screen fetch its data in `on load`), and the
+imperative `navigate(...)` is rejected outside ui/screen code. The full
+three-screen demo is [`examples/router.xrs`](examples/router.xrs)
+(`xeres dev examples/router.xrs`).
 
 ### Local-first synced collections
 
@@ -383,6 +419,7 @@ Every program is checked against these. A violation is a compile error.
 | **R18** conditional-branch | both branches of `cond ? a : b` have one type (no silent mixing) |
 | **R19** auth-builtin | `hash()` / `verify()` are server-only (no client-side hashing; the secret hash is compared on the server) |
 | **R20** match | a `match` scrutinee is an enum, each arm is a real variant, and the arms are exhaustive (all variants, or `_`); `Enum.Variant` must exist |
+| **R28** navigation | `navigate(X)` / `link … -> X` targets a known, prop-less, non-component screen (a route can't supply props); the imperative `navigate(...)` is browser-only |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,

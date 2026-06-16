@@ -1,0 +1,17 @@
+// P2 / R28 — only prop-less screens are navigable: a route can't supply props.
+// Navigating to `Profile(user: User)` is therefore a compile error.
+model User { id: String  name: String }
+
+ui screen Home {
+  view {
+    column {
+      link "Profile" -> Profile
+    }
+  }
+}
+
+ui screen Profile(user: User) {
+  view {
+    column { text user.name }
+  }
+}

@@ -270,6 +270,15 @@ fn serve_static(path: &str, static_dir: &str) -> (u16, &'static str, String) {
     };
     match std::fs::read_to_string(&full) {
         Ok(c) => (200, ctype, c),
+        // SPA fallback (P2 router): an extension-less path is a client route, not
+        // a real file — serve index.html so a deep link / reload boots the app and
+        // the router resolves the URL. Missing assets (with a `.`) stay a 404.
+        Err(_) if !rel.contains('.') => {
+            match std::fs::read_to_string(format!("{}/index.html", static_dir)) {
+                Ok(c) => (200, "text/html; charset=utf-8", c),
+                Err(_) => (404, "text/html", String::from("<h1>404 - not found</h1>")),
+            }
+        }
         Err(_) => (404, "text/html", String::from("<h1>404 - not found</h1>")),
     }
 }

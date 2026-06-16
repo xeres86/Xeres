@@ -1,0 +1,33 @@
+// P2 — the client router. `navigate(Screen)` switches the mounted screen and
+// syncs the URL; `link "Label" -> Screen` renders an <a> that navigates without
+// a full reload. The first prop-less screen (Home) is the default route ("/").
+ui screen Home {
+  view {
+    column {
+      heading "Home"
+      link "About us" -> About
+      button "Settings" -> { navigate(Settings) }
+    }
+  }
+}
+
+ui screen About {
+  view {
+    column {
+      heading "About"
+      link "Back home" -> Home
+    }
+  }
+}
+
+ui screen Settings {
+  state dark: Bool = false
+  view {
+    column {
+      heading "Settings"
+      checkbox bind dark
+      text "Dark mode"
+      link "Home" -> Home
+    }
+  }
+}

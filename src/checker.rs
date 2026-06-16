@@ -33,6 +33,9 @@ struct SymbolTable<'a> {
     states: HashMap<String, &'a SyncedStateNode>,
     /// Reusable `ui component`s, keyed by name (for invocation checking).
     components: HashMap<String, &'a ScreenNode>,
+    /// `ui screen`s (not components), keyed by name — the navigation targets
+    /// for `navigate(...)` / `link` (R28). Prop-less ones are mountable routes.
+    screens: HashMap<String, &'a ScreenNode>,
     /// Declared egress `endpoint`s, keyed by name (R26).
     endpoints: HashMap<String, &'a EndpointNode>,
 }
@@ -638,12 +641,30 @@ fn check_view(
                     });
                 }
             }
-            match event {
-                Some(Handler::Call(e)) => check_screen_expr(e, locals, sname, sline, table, errors),
-                Some(Handler::Block(stmts)) => {
-                    check_handler_block(stmts, locals, sname, sline, table, errors)
+            if tag == "link" {
+                // `link "Label" -> Screen` — the `->` slot is a navigation
+                // target (R28), not a click handler / value binding.
+                match event {
+                    Some(Handler::Call(target)) => {
+                        check_nav_target(target, "`link`", sname, sline, table, errors)
+                    }
+                    _ => errors.push(SemanticError {
+                        rule: "R28 navigation",
+                        message: format!(
+                            "`link` in screen `{}` needs a target screen: `link \"Label\" -> Screen`.",
+                            sname
+                        ),
+                        line: sline,
+                    }),
                 }
-                None => {}
+            } else {
+                match event {
+                    Some(Handler::Call(e)) => check_screen_expr(e, locals, sname, sline, table, errors),
+                    Some(Handler::Block(stmts)) => {
+                        check_handler_block(stmts, locals, sname, sline, table, errors)
+                    }
+                    None => {}
+                }
             }
             for c in children {
                 check_view(c, locals, states, sname, sline, table, errors);
@@ -761,6 +782,53 @@ fn check_component(
                 line,
             });
         }
+    }
+}
+
+/// R28 — a navigation target (`navigate(X)` or `link … -> X`) must name a
+/// known, *navigable* screen: a `ui screen` (not a component) that takes no
+/// props, so the router can mount it with no arguments. The target is a screen
+/// name, not a value binding, so it bypasses R8.
+fn check_nav_target(
+    target: &Expr,
+    site: &str,
+    sname: &str,
+    line: usize,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
+    let name = match target {
+        Expr::Ident(n) => n.clone(),
+        _ => {
+            errors.push(SemanticError {
+                rule: "R28 navigation",
+                message: format!(
+                    "{} in `{}` must name a screen, e.g. `navigate(Home)` — not an arbitrary expression.",
+                    site, sname
+                ),
+                line,
+            });
+            return;
+        }
+    };
+    match table.screens.get(name.as_str()) {
+        None => errors.push(SemanticError {
+            rule: "R28 navigation",
+            message: format!(
+                "{} targets `{}`, which is not a navigable screen. Declare a prop-less `ui screen {} {{ … }}`.",
+                site, name, name
+            ),
+            line,
+        }),
+        Some(sc) if !sc.params.is_empty() => errors.push(SemanticError {
+            rule: "R28 navigation",
+            message: format!(
+                "{} targets `{}`, which takes props — only prop-less screens are navigable (a route can't supply props). Have `{}` fetch its data in `on load` instead.",
+                site, name, name
+            ),
+            line,
+        }),
+        Some(_) => {}
     }
 }
 
@@ -904,7 +972,12 @@ fn check_bindings(
             }
             check_bindings(base, locals, sname, sline, table, errors)
         }
-        Expr::Call { args, .. } => {
+        Expr::Call { callee, args } => {
+            // `navigate(Screen)`'s argument is a screen name (validated by R28),
+            // not a value binding — don't subject it to R8.
+            if callee == "navigate" {
+                return;
+            }
             for a in args {
                 check_bindings(a, locals, sname, sline, table, errors);
             }
@@ -1015,6 +1088,31 @@ fn check_expr(
             }
         }
         Expr::Call { callee, args } => {
+            // R28 — `navigate(Screen)` switches the mounted screen + URL. It's a
+            // browser-only builtin; its single argument is a screen *name*, not a
+            // value (so it bypasses R8 in `check_bindings`).
+            if callee == "navigate" {
+                if fn_env != EnvModifier::Ui {
+                    errors.push(SemanticError {
+                        rule: "R28 navigation",
+                        message: format!(
+                            "`navigate(...)` in `{}` runs {}; navigation is browser-only — call it from a `ui` screen handler or `on load`.",
+                            fn_name, env_label(fn_env)
+                        ),
+                        line: fn_line,
+                    });
+                }
+                if args.len() != 1 {
+                    errors.push(SemanticError {
+                        rule: "R28 navigation",
+                        message: "`navigate` takes exactly one screen, e.g. `navigate(Home)`.".into(),
+                        line: fn_line,
+                    });
+                } else {
+                    check_nav_target(&args[0], "`navigate(...)`", fn_name, fn_line, table, errors);
+                }
+                return; // the screen-name arg is not an ordinary value expression
+            }
             // R19 — hash()/verify() are server-only crypto builtins: a password
             // hash must be computed (and a secret hash compared) on the server,
             // never in the browser. (Reading the stored `secret` hash is already
@@ -1776,6 +1874,7 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         fns: HashMap::new(),
         states: HashMap::new(),
         components: HashMap::new(),
+        screens: HashMap::new(),
         endpoints: HashMap::new(),
     };
     for ep in &program.endpoints {
@@ -1838,6 +1937,10 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
                 });
             }
             table.components.insert(s.name.clone(), s);
+        } else {
+            // A `ui screen` is a navigation target (R28); prop-less ones are
+            // mountable routes (see `navigate(...)` / `link` checks).
+            table.screens.insert(s.name.clone(), s);
         }
     }
 

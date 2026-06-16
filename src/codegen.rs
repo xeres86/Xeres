@@ -614,6 +614,13 @@ fn serve_static(path: &str) -> (u16, &'static str, String) {
         else { "text/html; charset=utf-8" };
     match std::fs::read_to_string(&full) {
         Ok(c) => (200, ctype, c),
+        // SPA fallback (P2 router): an extension-less path is a client route, not
+        // a real file — serve index.html so a deep link / reload boots the app and
+        // the router resolves the URL. Missing assets (with a `.`) stay a 404.
+        Err(_) if !rel.contains('.') => match std::fs::read_to_string("static/index.html") {
+            Ok(c) => (200, "text/html; charset=utf-8", c),
+            Err(_) => (404, "text/html", String::from("<h1>404 - not found</h1>")),
+        },
         Err(_) => (404, "text/html", String::from("<h1>404 - not found</h1>")),
     }
 }
@@ -899,25 +906,103 @@ fn gen_client(program: &XeresProgram) -> String {
                 name = st.name
             ));
         }
-        if let Some(sc) = program.screens.iter().find(|s| !s.is_component && s.params.is_empty()) {
-            let load_call = if sc.load.is_empty() {
-                String::new()
-            } else {
-                format!("\x20 {}__load();\n", sc.name)
-            };
-            out.push_str(&format!(
-                "\nexport function __start(rootId: string): void {{\n\
-                 \x20 const el = document.getElementById(rootId);\n\
-                 \x20 if (el) mount(el, () => {screen}());\n\
-                 {load}}}\n\
-                 __start(\"app\");\n",
-                screen = sc.name,
-                load = load_call
-            ));
-        }
+        out.push_str(&gen_router(program));
     }
 
     out
+}
+
+/// The client router (P2): a route map over the prop-less, non-component
+/// screens, `__navigate` (switch screen + push the URL), back/forward via
+/// `popstate`, and `__start` (mount + resolve the initial URL). Each navigable
+/// screen gets a path — the first/default screen is `/`, the rest `/<name>`.
+/// A screen's `on load` runs whenever it's navigated to (generalizing P1's
+/// mount hook). Empty when the program has no mountable screen (unchanged: no
+/// auto-mount, as before).
+fn gen_router(program: &XeresProgram) -> String {
+    let navigable: Vec<&crate::parser::ScreenNode> = program
+        .screens
+        .iter()
+        .filter(|s| !s.is_component && s.params.is_empty())
+        .collect();
+    let Some(default) = navigable.first() else {
+        return String::new();
+    };
+    let path_of = |sc: &crate::parser::ScreenNode| -> String {
+        if sc.name == default.name {
+            "/".to_string()
+        } else {
+            format!("/{}", sc.name.to_lowercase())
+        }
+    };
+
+    let render = navigable
+        .iter()
+        .map(|s| format!("{:?}: {}", s.name, s.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let paths = navigable
+        .iter()
+        .map(|s| format!("{:?}: {:?}", s.name, path_of(s)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let by_path = navigable
+        .iter()
+        .map(|s| format!("{:?}: {:?}", path_of(s), s.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let loaders = navigable
+        .iter()
+        .filter(|s| !s.load.is_empty())
+        .map(|s| format!("{:?}: {}__load", s.name, s.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        r#"
+// ---- xeres client router ----
+const __render: Record<string, () => string> = {{ {render} }};
+const __path: Record<string, string> = {{ {paths} }};
+const __byPath: Record<string, string> = {{ {by_path} }};
+const __loaders: Record<string, () => void | Promise<void>> = {{ {loaders} }};
+const __defaultScreen = {default:?};
+let __screen = __defaultScreen;
+
+export function __navigate(name: string): void {{
+  if (!(name in __render)) return;
+  __screen = name;
+  if (typeof history !== "undefined") history.pushState({{}}, "", __path[name]);
+  if (__draw) __draw();
+  const l = __loaders[name]; if (l) l();
+}}
+
+function __routeFromUrl(): void {{
+  const p = (typeof location !== "undefined") ? location.pathname : "/";
+  __screen = __byPath[p] || __defaultScreen;
+}}
+
+if (typeof window !== "undefined") {{
+  window.addEventListener("popstate", () => {{
+    __routeFromUrl();
+    if (__draw) __draw();
+    const l = __loaders[__screen]; if (l) l();
+  }});
+}}
+
+export function __start(rootId: string): void {{
+  const el = document.getElementById(rootId);
+  __routeFromUrl();
+  if (el) mount(el, () => __render[__screen]());
+  const l = __loaders[__screen]; if (l) l();
+}}
+__start("app");
+"#,
+        render = render,
+        paths = paths,
+        by_path = by_path,
+        loaders = loaders,
+        default = default.name,
+    )
 }
 
 /// Emit one screen: its `state` object, inline click-handler functions, and a
@@ -1044,6 +1129,13 @@ impl ScreenEmit {
     fn node(&mut self, v: &ViewNode) -> String {
         match v {
             ViewNode::Element { tag, arg, style, bind, event, children } => {
+                // `link "Label" -> Screen` — a client-router anchor. The `->`
+                // slot is a navigation target (checker R28), so it's rendered
+                // specially (href from the route map + data-link), not via the
+                // generic element path.
+                if tag == "link" {
+                    return link_node(arg, style, event);
+                }
                 let html = map_tag(tag);
                 let void = is_void(html);
                 let mut s = String::from("`<");
@@ -1396,6 +1488,11 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
             if callee == "now" && args.is_empty() {
                 return "Date.now()".to_string();
             }
+            // `navigate(Screen)` — the argument is a screen *name* (R28), lowered
+            // to the router's `__navigate("Screen")` (switch screen + URL).
+            if callee == "navigate" {
+                return format!("__navigate({})", nav_target_js(args));
+            }
             let a: Vec<String> = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect();
             let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
             match callee.as_str() {
@@ -1529,6 +1626,11 @@ export function mount(el: HTMLElement, render: () => string): void {
       const name = node.getAttribute("data-onclick") || "";
       const key = node.getAttribute("data-key") || undefined;
       node.onclick = async () => { const h = __handlers.get(name); if (h) await h(key); draw(); };
+    });
+    // Client-router links: intercept the click (no full reload) and navigate.
+    el.querySelectorAll<HTMLAnchorElement>("[data-link]").forEach((node) => {
+      const name = node.getAttribute("data-link") || "";
+      node.onclick = (e) => { e.preventDefault(); __navigate(name); };
     });
     el.querySelectorAll<HTMLInputElement>("[data-bind]").forEach((node) => {
       const name = node.getAttribute("data-bind") || "";
@@ -1813,6 +1915,11 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
             // now() — epoch millis. Browser: Date.now(); server: the now() helper.
             if callee == "now" && args.is_empty() {
                 return if ts { "Date.now()".to_string() } else { "now()".to_string() };
+            }
+            // `navigate(Screen)` — browser-only (R28), so only the TS tier emits
+            // it; lower to the router's `__navigate("Screen")`.
+            if callee == "navigate" {
+                return format!("__navigate({})", nav_target_js(args));
             }
             let a: Vec<String> = args.iter().map(|x| emit_expr(x, ts)).collect();
             let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
@@ -2280,6 +2387,57 @@ fn inline_css(css: &str) -> String {
     css.split_whitespace().collect::<Vec<_>>().join(" ").replace('"', "&quot;")
 }
 
+/// The JS string literal for a `navigate(Screen)` argument — the screen name
+/// (an `Ident`, per R28). Used by both expression emitters.
+fn nav_target_js(args: &[Expr]) -> String {
+    match args.first() {
+        Some(Expr::Ident(name)) => format!("{:?}", name),
+        _ => "\"\"".to_string(), // checker R28 already rejected a non-screen arg
+    }
+}
+
+/// `link "Label" -> Screen` → an `<a>` whose `href` comes from the runtime
+/// route map (`__path`, module scope) and whose `data-link` drives the SPA
+/// click handler in `mount()` (preventDefault + pushState, no full reload). The
+/// label goes through the same R22 escape path as any other element arg.
+fn link_node(arg: &Option<Expr>, style: &Option<Expr>, event: &Option<Handler>) -> String {
+    let target = match event {
+        Some(Handler::Call(Expr::Ident(name))) => name.clone(),
+        _ => String::new(), // checker R28 already rejected a target-less link
+    };
+    let mut s = String::from("`<a");
+    s.push_str(&format!(" href=\"${{__path[{:?}]}}\" data-link={:?}", target, target));
+    if let Some(style_expr) = style {
+        s.push_str(" style=\"");
+        match style_expr {
+            Expr::Str(css) => s.push_str(&inline_css(css)),
+            e => {
+                s.push_str("${");
+                s.push_str(&emit_expr(e, true));
+                s.push('}');
+            }
+        }
+        s.push('"');
+    }
+    s.push('>');
+    match arg {
+        Some(Expr::Str(t)) => s.push_str(t),
+        Some(Expr::Raw(inner)) => {
+            s.push_str("${");
+            s.push_str(&emit_expr(inner, true));
+            s.push('}');
+        }
+        Some(e) => {
+            s.push_str("${__esc(");
+            s.push_str(&emit_expr(e, true));
+            s.push_str(")}");
+        }
+        None => {}
+    }
+    s.push_str("</a>`");
+    s
+}
+
 /// HTML void elements have no children/closing tag.
 fn is_void(html_tag: &str) -> bool {
     matches!(html_tag, "input" | "br" | "img" | "hr")
@@ -2301,6 +2459,7 @@ fn map_tag(tag: &str) -> &str {
         "checkbox" => "input",  // type="checkbox" added in codegen
         "image" => "img",
         "radio" => "div",       // a <div> wrapping the generated radio-input group
+        "link" => "a",          // client-router anchor (href + data-link, see node())
         other => other,         // text, input, textarea, select, option …
     }
 }

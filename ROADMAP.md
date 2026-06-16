@@ -101,9 +101,14 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   (may `await`; R4/R16 apply).
 
 ## v0.5 — view & navigation primitives (next)
-- **P3 form controls** — `select`, `checkbox`, `radio`, `textarea`, `link`,
-  `image` (each escaped + bind-aware).
-- **P2 client router** — `navigate(Screen)` + URL sync (`link` depends on it).
+- ~~**P3 form controls** — `select`, `checkbox`, `radio`, `textarea`, `link`,
+  `image` (each escaped + bind-aware).~~ ✅ done (`link` landed with the router).
+- ~~**P2 client router** — `navigate(Screen)` + URL sync (`link` depends on
+  it).~~ ✅ done — `navigate(Screen)` + `link "…" -> Screen` over a path-per-screen
+  route map; `pushState`/`popstate` URL sync; SPA fallback so deep links survive a
+  reload; a screen's `on load` runs on each navigation. New rule **R28**
+  (navigation target must be a prop-less, non-component screen; browser-only).
+  Rules now span **R1–R28**.
 - Light touch: `cargo audit` in CI; real TLS for the app server (HSTS already
   set); lift the ejected-server `session` `compile_error!` guard.
 

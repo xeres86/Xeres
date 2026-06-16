@@ -1,0 +1,64 @@
+// examples/router.xrs — the P2 client router.
+//
+//   * `link "Label" -> Screen` renders an <a> that navigates with no reload.
+//   * `navigate(Screen)` does the same imperatively from a handler.
+//   * the URL stays in sync (pushState); Back/Forward work; a deep link or
+//     reload of /about or /counter boots straight to that screen.
+//
+// Run:  xeres dev examples/router.xrs   (then open http://127.0.0.1:8080)
+
+ui component Nav(here: String) {
+  view {
+    row style "gap:18px; padding:16px 24px; background:#0f172a; color:#cbd5e1; align-items:center" {
+      text "Xeres"
+      link "Home" style "color:#a855f7; text-decoration:none" -> Home
+      link "Counter" style "color:#a855f7; text-decoration:none" -> Counter
+      link "About" style "color:#a855f7; text-decoration:none" -> About
+      text "· you are on " + here
+    }
+  }
+}
+
+ui screen Home {
+  view {
+    column style "min-height:100vh; background:#020617; color:#e2e8f0; font-family:system-ui" {
+      Nav { here: "Home" }
+      column style "padding:48px; gap:12px" {
+        title "Welcome"
+        paragraph "One .xrs file, three screens, real URLs — and zero framework runtime."
+        link "Open the counter →" style "color:#38bdf8" -> Counter
+      }
+    }
+  }
+}
+
+ui screen Counter {
+  state count: Int = 0
+  view {
+    column style "min-height:100vh; background:#020617; color:#e2e8f0; font-family:system-ui" {
+      Nav { here: "Counter" }
+      column style "padding:48px; gap:12px; align-items:flex-start" {
+        title "Counter"
+        text "count is " + count
+        row style "gap:8px" {
+          button "+1" style "background:#7c3aed; color:#fff; border:0; padding:8px 16px; border-radius:6px" -> { count = count + 1 }
+          button "reset" style "background:#1e293b; color:#e2e8f0; border:0; padding:8px 16px; border-radius:6px" -> { count = 0 }
+        }
+        paragraph "State lives while the screen is mounted; navigating away and back remounts it fresh."
+      }
+    }
+  }
+}
+
+ui screen About {
+  view {
+    column style "min-height:100vh; background:#020617; color:#e2e8f0; font-family:system-ui" {
+      Nav { here: "About" }
+      column style "padding:48px; gap:12px; align-items:flex-start" {
+        title "About"
+        paragraph "navigate(Screen) is the imperative form of a link — handy after an action completes."
+        button "Take me home" style "background:#7c3aed; color:#fff; border:0; padding:8px 16px; border-radius:6px" -> { navigate(Home) }
+      }
+    }
+  }
+}
