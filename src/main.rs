@@ -6,6 +6,7 @@ mod checker;
 mod codegen;
 mod interp;
 mod serve;
+mod fmt;
 
 use lexer::Lexer;
 use parser::{Parser, XeresProgram};
@@ -36,7 +37,8 @@ fn main() {
                  xeres dev   <file.xrs>   serve + rebuild on change (no cargo)\n  \
                  xeres serve <file.xrs>   compile + serve once on :8080 (no cargo)\n  \
                  xeres serve --tls <file.xrs>   serve over HTTPS (TLS_CERT/TLS_KEY = PEM paths)\n  \
-                 xeres build <file.xrs>   emit a standalone Rust server crate (out/server/)"
+                 xeres build <file.xrs>   emit a standalone Rust server crate (out/server/)\n  \
+                 xeres fmt   <file.xrs>   reformat in canonical style (--check to verify only)"
             );
             exit(2);
         }
@@ -45,9 +47,51 @@ fn main() {
     match cmd {
         "dev" => dev_loop(&path),
         "serve" => serve_once(&path, parse_tls(&args)),
+        "fmt" => {
+            if !fmt_command(&path, &args) {
+                exit(1);
+            }
+        }
         _ => {
             if !build(&path) {
                 exit(1);
+            }
+        }
+    }
+}
+
+/// `xeres fmt` — reformat a file in canonical style (in place), or `--check` to
+/// verify it's already formatted (exit 1 if not) without writing. Pure lexer
+/// pass, so it formats even files that don't type-check.
+fn fmt_command(path: &str, args: &[String]) -> bool {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {}", path, e);
+            return false;
+        }
+    };
+    let formatted = fmt::format(&source);
+    if args.iter().any(|a| a == "--check") {
+        if formatted == source {
+            println!("xeres fmt: {} is already formatted.", path);
+            true
+        } else {
+            eprintln!("xeres fmt: {} is not formatted (run `xeres fmt {}`).", path, path);
+            false
+        }
+    } else if formatted == source {
+        println!("xeres fmt: {} already formatted.", path);
+        true
+    } else {
+        match fs::write(path, &formatted) {
+            Ok(_) => {
+                println!("xeres fmt: formatted {}.", path);
+                true
+            }
+            Err(e) => {
+                eprintln!("error: cannot write {}: {}", path, e);
+                false
             }
         }
     }

@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.4**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.5**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -88,6 +88,10 @@ Two run modes:
 - **`xeres build`** — emit a standalone Rust server crate (`out/server/`) to
   compile with cargo, for an eject / max-performance deployment. The emitted
   crate gains the same HTTPS behind a `tls` cargo feature (`--features tls`).
+
+Plus **`xeres fmt <file.xrs>`** — reformat in the one canonical style (in place),
+or `xeres fmt --check` to verify formatting in CI. It's comment-preserving and
+idempotent (`fmt(fmt(x)) == fmt(x)`).
 
 ---
 

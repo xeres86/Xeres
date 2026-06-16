@@ -10,6 +10,10 @@ pub struct Lexer {
     col: usize,       // 1-based column of `ch`
     tok_line: usize,  // line where the most recent token started
     tok_col: usize,   // column where the most recent token started
+    /// When set, `//` comments are returned as `Token::Comment` instead of being
+    /// skipped. Off by default, so the compile path (parser) is unchanged; only
+    /// `xeres fmt` turns it on (it needs comments to preserve them).
+    keep_comments: bool,
 }
 
 impl Lexer {
@@ -23,9 +27,17 @@ impl Lexer {
             col: 0,
             tok_line: 1,
             tok_col: 1,
+            keep_comments: false,
         };
         lexer.read_char();
         lexer
+    }
+
+    /// Builder: produce `Token::Comment` tokens instead of skipping comments.
+    /// Used by `xeres fmt`; the compile path keeps the default (skip).
+    pub fn keep_comments(mut self) -> Self {
+        self.keep_comments = true;
+        self
     }
 
     fn read_char(&mut self) {
@@ -97,7 +109,12 @@ impl Lexer {
             }
             '/' => {
                 if self.peek_char() == '/' {
+                    let start = self.position;
                     while self.ch != '\n' && self.ch != '\0' { self.read_char(); }
+                    if self.keep_comments {
+                        let text: String = self.input[start..self.position].iter().collect();
+                        return Token::Comment(text.trim_end().to_string());
+                    }
                     return self.next_token();
                 } else {
                     Token::Slash

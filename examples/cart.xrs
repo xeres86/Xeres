@@ -2,7 +2,10 @@
 // from Float so it can never silently inherit binary-float error.
 // Cut 1: construct with decimal(".."), display, and == compare.
 // (Arithmetic and ordered comparison are a Cut-2 follow-up.)
-model Invoice { id: String  total: Decimal }
+model Invoice {
+  id: String
+  total: Decimal
+}
 
 server fn new_invoice(total: Decimal) -> Invoice {
   return Invoice { id: uid(), total: total }

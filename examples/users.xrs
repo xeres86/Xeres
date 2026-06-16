@@ -23,7 +23,7 @@
 model User {
   id: String
   username: String
-  secret password_hash: String      // Located — never crosses the wire (R3/R5)
+  secret password_hash: String // Located — never crosses the wire (R3/R5)
 }
 
 server fn all_users() -> List<User> {

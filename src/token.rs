@@ -66,4 +66,9 @@ pub enum Token {
     // --- control ---
     Illegal,
     EOF,
+
+    /// A `// …` line comment, including the leading `//`. Only ever produced when
+    /// the lexer is built with `keep_comments` (used by `xeres fmt`); the normal
+    /// compile path skips comments at the lexer, so the parser never sees this.
+    Comment(String),
 }

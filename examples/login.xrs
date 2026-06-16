@@ -8,7 +8,7 @@
 model User {
   id: String
   username: String
-  secret password_hash: String      // never crosses to the UI
+  secret password_hash: String // never crosses to the UI
 }
 
 // Real auth (later) will look up the user and compare the password to the

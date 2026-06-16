@@ -5,7 +5,7 @@ model Task {
   done: Bool
 }
 
-synced state tasks: Collection<Task>
+synced state tasks: Collection < Task >
 
 ui screen App {
   state draft: String = ""

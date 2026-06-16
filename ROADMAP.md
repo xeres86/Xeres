@@ -129,6 +129,10 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   not a string. Extends **R13** to three-way (checkbox→Bool, number→Int/Float,
   rest→String); a `number` can't bind a `Decimal` (it yields a float). No new
   rule, no parser change.
+- ~~**`xeres fmt`** (canonical formatter)~~ ✅ done (v0.5.5) — a token-stream
+  pretty-printer (`xeres fmt <file>`, `--check` for CI): canonical indentation/
+  spacing, members one-per-line, blank-line policy, comment-preserving and
+  idempotent. Lexer gained an opt-in `keep_comments` (compile path unchanged).
 - Light touch: `cargo audit` in CI.
 
 ## Later
@@ -141,7 +145,7 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   and HTTP/2 (v0.5.2 ships TLS termination; these were explicitly out of scope).
 - `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword
   already reserves the surface).
-- LSP (inline R-rule diagnostics in editors), `xeres fmt`.
+- LSP (inline R-rule diagnostics in editors), format-on-save / editor integration.
 - More databases behind the same `db` API (MySQL, SQL Server, Oracle).
 - Real SQLite (cr-sqlite) for the on-device store.
 

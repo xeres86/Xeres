@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.5 — 2026-06-16 — `xeres fmt` (canonical formatter)
+
+A `xeres fmt <file.xrs>` subcommand that reprints a program in one canonical
+style (in place, or `--check` for CI). One style ⇒ no bikeshedding, clean diffs.
+
+- **Token-stream formatter** — `fmt` lexes the source (it doesn't go through the
+  AST, which buckets declarations by kind and carries no statement/expression line
+  numbers — so an AST printer couldn't preserve declaration **order** or
+  **comments**). Working from the token stream keeps both for free. It's a pure
+  function of the source text, so it formats files that don't type-check
+  (format-on-error) and is decoupled from the checker/codegen.
+- **Comment-preserving, with zero compile-path risk** — the lexer gained a
+  `keep_comments` builder (off by default, so the parser/compile path is
+  byte-for-byte unchanged) and a `Token::Comment`; only `fmt` turns it on. Leading
+  comment blocks stay attached to the declaration they document.
+- **What it normalizes** — 2-space indentation by `{}`/`[]`/`()` nesting; one
+  space around binary operators / after `:` and `,`; no space inside `()`/`[]`,
+  around `.`, or inside `List<…>`/`Optional<…>` generics; `model`/`enum`/
+  `endpoint` members one per line; one blank line between top-level declarations
+  (runs collapsed); no trailing whitespace; a single trailing newline. `style
+  "…css…"` strings are left verbatim (CSS isn't reflowed). It preserves your line
+  breaks for statements and view nodes (it won't join or force-split them).
+- **Idempotence is the correctness bar** — `fmt(fmt(x)) == fmt(x)`, verified by a
+  new `tests/fmt.rs` over the entire `tests/*.xrs` corpus; the existing examples
+  were reformatted in place to dogfood it. No new dependency, no parser change.
+
 ## 0.5.4 — 2026-06-16 — typed numeric inputs (`number`)
 
 A `number` form control that binds an `Int`/`Float` state cell directly — closing
