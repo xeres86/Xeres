@@ -1,0 +1,12 @@
+// EXPECT: FAIL — `raw()` wraps a `state` cell the user types into (`bind draft`),
+// i.e. untrusted inbound data rendered unescaped: reflected XSS. R30 rejects it.
+ui screen Comments {
+  state draft: String = ""
+
+  view {
+    column {
+      input "Write a comment" bind draft
+      text raw(draft)
+    }
+  }
+}

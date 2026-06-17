@@ -610,6 +610,204 @@ fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<SemanticEr
         };
         check_flow_stmts(&s.load, &mut locals, &synthetic, table, errors);
     }
+
+    // R30 — the inbound-taint rule: `raw(...)` (the audited un-escaped HTML sink)
+    // may not wrap untrusted *inbound* data (a prop or an input-bound `state`).
+    check_raw_taint(s, errors);
+}
+
+/// R30 (raw-taint) — generalizes the secret-*out* flow (R5) into untrusted-*in*
+/// flow for the one place it isn't already covered. Everything in a view is
+/// HTML-escaped by default (R22); `raw(...)` is the single opt-out. This rule
+/// makes that opt-out impossible to feed with request-derived data, closing the
+/// last reflected-XSS hole.
+///
+/// The untrusted sources of a view are kept small and explicit (over-tainting
+/// erodes trust): a screen/component's **props** (they arrive from the caller /
+/// over the wire) and any **`state` cell bound to an input** (`bind cell` — the
+/// user types into it). Taint propagates structurally (field access, operators,
+/// records, ternaries, `for`-bindings over a tainted source). Values that are
+/// *not* request-derived stay clean — notably a `state` cell populated from a
+/// server `await` (server-vetted HTML is the intended escape hatch:
+/// `state safe = ""` filled in `on load` from `await render(...)`, then
+/// `raw(safe)`), and string literals. The check is purely local to each
+/// screen/component (props of a component are themselves untrusted), so no
+/// interprocedural flow is needed, and conservative by design — like R7/R18 it
+/// only fires on provable taint.
+fn check_raw_taint(s: &ScreenNode, errors: &mut Vec<SemanticError>) {
+    // Untrusted-in sources: this view's props + any state cell bound to an input.
+    let mut tainted: HashSet<String> = s.params.iter().map(|p| p.name.clone()).collect();
+    for v in &s.body {
+        collect_bound_states(v, &mut tainted);
+    }
+    for v in &s.body {
+        raw_walk_view(v, &tainted, s, errors);
+    }
+}
+
+/// Collect every `state` cell that is two-way bound to an input control
+/// (`... bind cell`) anywhere in the view — those carry user-typed, untrusted data.
+fn collect_bound_states(v: &ViewNode, out: &mut HashSet<String>) {
+    match v {
+        ViewNode::Element { bind, children, .. } => {
+            if let Some(var) = bind {
+                out.insert(var.clone());
+            }
+            for c in children {
+                collect_bound_states(c, out);
+            }
+        }
+        ViewNode::For { body, .. } => {
+            for c in body {
+                collect_bound_states(c, out);
+            }
+        }
+        ViewNode::If { then_body, else_body, .. } => {
+            for c in then_body {
+                collect_bound_states(c, out);
+            }
+            for c in else_body {
+                collect_bound_states(c, out);
+            }
+        }
+        ViewNode::Component { .. } => {}
+    }
+}
+
+/// Walk a view node's expression slots looking for `raw(...)` sinks, carrying the
+/// set of untrusted idents (extended by a `for` that iterates a tainted source).
+fn raw_walk_view(v: &ViewNode, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<SemanticError>) {
+    match v {
+        ViewNode::Element { arg, style, event, children, .. } => {
+            if let Some(a) = arg {
+                raw_walk_expr(a, tainted, s, errors);
+            }
+            if let Some(st) = style {
+                raw_walk_expr(st, tainted, s, errors);
+            }
+            if let Some(Handler::Call(e)) = event {
+                raw_walk_expr(e, tainted, s, errors);
+            }
+            for c in children {
+                raw_walk_view(c, tainted, s, errors);
+            }
+        }
+        ViewNode::For { var, iter, body } => {
+            raw_walk_expr(iter, tainted, s, errors);
+            let mut inner = tainted.clone();
+            if expr_untrusted(iter, tainted) {
+                inner.insert(var.clone());
+            }
+            for c in body {
+                raw_walk_view(c, &inner, s, errors);
+            }
+        }
+        ViewNode::If { cond, then_body, else_body } => {
+            raw_walk_expr(cond, tainted, s, errors);
+            for c in then_body {
+                raw_walk_view(c, tainted, s, errors);
+            }
+            for c in else_body {
+                raw_walk_view(c, tainted, s, errors);
+            }
+        }
+        ViewNode::Component { args, .. } => {
+            for (_, e) in args {
+                raw_walk_expr(e, tainted, s, errors);
+            }
+        }
+    }
+}
+
+/// Descend an expression looking for `raw(inner)` sinks. A `raw` wrapping an
+/// untrusted value is the violation. Descent does not enter `declassify(...)`
+/// (the audited server-side downgrade laund­ers its subtree by construction).
+fn raw_walk_expr(e: &Expr, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<SemanticError>) {
+    match e {
+        Expr::Raw(inner) => {
+            if expr_untrusted(inner, tainted) {
+                errors.push(SemanticError {
+                    rule: "R30 raw-taint",
+                    message: format!(
+                        "`raw(...)` in {} `{}` wraps untrusted inbound data (a prop or input-bound `state`), which would inject unescaped HTML from the request surface. Render it with default escaping (drop `raw`), or build the trusted HTML in a `server fn` and `await` it into a non-bound `state` first.",
+                        if s.is_component { "component" } else { "screen" },
+                        s.name
+                    ),
+                    line: s.line,
+                });
+            }
+            raw_walk_expr(inner, tainted, s, errors);
+        }
+        Expr::Declassify(_) => {}
+        Expr::Field { base, .. } => raw_walk_expr(base, tainted, s, errors),
+        Expr::Unary { expr, .. } => raw_walk_expr(expr, tainted, s, errors),
+        Expr::Binary { left, right, .. } => {
+            raw_walk_expr(left, tainted, s, errors);
+            raw_walk_expr(right, tainted, s, errors);
+        }
+        Expr::Await(inner) => raw_walk_expr(inner, tainted, s, errors),
+        Expr::MethodCall { receiver, args, .. } => {
+            raw_walk_expr(receiver, tainted, s, errors);
+            for a in args {
+                raw_walk_expr(a, tainted, s, errors);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                raw_walk_expr(a, tainted, s, errors);
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for (_, v) in fields {
+                raw_walk_expr(v, tainted, s, errors);
+            }
+        }
+        Expr::ListLit(items) => {
+            for it in items {
+                raw_walk_expr(it, tainted, s, errors);
+            }
+        }
+        Expr::Ternary { cond, then, otherwise } => {
+            raw_walk_expr(cond, tainted, s, errors);
+            raw_walk_expr(then, tainted, s, errors);
+            raw_walk_expr(otherwise, tainted, s, errors);
+        }
+        Expr::Range { start, end } => {
+            raw_walk_expr(start, tainted, s, errors);
+            raw_walk_expr(end, tainted, s, errors);
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) | Expr::NoneLit => {}
+    }
+}
+
+/// Is `e` derived from untrusted inbound data? Mirrors `is_tainted` but on the
+/// separate untrusted-in dimension: the sources are the idents in `tainted`
+/// (props + input-bound state, plus `for`-bindings over a tainted source).
+/// `declassify(...)` and `await` (server-derived; secrets already stripped) are
+/// laundered; literals are clean.
+fn expr_untrusted(e: &Expr, tainted: &HashSet<String>) -> bool {
+    match e {
+        Expr::Ident(v) => tainted.contains(v),
+        Expr::Field { base, .. } => expr_untrusted(base, tainted),
+        Expr::Unary { expr, .. } => expr_untrusted(expr, tainted),
+        Expr::Binary { left, right, .. } => expr_untrusted(left, tainted) || expr_untrusted(right, tainted),
+        // `raw` is an HTML-trust marker, not a launder — propagate the inner taint.
+        Expr::Raw(inner) => expr_untrusted(inner, tainted),
+        // A method on untrusted data (e.g. `.upper()`) does not clean it.
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_untrusted(receiver, tainted) || args.iter().any(|a| expr_untrusted(a, tainted))
+        }
+        Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_untrusted(v, tainted)),
+        Expr::ListLit(items) => items.iter().any(|it| expr_untrusted(it, tainted)),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_untrusted(cond, tainted) || expr_untrusted(then, tainted) || expr_untrusted(otherwise, tainted)
+        }
+        Expr::Range { start, end } => expr_untrusted(start, tainted) || expr_untrusted(end, tainted),
+        // Laundered / clean: the audited downgrade, server-derived awaits, fn
+        // results (not tracked as untrusted in this cut), and literals.
+        Expr::Declassify(_) | Expr::Await(_) | Expr::Call { .. } => false,
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::NoneLit => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

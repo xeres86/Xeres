@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.6**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.7**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -432,10 +432,19 @@ Every program is checked against these. A violation is a compile error.
 | **R20** match | a `match` scrutinee is an enum, each arm is a real variant, and the arms are exhaustive (all variants, or `_`); `Enum.Variant` must exist |
 | **R28** navigation | `navigate(X)` / `link … -> X` targets a known, prop-less, non-component screen (a route can't supply props); the imperative `navigate(...)` is browser-only |
 | **R29** decimal | `decimal(...)` takes exactly one `String` (money is written as a string, e.g. `decimal("19.99")`); `Decimal` is never assignable to/from `Float`/`Int`, so binary-float error can't leak into money math |
+| **R30** raw-taint | `raw(...)` (the audited un-escaped HTML sink) may not wrap untrusted *inbound* data — a screen/component prop or an input-bound `state`. Render it with default escaping, or build the trusted HTML in a `server fn` and `await` it into a non-bound `state`. Closes reflected XSS |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,
 valid only server-side.
+
+**R30** is the inbound mirror of that secret-*out* flow — the first cut of the
+reserved information-flow layer. Everything in a view is HTML-escaped by default
+(**R22**); `raw(...)` is the one opt-out. R30 makes that opt-out impossible to
+feed with request-derived data (props, input-bound `state`), so the last
+reflected-XSS hole is closed by the compiler rather than by review. The intended
+escape hatch for genuinely-trusted HTML is to produce it in a `server fn` and
+`await` it (a non-input-bound `state` stays clean).
 
 ---
 

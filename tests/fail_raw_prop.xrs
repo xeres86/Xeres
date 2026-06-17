@@ -1,0 +1,18 @@
+// EXPECT: FAIL — a component renders one of its props through `raw()`. Props are
+// untrusted inbound data (a caller may pass user input), so R30 rejects it — the
+// component can't know its callers only ever pass safe HTML.
+ui component Badge(label: String) {
+  view {
+    column {
+      text raw(label)
+    }
+  }
+}
+
+ui screen Home {
+  view {
+    column {
+      Badge { label: "<b>hi</b>" }
+    }
+  }
+}

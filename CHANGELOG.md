@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.5.7 — 2026-06-17 — R30 inbound taint (`raw()` can't take request data)
+
+The first cut of the reserved **information-flow layer** — the inbound mirror of
+the existing secret-*out* flow (R5). Xeres already makes SQLi (R23), SSRF (R26),
+and stored/secret-in-log (R27) inexpressible, and escapes all view output by
+default (R22). The one remaining reflected-XSS hole was the audited un-escape
+sink, `raw(...)`: nothing stopped `raw(userInput)`. **R30** closes it.
+
+- **R30 raw-taint** — `raw(...)` may not wrap **untrusted inbound data**. The
+  untrusted sources of a view are deliberately small and explicit (over-tainting
+  erodes trust): a screen/component's **props** (they arrive from the caller /
+  over the wire) and any **`state` cell bound to an input** (`bind cell` — the
+  user types into it). Taint propagates structurally — field access, operators,
+  records, ternaries, string methods (`.upper()` doesn't launder), and a `for`
+  binding over a tainted source. A `raw()` wrapping such a value is a compile
+  error.
+- **The escape hatch is the secure one** — values that aren't request-derived
+  stay clean: string literals, and a `state` cell populated from an `await`ed
+  `server fn` (`state safe = ""` filled in `on load` from `await render(...)`,
+  then `raw(safe)`). So rendering genuinely-trusted HTML is expressible, but the
+  trust has to come from the server, not from raw client input.
+- **Local + conservative** — each screen/component is checked against its *own*
+  untrusted sources (a component's props are untrusted inside it), so no
+  interprocedural flow is needed, and like R7/R18 the rule only fires on provable
+  taint. Implemented as a self-contained checker pass (`check_raw_taint` in
+  `src/checker.rs`) — no new syntax, no codegen/runtime change, so both run modes
+  are unaffected.
+- **Fixtures** — `pass_raw_trusted` (literal + server-`await`ed state compile),
+  `fail_raw_tainted` (a `raw()` of an input-bound `state`), `fail_raw_prop` (a
+  component `raw()`-ing a prop). The existing `pass_raw_sink` (a `raw()` of a
+  non-bound literal state) stays green.
+
+Deferred (noted in ROADMAP): a dedicated in-view `sanitize(...)` launder, taint
+into the outbound `endpoint` body/path, and a fuller multi-level taint lattice.
+`declassify` stays secret-out / server-only (R6) — untrusted-in is a separate
+dimension on purpose.
+
 ## 0.5.6 — 2026-06-17 — field-level sync merge
 
 Synced collections now merge **last-write-wins per field** instead of per row,

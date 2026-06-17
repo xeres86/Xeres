@@ -1,0 +1,22 @@
+// EXPECT: PASS — R30 only taints props and input-bound `state`. A `raw()` of a
+// string literal is fine, and so is a `raw()` of server-vetted HTML: a `state`
+// cell that is NOT input-bound, filled from an `await`ed server fn. That await
+// path is the intended escape hatch for rendering trusted HTML.
+server fn render_md(src: String) -> String {
+  return src                       // a real impl sanitizes / renders server-side
+}
+
+ui screen Article {
+  state safe: String = ""
+
+  view {
+    column {
+      text raw("<b>static</b>")
+      text raw(safe)
+      button "Load" -> {
+        let h = await render_md("# hello")
+        safe = h
+      }
+    }
+  }
+}

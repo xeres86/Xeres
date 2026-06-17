@@ -147,8 +147,11 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   Plus a `9.99d` literal, currency/locale formatting, and rounding modes.
 - TLS follow-ups: HTTP→HTTPS redirect listener, ACME/Let's Encrypt automation,
   and HTTP/2 (v0.5.2 ships TLS termination; these were explicitly out of scope).
-- `enum`s; the `Tainted`/information-flow layer (the `declassify` keyword
-  already reserves the surface).
+- ~~`enum`s~~ ✅ (R20); the `Tainted`/information-flow layer — **cut 1 shipped as
+  R30** (v0.5.7): `raw(...)` can't wrap untrusted *inbound* data (props /
+  input-bound `state`), the inbound mirror of secret-out (R5). Remaining cuts
+  (deferred): a dedicated in-view `sanitize(...)` launder, untrusted-in → outbound
+  `endpoint` body/path, and a fuller multi-level taint lattice.
 - LSP (inline R-rule diagnostics in editors), format-on-save / editor integration.
 - More databases behind the same `db` API (MySQL, SQL Server, Oracle).
 - Real SQLite (cr-sqlite) for the on-device store.
