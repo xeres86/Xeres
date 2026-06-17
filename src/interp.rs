@@ -812,12 +812,20 @@ fn session_secret() -> Vec<u8> {
 
 #[cfg(feature = "auth")]
 fn session_set_cookie(id: &str) -> String {
-    format!("xeres_session={}; HttpOnly; Secure; SameSite=Strict; Path=/", session_sign(id))
+    // Two cookies in one Set-Cookie slot (joined so the writer emits both lines):
+    // the signed HttpOnly session, plus a *readable* `xeres_auth` flag the client
+    // router reads to bounce unauthenticated users off `auth` routes (R31). The
+    // flag holds no secret — forging it only reveals an empty shell, since
+    // protected *data* still requires the signed session (R24).
+    format!(
+        "xeres_session={}; HttpOnly; Secure; SameSite=Strict; Path=/\r\nSet-Cookie: xeres_auth=1; Secure; SameSite=Strict; Path=/",
+        session_sign(id)
+    )
 }
 
 #[cfg(feature = "auth")]
 fn session_clear_cookie() -> String {
-    "xeres_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0".to_string()
+    "xeres_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0\r\nSet-Cookie: xeres_auth=; Secure; SameSite=Strict; Path=/; Max-Age=0".to_string()
 }
 
 #[cfg(feature = "auth")]

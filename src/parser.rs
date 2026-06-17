@@ -180,6 +180,10 @@ pub struct ScreenNode {
     /// `ui component` (reusable, invoked by name) vs `ui screen` (a page that
     /// auto-mounts). Both share the same typed-view machinery.
     pub is_component: bool,
+    /// `auth ui screen` — a protected route (R31): unauthenticated users are
+    /// bounced to the public root route (client-side and server-side), so the
+    /// page can't be reached without a valid session. Components can't be `auth`.
+    pub is_auth: bool,
 }
 
 /// `enum Name { Variant1 Variant2 ... }` — a closed set of unit variants.
@@ -288,8 +292,17 @@ impl<'a> Parser<'a> {
                         program.functions.push(f);
                     }
                 }
-                Token::Server | Token::Fn | Token::Auth => {
+                Token::Server | Token::Fn => {
                     if let Some(f) = self.parse_function() { program.functions.push(f); }
+                }
+                Token::Auth => {
+                    // `auth ui screen/component` is a protected screen (R31);
+                    // otherwise `auth` heads an `auth server fn`.
+                    if self.peek_token == Token::Ui {
+                        if let Some(s) = self.parse_screen() { program.screens.push(s); }
+                    } else if let Some(f) = self.parse_function() {
+                        program.functions.push(f);
+                    }
                 }
                 Token::Synced => {
                     if let Some(s) = self.parse_synced_state() { program.states.push(s); }
@@ -896,6 +909,13 @@ impl<'a> Parser<'a> {
     fn parse_screen(&mut self) -> Option<ScreenNode> {
         self.allow_record = false; // in views, `{` opens a child block, not a record
         let screen_line = self.cur_line;
+        // `auth ui screen` — an optional leading `auth` marks a protected route.
+        let is_auth = if self.current_token == Token::Auth {
+            self.next_token(); // consume 'auth'
+            true
+        } else {
+            false
+        };
         self.next_token(); // consume 'ui'
         let is_component = self.cur_is_kw("component");
         self.next_token(); // consume 'screen' / 'component'
@@ -944,7 +964,7 @@ impl<'a> Parser<'a> {
         }
 
         if self.current_token == Token::RBrace { self.next_token(); } // close screen
-        Some(ScreenNode { name, params, states, load, body, line: screen_line, is_component })
+        Some(ScreenNode { name, params, states, load, body, line: screen_line, is_component, is_auth })
     }
 
     fn parse_state_decl(&mut self) -> Option<StateDecl> {

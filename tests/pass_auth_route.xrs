@@ -1,0 +1,39 @@
+// EXPECT: PASS — `auth ui screen` protects a route (R31). The root `Home` is
+// public (the landing/login), `signIn` establishes a session, and `Dashboard` is
+// gated: unauthenticated users are bounced to `/` (client router + server shell
+// guard), and its data (`current`) is an `auth server fn` (R24).
+auth server fn current() -> String {
+  return session.actor.or("anon")
+}
+
+server fn signIn(name: String) -> Bool {
+  session.login(name)
+  return true
+}
+
+ui screen Home {
+  view {
+    column {
+      heading "Welcome"
+      button "Sign in" -> { let ok = await signIn("alice") }
+      link "Open dashboard" -> Dashboard
+    }
+  }
+}
+
+auth ui screen Dashboard {
+  state me: String = ""
+
+  on load {
+    let m = await current()
+    me = m
+  }
+
+  view {
+    column {
+      heading "Dashboard"
+      text me
+      link "Home" -> Home
+    }
+  }
+}

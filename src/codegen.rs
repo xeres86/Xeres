@@ -417,8 +417,37 @@ fn gen_server(program: &XeresProgram) -> String {
             .replace("    //__XERES_RECOVER__\n", "")
             .replace("    //__XERES_SETCOOKIE__\n", "")
     };
+    // R31 auth-route guard: refuse the SPA shell for a protected route without a
+    // verified session (the actor was recovered into the thread-local just above).
+    // Mirrors the guard in src/serve.rs. Only an app with an `auth` route needs it.
+    let has_auth_route =
+        program.screens.iter().any(|s| s.is_auth && !s.is_component && s.params.is_empty());
+    let server_main = if has_auth_route {
+        out.push_str(&gen_protected_paths(program));
+        server_main.replace("    //__XERES_GUARD__", AUTH_GUARD)
+    } else {
+        server_main.replace("    //__XERES_GUARD__\n", "")
+    };
     out.push_str(&server_main);
     out
+}
+
+/// R31 — the generated `is_protected_path`: the literal set of `auth` route paths,
+/// mirroring the client router's path map (first prop-less screen `/`, rest
+/// `/<name>`). The default route can't be `auth`, so these are all `/<name>`.
+fn gen_protected_paths(program: &XeresProgram) -> String {
+    let navigable: Vec<_> =
+        program.screens.iter().filter(|s| !s.is_component && s.params.is_empty()).collect();
+    let default = navigable.first().map(|s| s.name.clone()).unwrap_or_default();
+    let arms: Vec<String> = navigable
+        .iter()
+        .filter(|s| s.is_auth)
+        .map(|s| {
+            let p = if s.name == default { "/".to_string() } else { format!("/{}", s.name.to_lowercase()) };
+            format!("{:?}", p)
+        })
+        .collect();
+    format!("fn is_protected_path(p: &str) -> bool {{ matches!(p, {}) }}\n\n", arms.join(" | "))
 }
 
 /// Recover the actor from a verified session cookie into the per-request
@@ -428,6 +457,11 @@ const SESSION_RECOVER: &str = "    let __actor = cookie_value(&req, \"xeres_sess
 /// Emit any Set-Cookie recorded by `session.login`/`logout` during the call,
 /// before the CSRF cookie (session apps only). Mirrors `serve.rs`.
 const SESSION_SETCOOKIE: &str = "    if let Some(c) = session_take_cookie() {\n        cookies.push_str(&format!(\"Set-Cookie: {}\\r\\n\", c));\n    }";
+
+/// R31 — the generated auth-route guard, spliced into `dispatch` (only for apps
+/// with an `auth` route). `session_actor()` was set by SESSION_RECOVER before
+/// dispatch, so `None` means no valid session ⇒ bounce to the public root.
+const AUTH_GUARD: &str = "    if method == \"GET\" && session_actor().is_none() && is_protected_path(path) {\n        return (302, \"text/html\", String::from(\"/\"));\n    }";
 
 /// Rust expression decoding RPC argument `i` of type `ty` from the parsed JSON
 /// array `__a`. Delegates to the recursive decoder, so an argument may be any
@@ -643,7 +677,7 @@ fn jparse(s: &str) -> J { let b: Vec<char> = s.chars().collect(); let mut i = 0;
 "#;
 
 const SERVER_MAIN: &str = r#"fn reason(code: u16) -> &'static str {
-    match code { 200 => "OK", 403 => "Forbidden", 404 => "Not Found", 501 => "Not Implemented", _ => "OK" }
+    match code { 200 => "OK", 302 => "Found", 403 => "Forbidden", 404 => "Not Found", 501 => "Not Implemented", _ => "OK" }
 }
 
 fn serve_static(path: &str) -> (u16, &'static str, String) {
@@ -676,6 +710,7 @@ fn dispatch(method: &str, path: &str, body: &str) -> (u16, &'static str, String)
             None => (404, "application/json", String::from("{\"error\":\"no such rpc\"}")),
         };
     }
+    //__XERES_GUARD__
     serve_static(path)
 }
 
@@ -711,6 +746,11 @@ fn rand_token() -> String {
 const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n";
 
 fn write_response<S: Write>(stream: &mut S, code: u16, ctype: &str, payload: &str, cookies: &str) -> std::io::Result<()> {
+    if code == 302 {
+        let resp = format!("HTTP/1.1 302 Found\r\nLocation: {}\r\n{}{}Content-Length: 0\r\nConnection: close\r\n\r\n", payload, SECURITY_HEADERS, cookies);
+        stream.write_all(resp.as_bytes())?;
+        return stream.flush();
+    }
     let resp = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         code, reason(code), ctype, SECURITY_HEADERS, cookies, payload.as_bytes().len(), payload
@@ -1071,6 +1111,14 @@ fn gen_router(program: &XeresProgram) -> String {
         .map(|s| format!("{:?}: {}__load", s.name, s.name))
         .collect::<Vec<_>>()
         .join(", ");
+    // R31 — protected (`auth`) routes the client router redirects away from when
+    // the readable `xeres_auth` flag cookie is absent (server enforces too).
+    let protected = navigable
+        .iter()
+        .filter(|s| s.is_auth)
+        .map(|s| format!("{:?}: true", s.name))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     format!(
         r#"
@@ -1080,10 +1128,24 @@ const __path: Record<string, string> = {{ {paths} }};
 const __byPath: Record<string, string> = {{ {by_path} }};
 const __loaders: Record<string, () => void | Promise<void>> = {{ {loaders} }};
 const __defaultScreen = {default:?};
+const __protected: Record<string, boolean> = {{ {protected} }};
 let __screen = __defaultScreen;
+
+// R31 — the readable `xeres_auth` flag (set alongside the HttpOnly session on
+// login) lets the router bounce unauthenticated users off `auth` routes. It is
+// only a UX hint: forging it reveals an empty shell, since data still needs the
+// signed session (R24), and the server applies the same guard on shell requests.
+function __authed(): boolean {{
+  return typeof document !== "undefined"
+    && document.cookie.split(";").some((c) => c.trim().startsWith("xeres_auth="));
+}}
+function __guard(name: string): string {{
+  return (__protected[name] && !__authed()) ? __defaultScreen : name;
+}}
 
 export function __navigate(name: string): void {{
   if (!(name in __render)) return;
+  name = __guard(name);
   __screen = name;
   if (typeof history !== "undefined") history.pushState({{}}, "", __path[name]);
   if (__draw) __draw();
@@ -1092,7 +1154,7 @@ export function __navigate(name: string): void {{
 
 function __routeFromUrl(): void {{
   const p = (typeof location !== "undefined") ? location.pathname : "/";
-  __screen = __byPath[p] || __defaultScreen;
+  __screen = __guard(__byPath[p] || __defaultScreen);
 }}
 
 if (typeof window !== "undefined") {{
@@ -1115,6 +1177,7 @@ __start("app");
         paths = paths,
         by_path = by_path,
         loaders = loaders,
+        protected = protected,
         default = default.name,
     )
 }
@@ -2552,11 +2615,17 @@ fn session_secret() -> Vec<u8> {
 }
 #[cfg(feature = "auth")]
 fn session_set_cookie(id: &str) -> String {
-    format!("xeres_session={}; HttpOnly; Secure; SameSite=Strict; Path=/", session_sign(id))
+    // Signed HttpOnly session + a readable `xeres_auth` flag the client router uses
+    // to redirect unauthenticated users off `auth` routes (R31). The flag is not a
+    // secret: forging it reveals only an empty shell — data needs the real session.
+    format!(
+        "xeres_session={}; HttpOnly; Secure; SameSite=Strict; Path=/\r\nSet-Cookie: xeres_auth=1; Secure; SameSite=Strict; Path=/",
+        session_sign(id)
+    )
 }
 #[cfg(feature = "auth")]
 fn session_clear_cookie() -> String {
-    "xeres_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0".to_string()
+    "xeres_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0\r\nSet-Cookie: xeres_auth=; Secure; SameSite=Strict; Path=/; Max-Age=0".to_string()
 }
 #[cfg(feature = "auth")]
 fn session_hex(bytes: &[u8]) -> String {

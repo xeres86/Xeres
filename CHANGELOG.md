@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.9 — 2026-06-17 — R31 auth-gated routes (non-bypassable protected pages)
+
+A screen could gate its *data* (an `auth server fn` consults `session`, R24/R25),
+but the *page* rendered for anyone. `auth ui screen X { … }` now marks a protected
+route, enforced on **both** tiers so it can't be reached without a session.
+
+- **R31 auth-route** — `auth` before `ui screen` marks the route protected. The
+  rule requires: the app establishes a session (some fn calls `session.login`),
+  the screen is a prop-less route (not a component), and the **default route stays
+  public** so unauthenticated users always have a landing/login page.
+- **Two-tier enforcement** — the server **refuses to serve the protected route's
+  shell** without a valid session cookie (a `302` redirect to `/`), so a deep link
+  or hand-crafted request can't reach it; the client router does the same for
+  in-app navigation, reading a non-secret `xeres_auth` flag cookie set alongside
+  the signed session on `session.login`. The flag is only a UX hint — forging it
+  reveals an empty shell, since protected *data* still needs the signed session
+  (R24). Implemented identically in the `xeres serve` interpreter and the ejected
+  server; verified live (unauthed `GET /dashboard` → 302 → `/`; authed → 200).
+- **Plumbing** — `session.login`/`logout` now also set/clear the readable
+  `xeres_auth` flag (both backends); `write_response` learned `302`/`Location`;
+  the generated server gained an `is_protected_path` guard spliced into `dispatch`.
+- **Fixtures** — `pass_auth_route` (public root + session + an `auth` dashboard),
+  `fail_auth_route_no_session` (an `auth` screen with no session → R31),
+  `fail_auth_on_component` (`auth ui component` → R31).
+
+Deferred (ROADMAP): roles/permissions (RBAC, spec 15), an explicit login-screen
+designation (Cut 1 redirects to the default route), per-route data prefetch.
+
 ## 0.5.8 — 2026-06-17 — List stdlib (length / first / last / at / reverse)
 
 `List<T>` was iterate-only — `for x in xs` was the *only* way to touch a list, with

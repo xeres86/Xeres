@@ -1,0 +1,18 @@
+// EXPECT: FAIL — `auth` marks a protected route; it's meaningless on a component
+// (components aren't routes — they're invoked by name, not navigated to). R31
+// rejects it.
+auth ui component Badge(label: String) {
+  view {
+    column {
+      text label
+    }
+  }
+}
+
+ui screen Home {
+  view {
+    column {
+      Badge { label: "hi" }
+    }
+  }
+}

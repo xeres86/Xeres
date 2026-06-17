@@ -2365,6 +2365,58 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         check_screen(s, &table, &mut errors);
     }
 
+    // R31 — auth-gated routes. A protected (`auth`) screen needs: to be a route
+    // (prop-less, not a component), a session to gate against (some fn must
+    // establish one), and a *public* default route to bounce unauthenticated
+    // users to. The enforcement is two-tier (client redirect + server shell
+    // guard); this rule keeps the surface coherent.
+    let navigable_root = program
+        .screens
+        .iter()
+        .find(|s| !s.is_component && s.params.is_empty())
+        .map(|s| s.name.clone());
+    let app_uses_session = program.functions.iter().any(|f| stmts_use_session(&f.body));
+    for s in &program.screens {
+        if !s.is_auth {
+            continue;
+        }
+        if s.is_component {
+            errors.push(SemanticError {
+                rule: "R31 auth-route",
+                message: format!("`auth` marks a protected route; it can't be used on component `{}`.", s.name),
+                line: s.line,
+            });
+            continue;
+        }
+        if !s.params.is_empty() {
+            errors.push(SemanticError {
+                rule: "R31 auth-route",
+                message: format!("an `auth` screen must be a prop-less route; `{}` takes props.", s.name),
+                line: s.line,
+            });
+        }
+        if !app_uses_session {
+            errors.push(SemanticError {
+                rule: "R31 auth-route",
+                message: format!(
+                    "`auth ui screen {}` needs a session, but no function establishes one (call `session.login(...)` in an `auth server fn`).",
+                    s.name
+                ),
+                line: s.line,
+            });
+        }
+        if navigable_root.as_deref() == Some(s.name.as_str()) {
+            errors.push(SemanticError {
+                rule: "R31 auth-route",
+                message: format!(
+                    "the default route `{}` must be public so unauthenticated users have a landing/login page — mark a different screen `auth`.",
+                    s.name
+                ),
+                line: s.line,
+            });
+        }
+    }
+
     let mut returns_secret: HashMap<String, bool> =
         program.functions.iter().map(|f| (f.name.clone(), false)).collect();
     loop {

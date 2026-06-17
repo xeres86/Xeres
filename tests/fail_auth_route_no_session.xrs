@@ -1,0 +1,19 @@
+// EXPECT: FAIL — an `auth` screen with no session anywhere in the app: nothing
+// can ever sign in, so the route would be permanently unreachable. R31 requires a
+// session (some fn must call `session.login`).
+ui screen Home {
+  view {
+    column {
+      heading "Home"
+      link "Dash" -> Dashboard
+    }
+  }
+}
+
+auth ui screen Dashboard {
+  view {
+    column {
+      heading "Members only"
+    }
+  }
+}

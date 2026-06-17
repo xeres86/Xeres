@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.8**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.9**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -332,6 +332,16 @@ imperative `navigate(...)` is rejected outside ui/screen code. The full
 three-screen demo is [`examples/router.xrs`](examples/router.xrs)
 (`xeres dev examples/router.xrs`).
 
+**Protected routes (R31).** Prefix a screen with `auth` — `auth ui screen
+Dashboard { … }` — to require a session. Enforcement is two-tier: the client
+router redirects unauthenticated users to the public root (it reads a non-secret
+`xeres_auth` flag set alongside the signed session on `session.login`), and the
+**server refuses to serve the route's shell** without a valid session cookie
+(a `302` to `/`) — so a hand-crafted request or deep link can't reach it. The
+real data stays gated regardless, since a protected screen's data comes from
+`auth server fn`s (R24). R31 requires the app to establish a session and keeps
+the default route public so there's always a landing/login page.
+
 ### Local-first synced collections
 
 ```xeres
@@ -439,6 +449,7 @@ Every program is checked against these. A violation is a compile error.
 | **R28** navigation | `navigate(X)` / `link … -> X` targets a known, prop-less, non-component screen (a route can't supply props); the imperative `navigate(...)` is browser-only |
 | **R29** decimal | `decimal(...)` takes exactly one `String` (money is written as a string, e.g. `decimal("19.99")`); `Decimal` is never assignable to/from `Float`/`Int`, so binary-float error can't leak into money math |
 | **R30** raw-taint | `raw(...)` (the audited un-escaped HTML sink) may not wrap untrusted *inbound* data — a screen/component prop or an input-bound `state`. Render it with default escaping, or build the trusted HTML in a `server fn` and `await` it into a non-bound `state`. Closes reflected XSS |
+| **R31** auth-route | `auth ui screen X` is a protected route — needs a session (some fn calls `session.login`), can't be a component, and the default route must stay public. Unauthenticated requests are bounced to `/` on **both** tiers (client router + server shell guard) |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,

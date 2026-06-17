@@ -153,6 +153,15 @@ fn write_response<S: Write>(
     payload: &str,
     cookies: &str,
 ) -> std::io::Result<()> {
+    // A 302 carries no body; `payload` is the redirect target (the Location).
+    if code == 302 {
+        let resp = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {}\r\n{}{}Content-Length: 0\r\nConnection: close\r\n\r\n",
+            payload, SECURITY_HEADERS, cookies
+        );
+        stream.write_all(resp.as_bytes())?;
+        return stream.flush();
+    }
     let resp = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         code,
@@ -219,8 +228,27 @@ fn dispatch(
             Err(e) => (500, "application/json", format!("{{\"error\":{}}}", json_str(&e)), None),
         };
     }
+    // R31 auth-route guard: a protected route requires a valid session. `actor` is
+    // `Some` iff the request carried a verified session cookie; bounce everyone
+    // else to the public root (the client router does the same for in-app nav).
+    if method == "GET" && actor.is_none() && is_protected_route(path, program) {
+        return (302, "text/html", "/".to_string(), None);
+    }
     let (code, ctype, payload) = serve_static(path, static_dir);
     (code, ctype, payload, None)
+}
+
+/// Does `path` map to an `auth` (protected) route? Mirrors the client router's
+/// path map: the first prop-less screen is `/`, the rest `/<name lowercased>`.
+/// The default route can't be `auth` (R31), so protected paths are `/<name>`.
+fn is_protected_route(path: &str, program: &XeresProgram) -> bool {
+    let navigable: Vec<_> =
+        program.screens.iter().filter(|s| !s.is_component && s.params.is_empty()).collect();
+    let Some(default) = navigable.first() else { return false };
+    navigable.iter().filter(|s| s.is_auth).any(|s| {
+        let p = if s.name == default.name { "/".to_string() } else { format!("/{}", s.name.to_lowercase()) };
+        p == path
+    })
 }
 
 fn rpc(
@@ -302,6 +330,7 @@ fn generic_inner<'a>(base: &str, ty: &'a str) -> Option<&'a str> {
 fn reason(code: u16) -> &'static str {
     match code {
         200 => "OK",
+        302 => "Found",
         404 => "Not Found",
         500 => "Internal Server Error",
         _ => "OK",

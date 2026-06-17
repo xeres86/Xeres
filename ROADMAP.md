@@ -43,8 +43,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
    handles `List<T>`, `Optional<T>`, nested models and any nesting, in both the
    generated Rust and the `xeres serve` interpreter.
 6. **Auth primitives** — server-only `hash()` / `verify()` (Argon2id) ✅ done
-   (rule R19; `examples/login_db.xrs`). Remaining: session tokens (a
-   `declassify`d secret), TLS story for the app server.
+   (rule R19; `examples/login_db.xrs`); signed `session` cookies ✅ (R24/R25);
+   **auth-gated routes** ✅ done (v0.5.9, **R31**) — `auth ui screen` protected
+   both tiers (client redirect + server shell guard). Remaining: roles/RBAC
+   (spec 15), TLS follow-ups (below).
 7. **Distribution** — npm `xeres` wrapper + per-platform release workflow built
    (see [RELEASING.md](RELEASING.md)); remaining: actually publish to npm + cut
    a tagged release.
