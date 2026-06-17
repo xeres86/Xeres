@@ -515,6 +515,13 @@ fn wire_serialize(path: &str, ty: &str, models: &HashSet<&str>) -> String {
 const SERVER_HEAD: &str = r#"use std::io::{Read, Write};
 use std::net::TcpListener;
 
+/// `.length()` on a String or List lowers to `.x_len()` so codegen needs no type
+/// info at the call site: both `str` (char count) and `[T]` (element count)
+/// implement it, and String/Vec reach them by auto-deref.
+trait XLen { fn x_len(&self) -> i64; }
+impl XLen for str { fn x_len(&self) -> i64 { self.chars().count() as i64 } }
+impl<T> XLen for [T] { fn x_len(&self) -> i64 { self.len() as i64 } }
+
 /// Minimal JSON string escaping (spike-grade).
 fn json_str(s: &str) -> String {
     let mut out = String::from("\"");
@@ -2234,6 +2241,10 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
             if let Some(s) = emit_string_method(&recv, method, &a, ts) {
                 return s;
             }
+            // List stdlib methods (spec 08) — safe accessors yield Optional<T>.
+            if let Some(s) = emit_list_method(&recv, method, &a, ts) {
+                return s;
+            }
             format!("{}.{}({})", recv, method, a.join(", "))
         }
         Expr::NoneLit => if ts { "null".to_string() } else { "None".to_string() },
@@ -2619,8 +2630,10 @@ fn emit_string_method(recv: &str, method: &str, args: &[String], ts: bool) -> Op
         ("upper", false) => format!("{}.to_uppercase()", recv),
         ("lower", true) => format!("{}.toLowerCase()", recv),
         ("lower", false) => format!("{}.to_lowercase()", recv),
+        // Unified across String + List via the XLen trait (see SERVER_HEAD), so
+        // `.length()` needs no receiver-type info at codegen time.
         ("length", true) => format!("{}.length", recv),
-        ("length", false) => format!("({}.chars().count() as i64)", recv),
+        ("length", false) => format!("({}).x_len()", recv),
         ("contains", true) => format!("{}.includes({})", recv, arg(0)),
         ("contains", false) => format!("{}.contains({}.as_str())", recv, arg(0)),
         ("split", true) => format!("{}.split({})", recv, arg(0)),
@@ -2630,6 +2643,28 @@ fn emit_string_method(recv: &str, method: &str, args: &[String], ts: bool) -> Op
         // replace-all on both tiers
         ("replace", true) => format!("{}.split({}).join({})", recv, arg(0), arg(1)),
         ("replace", false) => format!("{}.replace({}.as_str(), {}.as_str())", recv, arg(0), arg(1)),
+        _ => return None,
+    })
+}
+
+/// List stdlib methods (spec 08). `first`/`last`/`at` are safe accessors that
+/// lower to `Optional<T>` (TS `T | null`, Rust `Option<T>`): out-of-bounds (or
+/// negative) is `none`, never a panic/`undefined`. `length` is handled by
+/// `emit_string_method` via the `XLen` trait (works for String + List alike).
+fn emit_list_method(recv: &str, method: &str, args: &[String], ts: bool) -> Option<String> {
+    let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
+    Some(match (method, ts) {
+        ("first", true) => format!("({}.at(0) ?? null)", recv),
+        ("first", false) => format!("{}.first().cloned()", recv),
+        ("last", true) => format!("({}.at(-1) ?? null)", recv),
+        ("last", false) => format!("{}.last().cloned()", recv),
+        // JS `Array.at` takes negatives; Rust guards the negative case to `None`.
+        ("at", true) => format!("({}.at({}) ?? null)", recv, arg(0)),
+        ("at", false) => {
+            format!("{{ let __i: i64 = {}; if __i < 0 {{ None }} else {{ {}.get(__i as usize).cloned() }} }}", arg(0), recv)
+        }
+        ("reverse", true) => format!("[...{}].reverse()", recv),
+        ("reverse", false) => format!("{{ let mut __v = {}.clone(); __v.reverse(); __v }}", recv),
         _ => return None,
     })
 }

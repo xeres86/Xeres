@@ -1,0 +1,6 @@
+// EXPECT: FAIL — `.at()` (like `.first()`/`.last()`) yields `Optional<T>`, not `T`,
+// so out-of-bounds is `none` rather than a crash. Returning it where the fn
+// declares `Int` is a return-type error (R7) — unwrap with `.or(default)` first.
+server fn pick(items: List<Int>) -> Int {
+  return items.at(0)
+}

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.8 — 2026-06-17 — List stdlib (length / first / last / at / reverse)
+
+`List<T>` was iterate-only — `for x in xs` was the *only* way to touch a list, with
+no count, no element access. This adds a small, closure-free List stdlib, mirroring
+the String stdlib.
+
+- **Methods** — `xs.length() -> Int`, `xs.first() -> Optional<T>`,
+  `xs.last() -> Optional<T>`, `xs.at(i) -> Optional<T>`, `xs.reverse() -> List<T>`.
+  All three backends (generated Rust, generated TS, and the `xeres serve`
+  interpreter) implement them identically; verified by a live RPC round-trip.
+- **Safe by default** — `first`/`last`/`at` return `Optional<T>`: an empty or
+  out-of-bounds (or negative) read is `none`, never a panic or `undefined`. Unwrap
+  with `.or(default)` (the same Optional discipline as `db.query_one`). So
+  `xs.at(0)` can't be used where a plain `T` is required (R7/R11 catch it).
+- **`.at(i)`, not `xs[i]`** — indexing is a method, reusing `Expr::MethodCall`, so
+  Cut 1 adds **no new AST node and no new rule**. Argument discipline rides the
+  existing R21 "stdlib" rule (`at` takes one `Int`; the rest take none). `xs[i]`
+  sugar is a possible later nicety.
+- **Type-blind codegen** — `.length()` lowers to a tiny `XLen` trait
+  (`impl XLen for str` / `impl<T> XLen for [T]`) so the Rust backend needs no
+  receiver-type info at the call site; TS uses the native `.length`/`Array.at`.
+- **Fixtures** — `pass_list_methods` (all five methods, server + view),
+  `fail_list_at_unwrapped` (returning `.at(0)` where `Int` is declared → R7).
+
+Deferred (ROADMAP): `map`/`filter`/`reduce` (need expression-level closures),
+`.contains` on lists (needs element equality / a `PartialEq` derive), `xs[i]`
+sugar, slicing, in-place `push`/`pop`.
+
 ## 0.5.7 — 2026-06-17 — R30 inbound taint (`raw()` can't take request data)
 
 The first cut of the reserved **information-flow layer** — the inbound mirror of

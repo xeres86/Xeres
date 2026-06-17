@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.7**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.8**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -167,6 +167,12 @@ server fn total(items: List<Int>) -> Int {
   return sum
 }
 ```
+
+`List<T>` carries a small stdlib alongside `for`: `.length()`, `.first()`,
+`.last()`, `.at(i)`, and `.reverse()`. The accessors are **safe** —
+`.first()`/`.last()`/`.at(i)` return `Optional<T>`, so an empty or out-of-bounds
+read is `none` (unwrap with `.or(default)`), never a crash. (`map`/`filter` await
+expression-level closures — a later addition.)
 
 Enums (string-backed) pair with `match` — exhaustiveness is compiler-checked
 (**R20**), a `DateTime` (epoch ms) + `now()`, and a `Decimal` (exact,

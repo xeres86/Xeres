@@ -223,6 +223,18 @@ fn resolve_type(
                     }
                 }
             }
+            // List stdlib methods (R-free; see spec 08). `at`/`first`/`last` are
+            // safe — they yield `Optional<T>` (miss ⇒ `none`).
+            if let Some(rt) = resolve_type(receiver, locals, table) {
+                if let Some(elem) = generic_inner("List", &rt).map(str::to_string) {
+                    match method.as_str() {
+                        "length" => return Some("Int".into()),
+                        "first" | "last" | "at" => return Some(format!("Optional<{}>", elem)),
+                        "reverse" => return Some(format!("List<{}>", elem)),
+                        _ => {}
+                    }
+                }
+            }
             // String stdlib methods.
             if STRING_METHODS.contains(&method.as_str()) {
                 return match method.as_str() {
@@ -1452,6 +1464,10 @@ fn check_expr(
                         });
                     }
                 }
+            } else if is_list_method_call(receiver, method, locals, table) {
+                // List stdlib (spec 08) — must precede the String/collection
+                // branches because `length` overlaps a String method name.
+                check_list_method(method, args, locals, fn_name, fn_line, table, errors);
             } else if STRING_METHODS.contains(&method.as_str()) {
                 check_string_method(receiver, method, args, locals, fn_name, fn_line, table, errors);
             } else {
@@ -1869,6 +1885,58 @@ fn check_string_method(
             message: format!("`.{}()` takes {} argument(s).", method, want),
             line,
         });
+    }
+}
+
+/// True when `receiver` is a `List<T>` and `method` is a List stdlib method
+/// (spec 08). Gates the dispatch so list `.length()` doesn't fall into the String
+/// check (R21) and `.first/.last/.at/.reverse` don't fall into the collection
+/// check (R12).
+fn is_list_method_call(
+    receiver: &Expr,
+    method: &str,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+) -> bool {
+    matches!(method, "length" | "first" | "last" | "at" | "reverse")
+        && resolve_type(receiver, locals, table)
+            .as_deref()
+            .and_then(|t| generic_inner("List", t))
+            .is_some()
+}
+
+/// List stdlib argument discipline (spec 08; reuses the R21 "stdlib" rule — no new
+/// rule). `at` takes one `Int`; `length`/`first`/`last`/`reverse` take none. The
+/// safe accessors return `Optional<T>`, so a miss is `none` (caller unwraps via
+/// `.or`) — there's no separate bounds rule.
+fn check_list_method(
+    method: &str,
+    args: &[Expr],
+    locals: &HashMap<String, (Option<String>, bool)>,
+    fn_name: &str,
+    line: usize,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
+    let want = if method == "at" { 1 } else { 0 };
+    if args.len() != want {
+        errors.push(SemanticError {
+            rule: "R21 stdlib",
+            message: format!("`.{}()` on a list takes {} argument(s).", method, want),
+            line,
+        });
+        return;
+    }
+    if method == "at" {
+        if let Some(t) = resolve_type(&args[0], locals, table) {
+            if t != "Int" {
+                errors.push(SemanticError {
+                    rule: "R21 stdlib",
+                    message: format!("`.at(i)` index must be `Int`, got `{}` in `{}`.", t, fn_name),
+                    line,
+                });
+            }
+        }
     }
 }
 

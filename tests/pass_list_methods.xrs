@@ -1,0 +1,22 @@
+// EXPECT: PASS — the List stdlib (spec 08): length / first / last / at / reverse,
+// all closure-free. `first`/`last`/`at` yield `Optional<T>`, unwrapped via `.or`.
+server fn total(items: List<Int>) -> Int {
+  return items.length()
+}
+
+ui screen Catalog {
+  state nums: List<Int> = [1, 2, 3]
+
+  view {
+    column {
+      text "len=" + nums.length()
+      text "first=" + nums.first().or(0)
+      text "last=" + nums.last().or(0)
+      text "at1=" + nums.at(1).or(0)
+      text "revlen=" + nums.reverse().length()
+      for n in nums {
+        text "n=" + n
+      }
+    }
+  }
+}

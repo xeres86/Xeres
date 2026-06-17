@@ -152,6 +152,10 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   input-bound `state`), the inbound mirror of secret-out (R5). Remaining cuts
   (deferred): a dedicated in-view `sanitize(...)` launder, untrusted-in → outbound
   `endpoint` body/path, and a fuller multi-level taint lattice.
+- **Collections** — `List<T>` stdlib **cut 1 shipped** (v0.5.8): `length`/`first`/
+  `last`/`at`/`reverse` (safe, `Optional`-returning). Pending: `map`/`filter`/
+  `reduce` (need **expression-level closures** — `x -> expr`), list `.contains`
+  (needs element equality), `xs[i]` sugar, slicing, and a `Map<K,V>` type.
 - LSP (inline R-rule diagnostics in editors), format-on-save / editor integration.
 - More databases behind the same `db` API (MySQL, SQL Server, Oracle).
 - Real SQLite (cr-sqlite) for the on-device store.

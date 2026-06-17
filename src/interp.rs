@@ -389,6 +389,14 @@ impl<'a> Interp<'a> {
                         .collect::<Result<Vec<_>, _>>()?;
                     return string_method(s, method, &argv);
                 }
+                // List stdlib methods (spec 08) — safe accessors return Null on a miss.
+                if let Value::List(items) = &recv {
+                    let argv = args
+                        .iter()
+                        .map(|a| self.eval(a, env))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return list_method(items, method, &argv);
+                }
                 // `optional.or(default)` — null falls back to the default.
                 if method == "or" {
                     return match recv {
@@ -672,6 +680,28 @@ fn string_method(s: &str, method: &str, args: &[Value]) -> Result<Value, String>
         "split" => Value::List(s.split(sarg(0)?.as_str()).map(|p| Value::Str(p.to_string())).collect()),
         "replace" => Value::Str(s.replace(sarg(0)?.as_str(), sarg(1)?.as_str())),
         other => return Err(format!("unknown String method `{}`", other)),
+    })
+}
+
+/// List stdlib methods (spec 08). `first`/`last`/`at` return `Null` on a miss
+/// (the runtime form of `Optional<T>`), so they never panic on an empty or
+/// out-of-bounds access. Mirrors `emit_list_method` in codegen.
+fn list_method(items: &[Value], method: &str, args: &[Value]) -> Result<Value, String> {
+    Ok(match method {
+        "length" => Value::Int(items.len() as i64),
+        "first" => items.first().cloned().unwrap_or(Value::Null),
+        "last" => items.last().cloned().unwrap_or(Value::Null),
+        "at" => match args.first() {
+            Some(Value::Int(i)) if *i >= 0 => items.get(*i as usize).cloned().unwrap_or(Value::Null),
+            Some(Value::Int(_)) => Value::Null, // negative index ⇒ none
+            _ => return Err("`.at()` argument must be an Int".into()),
+        },
+        "reverse" => {
+            let mut v = items.to_vec();
+            v.reverse();
+            Value::List(v)
+        }
+        other => return Err(format!("unknown List method `{}`", other)),
     })
 }
 
