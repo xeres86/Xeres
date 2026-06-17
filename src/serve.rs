@@ -333,11 +333,40 @@ fn serve_static(path: &str, static_dir: &str) -> (u16, &'static str, String) {
     }
 }
 
-// ---- local-first sync store (generic: id -> row JSON, LWW by lamport) ----
+// ---- local-first sync store (generic, field-level LWW) ----
+//
+// Each row is a map of field -> Cell, where a Cell carries the field's value
+// (stored as raw JSON) plus its own Lamport stamp + site id. Concurrent edits to
+// *different* fields of the same row therefore both survive — the headline
+// correctness fix over the old whole-row LWW. A delete is a row-level tombstone
+// with its own stamp; a row stays visible unless its tombstone dominates every
+// field stamp, so a late (lower-stamped) write can't resurrect a deleted row.
+// Stamps form a total order — higher Lamport wins, ties broken by the (stable,
+// random) site id — so every replica converges regardless of arrival order.
+// This merge MUST stay identical to the generated server's (`SYNC_SERVER` in
+// `src/codegen.rs`).
+
+struct Cell {
+    value: String, // the field's value, stored as raw JSON
+    lamport: u64,
+    site: String,
+}
+
+struct Row {
+    fields: HashMap<String, Cell>,
+    tomb: Option<(u64, String)>, // (lamport, site) of a delete, if any
+}
 
 struct CollState {
-    rows: HashMap<String, (String, u64)>,
+    rows: HashMap<String, Row>,
     lamport: u64,
+}
+
+/// Total order on `(lamport, site)` stamps: higher Lamport wins; equal Lamports
+/// break by the lexicographically-greater site id. True iff `a` strictly
+/// dominates `b`.
+fn stamp_gt(al: u64, asite: &str, bl: u64, bsite: &str) -> bool {
+    al > bl || (al == bl && asite > bsite)
 }
 
 fn sync_store() -> &'static Mutex<HashMap<String, CollState>> {
@@ -360,28 +389,62 @@ fn sync_dispatch(coll: &str, body: &str) -> String {
                 continue;
             }
             let lam = op.get("lamport").map(J::as_f64).unwrap_or(0.0) as u64;
-            let seen = cs.rows.get(&id).map(|(_, v)| *v).unwrap_or(0);
-            if lam < seen {
-                continue;
-            }
-            if kind == "put" {
-                let row = op.get("row").map(|j| j.to_json()).unwrap_or_else(|| "null".into());
-                cs.rows.insert(id.clone(), (row, lam));
-            } else if kind == "del" {
-                cs.rows.insert(id.clone(), ("null".into(), lam));
-            }
+            let site = op.get("site").and_then(J::str).unwrap_or("").to_string();
             if lam > cs.lamport {
                 cs.lamport = lam;
+            }
+            let row = cs.rows.entry(id).or_insert_with(|| Row { fields: HashMap::new(), tomb: None });
+            if kind == "set" {
+                let field = op.get("field").and_then(J::str).unwrap_or("").to_string();
+                if field.is_empty() {
+                    continue;
+                }
+                let value = op.get("value").map(|j| j.to_json()).unwrap_or_else(|| "null".into());
+                let win = match row.fields.get(&field) {
+                    None => true,
+                    Some(c) => stamp_gt(lam, &site, c.lamport, &c.site),
+                };
+                if win {
+                    row.fields.insert(field, Cell { value, lamport: lam, site });
+                }
+            } else if kind == "del" {
+                let win = match &row.tomb {
+                    None => true,
+                    Some((l, s)) => stamp_gt(lam, &site, *l, s),
+                };
+                if win {
+                    row.tomb = Some((lam, site));
+                }
             }
         }
     }
 
     let mut out: Vec<String> = Vec::new();
-    for (id, (row, v)) in cs.rows.iter() {
-        if row == "null" {
-            out.push(format!("{{\"kind\":\"del\",\"id\":{},\"row\":null,\"lamport\":{}}}", json_str(id), v));
-        } else {
-            out.push(format!("{{\"kind\":\"put\",\"id\":{},\"row\":{},\"lamport\":{}}}", json_str(id), row, v));
+    for (id, row) in cs.rows.iter() {
+        // A tombstone hides the row unless some field write strictly dominates it
+        // (a genuinely-later re-add revives the whole row; a late write can't).
+        let alive = match &row.tomb {
+            None => !row.fields.is_empty(),
+            Some((tl, ts)) => row.fields.values().any(|c| stamp_gt(c.lamport, &c.site, *tl, ts)),
+        };
+        if alive {
+            for (f, c) in row.fields.iter() {
+                out.push(format!(
+                    "{{\"kind\":\"set\",\"id\":{},\"field\":{},\"value\":{},\"lamport\":{},\"site\":{}}}",
+                    json_str(id),
+                    json_str(f),
+                    c.value,
+                    c.lamport,
+                    json_str(&c.site)
+                ));
+            }
+        } else if let Some((tl, ts)) = &row.tomb {
+            out.push(format!(
+                "{{\"kind\":\"del\",\"id\":{},\"lamport\":{},\"site\":{}}}",
+                json_str(id),
+                tl,
+                json_str(ts)
+            ));
         }
     }
     out.sort();
@@ -571,5 +634,103 @@ fn jval(b: &[char], i: &mut usize) -> J {
             let s: String = b[st..*i].iter().collect();
             J::Num(s.parse().unwrap_or(0.0))
         }
+    }
+}
+
+// ---- field-level sync merge: convergence tests ----
+//
+// These drive the real `sync_dispatch` (JSON in, JSON out) with crafted
+// concurrent payloads — the actual proof that the merge converges. `.xrs`
+// fixtures only check compilation, so this is where the runtime semantics are
+// pinned. Each test uses a unique collection name so the process-global store
+// (keyed by collection) keeps them isolated even running in parallel.
+#[cfg(test)]
+mod sync_tests {
+    use super::{jparse, sync_dispatch, J};
+
+    /// Push a batch of ops and return the merged store as a parsed response.
+    fn push(coll: &str, ops: &[String]) -> J {
+        jparse(&sync_dispatch(coll, &format!("{{\"ops\":[{}]}}", ops.join(","))))
+    }
+    fn set_op(id: &str, field: &str, value: &str, lamport: u64, site: &str) -> String {
+        format!(
+            "{{\"kind\":\"set\",\"id\":\"{}\",\"field\":\"{}\",\"value\":{},\"lamport\":{},\"site\":\"{}\"}}",
+            id, field, value, lamport, site
+        )
+    }
+    fn del_op(id: &str, lamport: u64, site: &str) -> String {
+        format!("{{\"kind\":\"del\",\"id\":\"{}\",\"lamport\":{},\"site\":\"{}\"}}", id, lamport, site)
+    }
+    /// The merged value of `id.field` in a response, as raw JSON (e.g. `"\"hi\""`).
+    fn field_val(resp: &J, id: &str, field: &str) -> Option<String> {
+        if let Some(J::Arr(ops)) = resp.get("ops") {
+            for op in ops {
+                if op.get("kind").and_then(J::str) == Some("set")
+                    && op.get("id").and_then(J::str) == Some(id)
+                    && op.get("field").and_then(J::str) == Some(field)
+                {
+                    return op.get("value").map(|v| v.to_json());
+                }
+            }
+        }
+        None
+    }
+    fn is_deleted(resp: &J, id: &str) -> bool {
+        matches!(resp.get("ops"), Some(J::Arr(ops)) if ops.iter().any(|op| {
+            op.get("kind").and_then(J::str) == Some("del") && op.get("id").and_then(J::str) == Some(id)
+        }))
+    }
+
+    #[test]
+    fn concurrent_edits_to_different_fields_both_survive() {
+        // The headline case: two sites edit different fields of the same row at
+        // the same logical time. Old row-level LWW lost one; field-level keeps both.
+        let c = "test_concurrent_fields";
+        push(c, &[set_op("r1", "title", "\"hello\"", 1, "a")]);
+        let resp = push(c, &[set_op("r1", "done", "true", 1, "b")]);
+        assert_eq!(field_val(&resp, "r1", "title").as_deref(), Some("\"hello\""));
+        assert_eq!(field_val(&resp, "r1", "done").as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn same_field_is_lww_by_lamport_regardless_of_arrival_order() {
+        // The higher-Lamport write wins even when the lower one arrives last.
+        let c = "test_same_field_lww";
+        push(c, &[set_op("r1", "title", "\"new\"", 2, "a")]);
+        let resp = push(c, &[set_op("r1", "title", "\"old\"", 1, "b")]);
+        assert_eq!(field_val(&resp, "r1", "title").as_deref(), Some("\"new\""));
+    }
+
+    #[test]
+    fn equal_lamport_is_broken_deterministically_by_site() {
+        // Same field, same Lamport, different sites — the greater site id wins,
+        // so both replicas converge on the same value.
+        let c = "test_tie_break_site";
+        push(c, &[set_op("r1", "title", "\"aaa\"", 5, "aaa")]);
+        let resp = push(c, &[set_op("r1", "title", "\"bbb\"", 5, "bbb")]);
+        assert_eq!(field_val(&resp, "r1", "title").as_deref(), Some("\"bbb\""));
+    }
+
+    #[test]
+    fn a_tombstone_resists_a_late_lower_stamped_write() {
+        // A delete, then a concurrent but lower-stamped field write arriving after
+        // it — the row must stay deleted (no resurrection).
+        let c = "test_tombstone_wins";
+        push(c, &[set_op("r1", "title", "\"x\"", 1, "a")]);
+        push(c, &[del_op("r1", 3, "a")]);
+        let resp = push(c, &[set_op("r1", "title", "\"y\"", 2, "b")]);
+        assert!(is_deleted(&resp, "r1"), "a late write must not resurrect a deleted row");
+    }
+
+    #[test]
+    fn a_genuinely_later_write_revives_a_deleted_row() {
+        // A field write stamped strictly above the tombstone is a real re-add and
+        // brings the row back (the symmetric case to the test above).
+        let c = "test_revive_after_delete";
+        push(c, &[set_op("r1", "title", "\"x\"", 1, "a")]);
+        push(c, &[del_op("r1", 2, "a")]);
+        let resp = push(c, &[set_op("r1", "title", "\"z\"", 3, "a")]);
+        assert!(!is_deleted(&resp, "r1"));
+        assert_eq!(field_val(&resp, "r1", "title").as_deref(), Some("\"z\""));
     }
 }

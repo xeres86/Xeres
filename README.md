@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.5**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.6**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -348,9 +348,11 @@ ui screen Todo {
 ```
 
 A `synced state` is an offline-first collection: it persists locally and a
-background **trawler** syncs changes to the server (last-write-wins by a Lamport
-counter; the server merge is generic). Local writes re-render immediately;
-pulled changes re-render reactively.
+background **trawler** syncs changes to the server. The merge is **last-write-wins
+per field** by a Lamport stamp (ties broken by a stable site id), so two clients
+editing *different* fields of the same row both keep their edit instead of one
+clobbering the other; a delete is a tombstone that a late write can't resurrect.
+Local writes re-render immediately; pulled changes re-render reactively.
 
 ### The database (server-only)
 

@@ -31,8 +31,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list. Highlights:
    correct. Also fixed `return db.exec(...)` routing in the interpreter. (Local
    db builds need MinGW `dlltool` or MSVC; CI release binaries bundle it.) See
    [`examples/users.xrs`](examples/users.xrs), [`examples/login_db.xrs`](examples/login_db.xrs).
-3. **Sync hardening** — field-level merge (CRDT / cr-sqlite) instead of
-   row-level last-write-wins.
+3. ~~**Sync hardening** — field-level merge instead of row-level
+   last-write-wins.~~ ✅ done (v0.5.6) — synced rows merge **LWW per field** by a
+   Lamport stamp (ties broken by a stable site id), so concurrent edits to
+   different fields of a row both survive; deletes are tombstones a late write
+   can't resurrect. It's LWW-per-field, **not** a full CRDT — true CRDTs
+   (RGA/LSEQ text) and cr-sqlite stay under "Later" below.
 4. ~~**`for` over `List<T>`** in views (not just synced collections).~~ ✅ done
    (array loops key per-item handlers by index; synced collections by `id`).
 5. ~~**List/Optional inside RPC arguments**~~ ✅ done — a recursive JSON decoder

@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.6 — 2026-06-17 — field-level sync merge
+
+Synced collections now merge **last-write-wins per field** instead of per row,
+closing the headline correctness gap called out since v0.1 ("sync is
+last-write-wins; field-level CRDT planned"). Two clients editing *different*
+fields of the same row both keep their edit — neither clobbers the other.
+
+- **Per-field stamps** — a synced row is stored as a map of `field -> cell`,
+  where each cell carries the field's value plus its own Lamport stamp and a
+  stable per-client **site id**. The merge is field-by-field: the higher Lamport
+  wins; equal Lamports are broken deterministically by the greater site id, so
+  every replica converges regardless of arrival order. Only the fields a write
+  actually changed get a fresh stamp, so a concurrent edit to a *different* field
+  survives (the old whole-row LWW lost it).
+- **Tombstone deletes** — a delete is a row-level tombstone with its own stamp.
+  A row stays visible unless its tombstone dominates every field stamp, so a late
+  (lower-stamped) write can't resurrect a deleted row, while a genuinely-later
+  re-add (a strictly higher stamp) cleanly revives it.
+- **Identical merge in both run modes** — the new merge is implemented twice from
+  one design: the `xeres serve` interpreter path (`src/serve.rs`) and the ejected
+  Rust server (`SYNC_SERVER` in `src/codegen.rs`). The client store
+  (`SyncedCollection` in the generated `client.ts`) tracks the same per-field
+  cells, sends only changed cells, and applies pulled cells with the same total
+  order. A new Rust test module (`src/serve.rs` `sync_tests`) drives
+  `sync_dispatch` with crafted concurrent payloads and asserts convergence:
+  different-field edits both survive, same-field is LWW by Lamport, ties break by
+  site, and delete tombstones resist late writes.
+- **The API is unchanged** — `synced state x: Collection<M>`, `x.add/remove/get/
+  all`, `for x in xs`, and the subscribe→redraw path are all the same. Only the
+  collection's internal representation and the sync wire shape changed.
+- **⚠ Breaking sync-protocol bump** — the on-the-wire and on-disk (localStorage)
+  sync format changed from whole-row `put`/`del` blobs to field-level `set`/`del`
+  cells (`{kind, id, field, value, lamport, site}`). The in-memory dev store has
+  no migration; the browser store is namespaced under a new key
+  (`xeres:<name>:v2`), so stale v1 snapshots are ignored rather than mis-parsed.
+  No persisted production data exists yet, so this is a clean break. Still
+  last-write-wins per field, **not** a full CRDT — true CRDTs (RGA/LSEQ text,
+  cr-sqlite) remain on the roadmap under "Later".
+
 ## 0.5.5 — 2026-06-16 — `xeres fmt` (canonical formatter)
 
 A `xeres fmt <file.xrs>` subcommand that reprints a program in one canonical
