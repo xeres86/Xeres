@@ -1,0 +1,18 @@
+// EXPECT: FAIL — a route param is untrusted inbound data (it comes straight from
+// the URL), so `raw(id)` is rejected by R30 (reflected XSS), exactly like any
+// other prop. Route params join the existing taint set for free.
+ui screen Home {
+  view {
+    column {
+      heading "Home"
+    }
+  }
+}
+
+ui screen Post(id: String) route "/post/:id" {
+  view {
+    column {
+      text raw(id)
+    }
+  }
+}

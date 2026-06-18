@@ -184,6 +184,10 @@ pub struct ScreenNode {
     /// bounced to the public root route (client-side and server-side), so the
     /// page can't be reached without a valid session. Components can't be `auth`.
     pub is_auth: bool,
+    /// `route "/post/:id"` — a typed-route-param pattern (R32). The `:name`
+    /// segments bind the screen's props from the URL; `None` = a plain route
+    /// (path is `/` or `/<name>`). Lets a route carry props (relaxes R28).
+    pub route: Option<String>,
 }
 
 /// `enum Name { Variant1 Variant2 ... }` — a closed set of unit variants.
@@ -929,6 +933,22 @@ impl<'a> Parser<'a> {
         // optional typed props: ( user: User, ... )
         let params = self.parse_params();
 
+        // optional `route "/post/:id"` clause — typed route params (R32). The
+        // `:name` segments bind the props above from the URL.
+        let route = if self.cur_is_kw("route") {
+            self.next_token(); // consume 'route'
+            match &self.current_token {
+                Token::Str(s) => {
+                    let r = s.clone();
+                    self.next_token();
+                    Some(r)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         if self.current_token != Token::LBrace { return None; }
         self.next_token(); // consume screen '{'
 
@@ -964,7 +984,7 @@ impl<'a> Parser<'a> {
         }
 
         if self.current_token == Token::RBrace { self.next_token(); } // close screen
-        Some(ScreenNode { name, params, states, load, body, line: screen_line, is_component, is_auth })
+        Some(ScreenNode { name, params, states, load, body, line: screen_line, is_component, is_auth, route })
     }
 
     fn parse_state_decl(&mut self) -> Option<StateDecl> {

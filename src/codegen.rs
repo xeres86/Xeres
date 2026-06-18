@@ -1090,7 +1090,15 @@ fn gen_router(program: &XeresProgram) -> String {
         }
     };
 
-    let render = navigable
+    // Param routes (`route "/post/:id"`) match by pattern, not an exact path, so
+    // they join the render/loader maps but not __path/__byPath. R32 keeps a param
+    // route's props in sync with its `:name` segments.
+    let param_routes: Vec<&crate::parser::ScreenNode> =
+        program.screens.iter().filter(|s| !s.is_component && s.route.is_some()).collect();
+    let all_routes: Vec<&crate::parser::ScreenNode> =
+        navigable.iter().copied().chain(param_routes.iter().copied()).collect();
+
+    let render = all_routes
         .iter()
         .map(|s| format!("{:?}: {}", s.name, s.name))
         .collect::<Vec<_>>()
@@ -1105,7 +1113,7 @@ fn gen_router(program: &XeresProgram) -> String {
         .map(|s| format!("{:?}: {:?}", path_of(s), s.name))
         .collect::<Vec<_>>()
         .join(", ");
-    let loaders = navigable
+    let loaders = all_routes
         .iter()
         .filter(|s| !s.load.is_empty())
         .map(|s| format!("{:?}: {}__load", s.name, s.name))
@@ -1119,6 +1127,23 @@ fn gen_router(program: &XeresProgram) -> String {
         .map(|s| format!("{:?}: true", s.name))
         .collect::<Vec<_>>()
         .join(", ");
+    // R32 — each param route as { screen, segs }: the URL pattern split on `/`,
+    // with `:name` segments captured at match time and substituted on navigate.
+    let param_route_entries = param_routes
+        .iter()
+        .map(|s| {
+            let segs = s
+                .route
+                .as_deref()
+                .unwrap_or("")
+                .split('/')
+                .map(|seg| format!("{:?}", seg))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ screen: {:?}, segs: [{}] }}", s.name, segs)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
 
     format!(
         r#"
@@ -1130,6 +1155,39 @@ const __loaders: Record<string, () => void | Promise<void>> = {{ {loaders} }};
 const __defaultScreen = {default:?};
 const __protected: Record<string, boolean> = {{ {protected} }};
 let __screen = __defaultScreen;
+let __params: Record<string, string> = {{}};
+const __paramRoutes: Array<{{ screen: string; segs: string[] }}> = [ {param_routes} ];
+
+// R32 — match a URL against the param-route patterns; on a hit, capture the
+// `:name` segments into __params (the matched screen reads them, coerced).
+function __matchRoute(path: string): string | null {{
+  const parts = path.split("/");
+  for (const r of __paramRoutes) {{
+    if (r.segs.length !== parts.length) continue;
+    const cap: Record<string, string> = {{}};
+    let ok = true;
+    for (let i = 0; i < r.segs.length; i++) {{
+      const seg = r.segs[i];
+      if (seg.startsWith(":")) cap[seg.slice(1)] = decodeURIComponent(parts[i]);
+      else if (seg !== parts[i]) {{ ok = false; break; }}
+    }}
+    if (ok) {{ __params = cap; return r.screen; }}
+  }}
+  return null;
+}}
+
+// `navigate(Screen {{ id: x }})` (R32): set the params, build the URL from the
+// route pattern, switch screen, run its loader.
+export function __navigateTo(screen: string, params: Record<string, string>): void {{
+  const r = __paramRoutes.find((x) => x.screen === screen);
+  if (!r) return;
+  __params = params;
+  __screen = screen;
+  const path = r.segs.map((s) => s.startsWith(":") ? encodeURIComponent(params[s.slice(1)] ?? "") : s).join("/") || "/";
+  if (typeof history !== "undefined") history.pushState({{}}, "", path);
+  if (__draw) __draw();
+  const l = __loaders[screen]; if (l) l();
+}}
 
 // R31 — the readable `xeres_auth` flag (set alongside the HttpOnly session on
 // login) lets the router bounce unauthenticated users off `auth` routes. It is
@@ -1154,7 +1212,7 @@ export function __navigate(name: string): void {{
 
 function __routeFromUrl(): void {{
   const p = (typeof location !== "undefined") ? location.pathname : "/";
-  __screen = __guard(__byPath[p] || __defaultScreen);
+  __screen = __guard(__byPath[p] || __matchRoute(p) || __defaultScreen);
 }}
 
 if (typeof window !== "undefined") {{
@@ -1178,6 +1236,7 @@ __start("app");
         by_path = by_path,
         loaders = loaders,
         protected = protected,
+        param_routes = param_route_entries,
         default = default.name,
     )
 }
@@ -1214,12 +1273,33 @@ fn gen_screen(
     let render_expr = em.nodes(&sc.body);
     out.push_str(&em.handlers);
 
-    let props = sc
-        .params
-        .iter()
-        .map(|p| format!("{}: {}", p.name, map_ts_type(&p.type_name)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    // A param route (`route "/post/:id"`) reads its props from the router's
+    // `__params` (coerced by type), so its render/loader take no arguments; a
+    // component takes its props as function args; a plain screen has none.
+    let is_param_route = sc.route.is_some() && !sc.is_component;
+    let (props, param_reads) = if is_param_route {
+        let reads = sc
+            .params
+            .iter()
+            .map(|p| {
+                let v = if p.type_name == "Int" {
+                    format!("Number(__params[{:?}])", p.name)
+                } else {
+                    format!("__params[{:?}]", p.name)
+                };
+                format!("  const {} = {};\n", p.name, v)
+            })
+            .collect::<String>();
+        (String::new(), reads)
+    } else {
+        let props = sc
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, map_ts_type(&p.type_name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        (props, String::new())
+    };
     let destr = if sc.states.is_empty() {
         String::new()
     } else {
@@ -1232,8 +1312,8 @@ fn gen_screen(
         format!("  const {{ {} }} = {}_state;\n", names, sc.name)
     };
     out.push_str(&format!(
-        "export function {}({}): string {{\n{}  return {};\n}}\n\n",
-        sc.name, props, destr, render_expr
+        "export function {}({}): string {{\n{}{}  return {};\n}}\n\n",
+        sc.name, props, param_reads, destr, render_expr
     ));
 
     // `on load { … }` — an async lifecycle fn run once on mount (P1). It may
@@ -1247,8 +1327,9 @@ fn gen_screen(
             .collect::<Vec<_>>()
             .join("\n  ");
         out.push_str(&format!(
-            "export async function {sc}__load(): Promise<void> {{\n  {body}\n  if (__draw) __draw();\n}}\n\n",
+            "export async function {sc}__load(): Promise<void> {{\n{reads}  {body}\n  if (__draw) __draw();\n}}\n\n",
             sc = sc.name,
+            reads = param_reads,
             body = body
         ));
     }
@@ -1676,8 +1757,18 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
                     .unwrap_or_else(|| "\"\"".to_string());
             }
             // `navigate(Screen)` — the argument is a screen *name* (R28), lowered
-            // to the router's `__navigate("Screen")` (switch screen + URL).
+            // to the router's `__navigate("Screen")` (switch screen + URL). A
+            // `navigate(Screen { id: x })` is a typed-route-param nav (R32) →
+            // `__navigateTo`, which builds the URL from the route pattern.
             if callee == "navigate" {
+                if let Some(Expr::Record { name, fields }) = args.first() {
+                    let ps = fields
+                        .iter()
+                        .map(|(f, v)| format!("{:?}: String({})", f, emit_h_expr(v, screen, sv)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return format!("__navigateTo({:?}, {{ {} }})", name, ps);
+                }
                 return format!("__navigate({})", nav_target_js(args));
             }
             let a: Vec<String> = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect();
@@ -1853,7 +1944,10 @@ fn gen_index(program: &XeresProgram) -> String {
         out.push_str(INDEX_HEAD_BLEED);
         out.push_str("<div id=\"app\"></div>");
         out.push_str(
-            "<script type=\"module\" src=\"./client.js\"></script>",
+            // Absolute path so a deep link to a nested route (e.g. `/post/123`)
+            // still resolves the bundle (a relative `./client.js` would 404 as
+            // `/post/client.js`).
+            "<script type=\"module\" src=\"/client.js\"></script>",
         );
         out.push_str("</body></html>");
         return out;
@@ -1869,7 +1963,10 @@ fn gen_index(program: &XeresProgram) -> String {
     out.push_str("</main>");
     if first.is_some() {
         out.push_str(
-            "<script type=\"module\" src=\"./client.js\"></script>",
+            // Absolute path so a deep link to a nested route (e.g. `/post/123`)
+            // still resolves the bundle (a relative `./client.js` would 404 as
+            // `/post/client.js`).
+            "<script type=\"module\" src=\"/client.js\"></script>",
         );
     }
     out.push_str("</body></html>");
@@ -2198,8 +2295,17 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     .unwrap_or_else(|| if ts { "\"\"".to_string() } else { "String::new()".to_string() });
             }
             // `navigate(Screen)` — browser-only (R28), so only the TS tier emits
-            // it; lower to the router's `__navigate("Screen")`.
+            // it; lower to the router's `__navigate("Screen")`. The param form
+            // `navigate(Screen { id: x })` (R32) lowers to `__navigateTo`.
             if callee == "navigate" {
+                if let Some(Expr::Record { name, fields }) = args.first() {
+                    let ps = fields
+                        .iter()
+                        .map(|(f, v)| format!("{:?}: String({})", f, emit_expr(v, ts)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return format!("__navigateTo({:?}, {{ {} }})", name, ps);
+                }
                 return format!("__navigate({})", nav_target_js(args));
             }
             let a: Vec<String> = args.iter().map(|x| emit_expr(x, ts)).collect();

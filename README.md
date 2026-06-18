@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.9**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.10**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -342,6 +342,14 @@ real data stays gated regardless, since a protected screen's data comes from
 `auth server fn`s (R24). R31 requires the app to establish a session and keeps
 the default route public so there's always a landing/login page.
 
+**Typed route params (R32).** A screen can carry a path pattern —
+`ui screen Post(id: String) route "/post/:id" { … }` — and each `:name` segment
+binds a prop (`String` or `Int`, parsed from the URL). A deep link or reload of
+`/post/123` boots `Post` with `id = "123"`; in-app you navigate with the params:
+`navigate(Post { id: someId })`. The param is **untrusted inbound data**, so
+`raw(id)` is rejected by R30 for free. This is the one relaxation of R28's
+"routes are prop-less": a route may take props *only* through a `route` pattern.
+
 ### Local-first synced collections
 
 ```xeres
@@ -450,6 +458,7 @@ Every program is checked against these. A violation is a compile error.
 | **R29** decimal | `decimal(...)` takes exactly one `String` (money is written as a string, e.g. `decimal("19.99")`); `Decimal` is never assignable to/from `Float`/`Int`, so binary-float error can't leak into money math |
 | **R30** raw-taint | `raw(...)` (the audited un-escaped HTML sink) may not wrap untrusted *inbound* data — a screen/component prop or an input-bound `state`. Render it with default escaping, or build the trusted HTML in a `server fn` and `await` it into a non-bound `state`. Closes reflected XSS |
 | **R31** auth-route | `auth ui screen X` is a protected route — needs a session (some fn calls `session.login`), can't be a component, and the default route must stay public. Unauthenticated requests are bounced to `/` on **both** tiers (client router + server shell guard) |
+| **R32** route-param | `ui screen Post(id: String) route "/post/:id"` — each `:name` segment binds a `String`/`Int` prop (every prop bound, ≥1 param). The param is untrusted (R30 applies), and a param route is navigated with all params: `navigate(Post { id: x })` |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,

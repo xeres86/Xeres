@@ -1,0 +1,17 @@
+// EXPECT: FAIL — navigating to a param route without supplying its params. R32
+// requires the record form `navigate(Post { id: ... })`, not a bare `navigate(Post)`.
+ui screen Home {
+  view {
+    column {
+      button "Open" -> { navigate(Post) }
+    }
+  }
+}
+
+ui screen Post(id: String) route "/post/:id" {
+  view {
+    column {
+      text id
+    }
+  }
+}

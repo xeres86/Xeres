@@ -115,7 +115,10 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   route map; `pushState`/`popstate` URL sync; SPA fallback so deep links survive a
   reload; a screen's `on load` runs on each navigation. New rule **R28**
   (navigation target must be a prop-less, non-component screen; browser-only).
-  Rules now span **R1–R28**.
+  **Typed route params** ✅ done (v0.5.10, **R32**) — `ui screen Post(id: String)
+  route "/post/:id"` binds `:name` segments to props (the one relaxation of R28);
+  deep-link + `navigate(Post { id })`, params are R30-tainted. Pending: declarative
+  `link -> Post { id }`, query strings, param routes that are also `auth`.
 - ~~Lift the ejected-server `session` `compile_error!` guard.~~ ✅ done — the
   generated server now threads the HMAC-signed cookie, so `build` ≡ `serve` for
   session apps.

@@ -1,0 +1,24 @@
+// EXPECT: PASS — typed route params (R32). `Post` is a route whose `:id` segment
+// binds its `id: String` prop, so deep-linking `/post/123` boots it with id="123"
+// and in-app nav supplies the param: `navigate(Post { id: pick })`.
+ui screen Home {
+  state pick: String = "42"
+
+  view {
+    column {
+      heading "Home"
+      input "Post id" bind pick
+      button "Open" -> { navigate(Post { id: pick }) }
+    }
+  }
+}
+
+ui screen Post(id: String) route "/post/:id" {
+  view {
+    column {
+      heading "Post"
+      text "id=" + id
+      link "Home" -> Home
+    }
+  }
+}

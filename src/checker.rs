@@ -866,7 +866,7 @@ fn check_view(
                 // target (R28), not a click handler / value binding.
                 match event {
                     Some(Handler::Call(target)) => {
-                        check_nav_target(target, "`link`", sname, sline, table, errors)
+                        check_nav_target(target, "`link`", sname, sline, locals, table, errors)
                     }
                     _ => errors.push(SemanticError {
                         rule: "R28 navigation",
@@ -1005,50 +1005,117 @@ fn check_component(
     }
 }
 
-/// R28 — a navigation target (`navigate(X)` or `link … -> X`) must name a
-/// known, *navigable* screen: a `ui screen` (not a component) that takes no
-/// props, so the router can mount it with no arguments. The target is a screen
-/// name, not a value binding, so it bypasses R8.
+/// Extract the `:name` route params from a pattern, e.g. `/post/:id` -> `["id"]`.
+fn route_params(pattern: &str) -> Vec<String> {
+    pattern.split('/').filter_map(|seg| seg.strip_prefix(':').map(str::to_string)).collect()
+}
+
+/// R28 / R32 — a navigation target. A bare `Screen` (`navigate(Home)` / `link …
+/// -> Home`) must be a navigable route: a `ui screen` (not a component) that is
+/// prop-less, so the router mounts it with no arguments. A `Screen { … }` target
+/// is a typed-route-param navigation (R32): the screen must declare a `route`
+/// pattern, and the supplied params must match its props (each once,
+/// type-compatible, all present). The target bypasses R8 as a screen name, but a
+/// param record's *values* are ordinary in-scope expressions, so they're checked.
 fn check_nav_target(
     target: &Expr,
     site: &str,
     sname: &str,
     line: usize,
+    locals: &HashMap<String, (Option<String>, bool)>,
     table: &SymbolTable,
     errors: &mut Vec<SemanticError>,
 ) {
-    let name = match target {
-        Expr::Ident(n) => n.clone(),
-        _ => {
-            errors.push(SemanticError {
+    match target {
+        Expr::Ident(name) => match table.screens.get(name.as_str()) {
+            None => errors.push(SemanticError {
                 rule: "R28 navigation",
                 message: format!(
-                    "{} in `{}` must name a screen, e.g. `navigate(Home)` — not an arbitrary expression.",
-                    site, sname
+                    "{} targets `{}`, which is not a navigable screen. Declare a prop-less `ui screen {} {{ … }}`.",
+                    site, name, name
                 ),
                 line,
-            });
-            return;
+            }),
+            Some(sc) if sc.route.is_some() => errors.push(SemanticError {
+                rule: "R32 route-param",
+                message: format!("{} targets the route `{}`, which takes params — supply them: `navigate({} {{ … }})`.", site, name, name),
+                line,
+            }),
+            Some(sc) if !sc.params.is_empty() => errors.push(SemanticError {
+                rule: "R28 navigation",
+                message: format!(
+                    "{} targets `{}`, which takes props — only prop-less screens are navigable. Have `{}` fetch its data in `on load` instead.",
+                    site, name, name
+                ),
+                line,
+            }),
+            Some(_) => {}
+        },
+        Expr::Record { name, fields } => {
+            let Some(sc) = table.screens.get(name.as_str()) else {
+                errors.push(SemanticError {
+                    rule: "R32 route-param",
+                    message: format!("{} targets `{}`, which is not a known screen.", site, name),
+                    line,
+                });
+                return;
+            };
+            if sc.route.is_none() || sc.is_component {
+                errors.push(SemanticError {
+                    rule: "R32 route-param",
+                    message: format!("{} supplies params to `{}`, but it has no `route` pattern — only a route with params takes `{{ … }}`.", site, name),
+                    line,
+                });
+                return;
+            }
+            let mut seen: Vec<&str> = Vec::new();
+            for (f, v) in fields {
+                check_bindings(v, locals, sname, line, table, errors); // value must be in scope (R8)
+                if seen.contains(&f.as_str()) {
+                    errors.push(SemanticError {
+                        rule: "R32 route-param",
+                        message: format!("param `{}` supplied twice to `{}`.", f, name),
+                        line,
+                    });
+                }
+                seen.push(f.as_str());
+                match sc.params.iter().find(|p| &p.name == f) {
+                    None => errors.push(SemanticError {
+                        rule: "R32 route-param",
+                        message: format!("`{}` is not a param of route `{}`.", f, name),
+                        line,
+                    }),
+                    Some(p) => {
+                        if let Some(actual) = resolve_type(v, locals, table) {
+                            if !type_compatible(&actual, &p.type_name) {
+                                errors.push(SemanticError {
+                                    rule: "R32 route-param",
+                                    message: format!("param `{}` of `{}` is `{}`, got `{}`.", f, name, p.type_name, actual),
+                                    line,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            for p in &sc.params {
+                if !seen.contains(&p.name.as_str()) {
+                    errors.push(SemanticError {
+                        rule: "R32 route-param",
+                        message: format!("{} to `{}` is missing param `{}`.", site, name, p.name),
+                        line,
+                    });
+                }
+            }
         }
-    };
-    match table.screens.get(name.as_str()) {
-        None => errors.push(SemanticError {
+        _ => errors.push(SemanticError {
             rule: "R28 navigation",
             message: format!(
-                "{} targets `{}`, which is not a navigable screen. Declare a prop-less `ui screen {} {{ … }}`.",
-                site, name, name
+                "{} in `{}` must name a screen, e.g. `navigate(Home)` — not an arbitrary expression.",
+                site, sname
             ),
             line,
         }),
-        Some(sc) if !sc.params.is_empty() => errors.push(SemanticError {
-            rule: "R28 navigation",
-            message: format!(
-                "{} targets `{}`, which takes props — only prop-less screens are navigable (a route can't supply props). Have `{}` fetch its data in `on load` instead.",
-                site, name, name
-            ),
-            line,
-        }),
-        Some(_) => {}
     }
 }
 
@@ -1329,7 +1396,7 @@ fn check_expr(
                         line: fn_line,
                     });
                 } else {
-                    check_nav_target(&args[0], "`navigate(...)`", fn_name, fn_line, table, errors);
+                    check_nav_target(&args[0], "`navigate(...)`", fn_name, fn_line, locals, table, errors);
                 }
                 return; // the screen-name arg is not an ordinary value expression
             }
@@ -2414,6 +2481,58 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
                 ),
                 line: s.line,
             });
+        }
+    }
+
+    // R32 — typed route params. A `route "/post/:id"` pattern binds the screen's
+    // props from the URL: every `:name` must name a prop and every prop must be
+    // bound, the param props must be `String`/`Int` (parseable from a segment),
+    // the pattern needs at least one `:param`, and `route` is for screens (a
+    // component is invoked, not navigated to). A valid param route is then
+    // navigable via `navigate(Screen { … })` (R28's "routes are prop-less" is
+    // relaxed for it — see check_nav_target).
+    for s in &program.screens {
+        let Some(pattern) = &s.route else { continue };
+        if s.is_component {
+            errors.push(SemanticError {
+                rule: "R32 route-param",
+                message: format!("`route` is for screens, not component `{}`.", s.name),
+                line: s.line,
+            });
+            continue;
+        }
+        let pat: Vec<String> = route_params(pattern);
+        if pat.is_empty() {
+            errors.push(SemanticError {
+                rule: "R32 route-param",
+                message: format!("route `{}` on `{}` has no `:param` segment — use a plain screen for a static path.", pattern, s.name),
+                line: s.line,
+            });
+        }
+        for pp in &pat {
+            if !s.params.iter().any(|p| &p.name == pp) {
+                errors.push(SemanticError {
+                    rule: "R32 route-param",
+                    message: format!("route param `:{}` on `{}` has no matching prop — add `{}: String` (or `Int`).", pp, s.name, pp),
+                    line: s.line,
+                });
+            }
+        }
+        for p in &s.params {
+            if !pat.contains(&p.name) {
+                errors.push(SemanticError {
+                    rule: "R32 route-param",
+                    message: format!("prop `{}` on route `{}` isn't bound by the pattern `{}` (add `:{}`).", p.name, s.name, pattern, p.name),
+                    line: s.line,
+                });
+            }
+            if p.type_name != "String" && p.type_name != "Int" {
+                errors.push(SemanticError {
+                    rule: "R32 route-param",
+                    message: format!("route param `{}` on `{}` must be `String` or `Int`, got `{}` (it's parsed from a URL segment).", p.name, s.name, p.type_name),
+                    line: s.line,
+                });
+            }
         }
     }
 

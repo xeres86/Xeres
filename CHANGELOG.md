@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.10 — 2026-06-17 — R32 typed route params (`/post/:id`)
+
+Routes were prop-less (R28: "a route can't supply props — fetch in `on load`").
+Detail pages need a path segment bound to a typed prop. `ui screen Post(id: String)
+route "/post/:id"` now does that, and the param is untrusted (R30) for free.
+
+- **R32 route-param** — a `route "/post/:id"` clause binds each `:name` segment to
+  a `String`/`Int` prop. The rule checks every `:name` names a prop, every prop is
+  bound, param props are `String`/`Int` (parsed from a URL segment), the pattern
+  has ≥1 param, and `route` is on a screen (not a component).
+- **Deep-linking + in-app nav** — a reload or direct hit of `/post/123` boots
+  `Post` with `id = "123"` (the client router matches the pattern and the screen
+  reads the captured params, coerced by type). In-app you navigate with the params:
+  `navigate(Post { id: x })`, which builds the URL from the pattern. This is the
+  one relaxation of R28 — a route takes props *only* through a `route` pattern; a
+  bare `navigate(Post)` to a param route is an R32 error.
+- **Taint join is free** — a route param is a prop, so it's already in R30's
+  untrusted set: `raw(id)` on a param is rejected with no new code.
+- **Bugfix (deep-link assets)** — the generated `index.html` now loads the bundle
+  from an absolute `/client.js`. A relative `./client.js` 404'd as
+  `/post/client.js` on a nested deep link, leaving the app blank; this surfaced
+  once multi-segment routes existed.
+- **Fixtures** — `pass_route_param` (a `/post/:id` route + `navigate(Post { id })`),
+  `fail_route_param_missing` (bare `navigate(Post)` → R32), `fail_route_param_raw`
+  (`raw(id)` on a param → R30). Verified in a real browser: deep-link `/post/123`
+  and in-app nav both render `id=123`/`id=42`.
+
+Codegen/checker only — the router lives in the generated client (shared by both
+run modes), so there's no interpreter change. Deferred (ROADMAP): declarative
+`link -> Post { id }` (ambiguous in views today), query strings, and combining
+param routes with `auth`.
+
 ## 0.5.9 — 2026-06-17 — R31 auth-gated routes (non-bypassable protected pages)
 
 A screen could gate its *data* (an `auth server fn` consults `session`, R24/R25),
