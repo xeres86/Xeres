@@ -81,7 +81,7 @@ function PKG_JSON(app) {
       },
       // pulls the prebuilt compiler binary so `npm run dev` needs no global install
       devDependencies: {
-        "xeres-cli": "^0.4.0",
+        "xeres-cli": "^0.5.11",
       },
     },
     null,
