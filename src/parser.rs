@@ -87,6 +87,10 @@ pub enum Stmt {
     Continue,
     /// `match expr { Variant -> { ... } _ -> { ... } }` over an enum.
     Match { scrutinee: Expr, arms: Vec<MatchArm> },
+    /// `transaction { ... }` — run the body's `db` operations as one atomic unit:
+    /// commit on normal completion, roll back if any operation fails. Server-only,
+    /// not nestable (R33). The body runs on a single shared connection.
+    Transaction(Vec<Stmt>),
 }
 
 #[derive(Debug)]
@@ -659,6 +663,16 @@ impl<'a> Parser<'a> {
 
     fn parse_statement(&mut self) -> Option<Stmt> {
         self.allow_record = true; // statements may construct records
+
+        // `transaction { ... }` — an atomic db block (R33). Contextual keyword;
+        // a bare `transaction` identifier elsewhere is unaffected (needs `{`).
+        if matches!(&self.current_token, Token::Identifier(k) if k == "transaction")
+            && self.peek_token == Token::LBrace
+        {
+            self.next_token(); // consume 'transaction'
+            let body = self.parse_stmt_block();
+            return Some(Stmt::Transaction(body));
+        }
 
         // control flow (contextual keywords, like the view parser)
         if let Token::Identifier(kw) = &self.current_token {

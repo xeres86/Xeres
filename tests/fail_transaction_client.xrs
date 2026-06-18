@@ -1,0 +1,13 @@
+// EXPECT: FAIL — `transaction { ... }` groups `db` writes, which are server-only,
+// so it can't be opened from a browser handler. R33.
+ui screen App {
+  view {
+    column {
+      button "save" -> {
+        transaction {
+          db.exec("insert into log (msg) values ($1)", "hi")
+        }
+      }
+    }
+  }
+}

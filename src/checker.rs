@@ -382,6 +382,10 @@ fn taint_scan(
                     tainted_return |= taint_scan(&arm.body, &mut inner, table, returns_secret);
                 }
             }
+            Stmt::Transaction(body) => {
+                let mut inner = locals.clone();
+                tainted_return |= taint_scan(body, &mut inner, table, returns_secret);
+            }
             Stmt::Assign { .. } | Stmt::Expr(_) | Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -495,6 +499,30 @@ fn check_flow_stmts(
                     let mut inner = locals.clone();
                     check_flow_stmts(&arm.body, &mut inner, f, table, errors);
                 }
+            }
+            Stmt::Transaction(body) => {
+                // R33 — `transaction { … }` wraps `db` writes (server-only, R15) in
+                // one atomic unit, so it's server-only and not nestable.
+                if f.env != EnvModifier::Server {
+                    errors.push(SemanticError {
+                        rule: "R33 transaction",
+                        message: format!(
+                            "`transaction {{ … }}` in `{}` runs {}; it groups `db` writes, which are server-only — use it inside a `server fn`.",
+                            f.name,
+                            env_label(f.env)
+                        ),
+                        line: f.line,
+                    });
+                }
+                if body.iter().any(|s| matches!(s, Stmt::Transaction(_))) {
+                    errors.push(SemanticError {
+                        rule: "R33 transaction",
+                        message: format!("nested `transaction {{ … }}` in `{}` — a transaction can't contain another.", f.name),
+                        line: f.line,
+                    });
+                }
+                let mut inner = locals.clone();
+                check_flow_stmts(body, &mut inner, f, table, errors);
             }
             Stmt::Break | Stmt::Continue => {}
         }
@@ -1205,6 +1233,11 @@ fn check_handler_block(
                     check_handler_block(&arm.body, &local, sname, sline, table, errors);
                 }
             }
+            Stmt::Transaction(_) => errors.push(SemanticError {
+                rule: "R33 transaction",
+                message: format!("`transaction {{ … }}` in screen `{}` is server-only — group `db` writes in a `server fn`, not a ui handler.", sname),
+                line: sline,
+            }),
             Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -1825,6 +1858,7 @@ fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<Seman
                 check_actor_scope(&a.body, fn_name, line, errors);
             }
         }
+        Stmt::Transaction(body) => check_actor_scope(body, fn_name, line, errors),
         Stmt::Break | Stmt::Continue => {}
     }
 }
@@ -1894,6 +1928,7 @@ fn stmt_uses_session(s: &Stmt) -> bool {
         Stmt::Match { scrutinee, arms } => {
             expr_uses_session(scrutinee) || arms.iter().any(|a| stmts_use_session(&a.body))
         }
+        Stmt::Transaction(body) => stmts_use_session(body),
         Stmt::Break | Stmt::Continue => false,
     }
 }

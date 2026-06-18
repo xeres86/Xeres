@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.11 — 2026-06-17 — R33 db transactions (`transaction { … }`)
+
+`db` was single statements (`query_one`/`query`/`exec`); a multi-statement write
+couldn't be made atomic. `transaction { … }` now groups its `db` operations into
+one all-or-nothing unit — the first half of the "db transactions + migrations"
+work (migrations land next).
+
+- **R33 transaction** — `transaction { db.exec(...) db.exec(...) }` runs the body
+  as a single transaction: **commit on normal completion, roll back on any
+  failure**. Server-only (it wraps `db`, R15) and not nestable. The rule is
+  enforced in `server fn` bodies, `on load`, and ui handlers (where it's rejected).
+- **One shared connection** — the db layer opened a fresh connection per call, so
+  a transaction couldn't span calls. A `transaction` now parks one connection in a
+  per-request slot for its duration; the body's `db.exec`/`query` reuse it (so
+  they're part of the transaction), and a failure flips it to roll back. Outside a
+  transaction, each call opens its own connection as before. Implemented
+  identically in the `xeres serve` interpreter and the generated server.
+- **Verified** — R33 fires on the fail fixtures (ui handler, nesting); both
+  backends compile the transaction code (`cargo check` on the generated db server
+  + `cargo check --features db` on the compiler). The emitted body is
+  `{ tx_begin(); …; tx_end(); }` with the calls routed to the shared connection.
+  (Live runtime against a Postgres needs DB access — the configured dev DB was
+  unreachable from this build environment; the mechanism is standard
+  BEGIN/COMMIT/ROLLBACK.)
+- **Fixtures** — `pass_db_transaction` (a two-`exec` transfer), `fail_transaction_client`
+  (`transaction` in a ui handler → R33), `fail_transaction_nested` (a nested
+  transaction → R33).
+
+Deferred to the next cut (still spec 11): **migrations** — versioned SQL applied
+idempotently on boot. Plus, from the roadmap: transaction return-mapping for a
+typed `let` nested inside control flow, and other DB engines.
+
 ## 0.5.10 — 2026-06-17 — R32 typed route params (`/post/:id`)
 
 Routes were prop-less (R28: "a route can't supply props — fetch in `on load`").

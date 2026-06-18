@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.5.10**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.5.11**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -402,6 +402,21 @@ an app uses `db`** — db-free apps stay a zero-dependency `std` crate. See
 [`examples/users.xrs`](examples/users.xrs) for the full read / lookup / write
 round-trip.
 
+Group writes that must succeed or fail together in a **`transaction { … }`**
+(**R33**): its `db` calls run on one shared connection and **commit on success or
+roll back on any failure**, so a multi-statement update is atomic. It's
+server-only (it wraps `db`) and can't be nested.
+
+```xeres
+server fn transfer(from: String, to: String, amount: Int) -> Int {
+  transaction {
+    db.exec("update accounts set balance = balance - $1 where id = $2", amount, from)
+    db.exec("update accounts set balance = balance + $1 where id = $2", amount, to)
+  }
+  return 1
+}
+```
+
 ### Auth: `hash` / `verify` + typed `let`
 
 `hash(password)` and `verify(password, stored)` are **server-only** builtins
@@ -459,6 +474,7 @@ Every program is checked against these. A violation is a compile error.
 | **R30** raw-taint | `raw(...)` (the audited un-escaped HTML sink) may not wrap untrusted *inbound* data — a screen/component prop or an input-bound `state`. Render it with default escaping, or build the trusted HTML in a `server fn` and `await` it into a non-bound `state`. Closes reflected XSS |
 | **R31** auth-route | `auth ui screen X` is a protected route — needs a session (some fn calls `session.login`), can't be a component, and the default route must stay public. Unauthenticated requests are bounced to `/` on **both** tiers (client router + server shell guard) |
 | **R32** route-param | `ui screen Post(id: String) route "/post/:id"` — each `:name` segment binds a `String`/`Int` prop (every prop bound, ≥1 param). The param is untrusted (R30 applies), and a param route is navigated with all params: `navigate(Post { id: x })` |
+| **R33** transaction | `transaction { … }` runs its `db` writes as one atomic unit (commit on success, roll back on any failure). Server-only (it wraps `db`) and not nestable |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,

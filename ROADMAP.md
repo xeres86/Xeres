@@ -162,6 +162,10 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   `reduce` (need **expression-level closures** — `x -> expr`), list `.contains`
   (needs element equality), `xs[i]` sugar, slicing, and a `Map<K,V>` type.
 - LSP (inline R-rule diagnostics in editors), format-on-save / editor integration.
+- **DB transactions** ✅ done (v0.5.11, **R33**) — `transaction { … }` groups
+  `db` writes atomically (commit/rollback on one shared connection), both
+  backends. Pending (next cut): **migrations** (versioned SQL on boot), and
+  transaction return-mapping for a typed `let` nested in control flow.
 - More databases behind the same `db` API (MySQL, SQL Server, Oracle).
 - Real SQLite (cr-sqlite) for the on-device store.
 

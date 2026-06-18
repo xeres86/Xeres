@@ -1,0 +1,10 @@
+// EXPECT: FAIL — a `transaction` can't contain another `transaction` (R33). A
+// single atomic scope is the whole point; nesting would be ambiguous.
+server fn f() -> Int {
+  transaction {
+    transaction {
+      db.exec("update t set n = n + 1 where id = $1", "x")
+    }
+  }
+  return 1
+}

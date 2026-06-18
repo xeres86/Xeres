@@ -260,6 +260,23 @@ impl<'a> Interp<'a> {
                         }
                     }
                 }
+                Stmt::Transaction(body) => {
+                    // R33 — run the body atomically: commit on normal completion,
+                    // roll back if any operation errors, then propagate the error.
+                    self.tx_begin()?;
+                    match self.exec_block(body, env, ret_model) {
+                        Ok(flow) => {
+                            self.tx_end(true);
+                            if !matches!(flow, Flow::Next) {
+                                return Ok(flow);
+                            }
+                        }
+                        Err(e) => {
+                            self.tx_end(false);
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
         Ok(Flow::Next)
@@ -446,14 +463,46 @@ impl<'a> Interp<'a> {
 
     // ---- database (feature-gated) ----
 
+    // R33 — `transaction { … }` opens one connection, runs BEGIN, and parks it in
+    // INTERP_TX so the body's db calls reuse it; tx_end commits, or rolls back when
+    // the body errored (the error then propagates to the caller as a failed RPC).
+    #[cfg(feature = "db")]
+    fn tx_begin(&self) -> Result<(), String> {
+        let mut c = db_client()?;
+        c.batch_execute("BEGIN").map_err(|e| format!("transaction begin failed: {}", e))?;
+        INTERP_TX.with(|t| *t.borrow_mut() = Some(c));
+        Ok(())
+    }
+    #[cfg(feature = "db")]
+    fn tx_end(&self, commit: bool) {
+        INTERP_TX.with(|t| {
+            if let Some(mut c) = t.borrow_mut().take() {
+                let _ = c.batch_execute(if commit { "COMMIT" } else { "ROLLBACK" });
+            }
+        });
+    }
+    #[cfg(not(feature = "db"))]
+    fn tx_begin(&self) -> Result<(), String> {
+        Err("this xeres build has no database support (released binaries do)".into())
+    }
+    #[cfg(not(feature = "db"))]
+    fn tx_end(&self, _commit: bool) {}
+
     #[cfg(feature = "db")]
     fn db_exec(&self, args: &[Expr], env: &HashMap<String, Value>) -> Result<Value, String> {
         let (sql, params) = self.sql_and_params(args, env)?;
         let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = params.iter().map(|p| p.as_ref()).collect();
-        let mut client = db_client()?;
-        let n = client
-            .execute(sql.as_str(), &refs)
-            .map_err(|e| format!("db exec failed: {}", e))?;
+        // Inside a `transaction { … }` the body runs on the shared tx connection
+        // (so the writes are atomic); otherwise each call opens its own.
+        let n = INTERP_TX.with(|t| -> Result<u64, String> {
+            let mut b = t.borrow_mut();
+            if let Some(c) = b.as_mut() {
+                c.execute(sql.as_str(), &refs).map_err(|e| format!("db exec failed: {}", e))
+            } else {
+                drop(b);
+                db_client()?.execute(sql.as_str(), &refs).map_err(|e| format!("db exec failed: {}", e))
+            }
+        })?;
         Ok(Value::Int(n as i64))
     }
 
@@ -467,10 +516,15 @@ impl<'a> Interp<'a> {
     ) -> Result<Value, String> {
         let (sql, params) = self.sql_and_params(args, env)?;
         let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = params.iter().map(|p| p.as_ref()).collect();
-        let mut client = db_client()?;
-        let rows = client
-            .query(sql.as_str(), &refs)
-            .map_err(|e| format!("db query failed: {}", e))?;
+        let rows = INTERP_TX.with(|t| -> Result<Vec<postgres::Row>, String> {
+            let mut b = t.borrow_mut();
+            if let Some(c) = b.as_mut() {
+                c.query(sql.as_str(), &refs).map_err(|e| format!("db query failed: {}", e))
+            } else {
+                drop(b);
+                db_client()?.query(sql.as_str(), &refs).map_err(|e| format!("db query failed: {}", e))
+            }
+        })?;
         // `query` -> List<Model>; `query_one` -> Model or Optional<Model>.
         // An `Optional<Model>` return makes a no-row result `Null` rather than
         // an error (the graceful "miss" form).
@@ -901,6 +955,12 @@ fn endpoint_post(_url: &str, _body: &str, _bearer: &str) -> Result<Value, String
 }
 
 // ---- postgres glue (feature-gated) ----
+
+// The active `transaction { … }` connection for this request thread, if any (R33).
+// Set by `tx_begin`, read by db_exec/db_query, cleared by `tx_end`. One thread per
+// request (Connection: close) means it never leaks across requests.
+#[cfg(feature = "db")]
+thread_local! { static INTERP_TX: std::cell::RefCell<Option<postgres::Client>> = std::cell::RefCell::new(None); }
 
 #[cfg(feature = "db")]
 fn db_client() -> Result<postgres::Client, String> {

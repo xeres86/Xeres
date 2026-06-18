@@ -1,0 +1,14 @@
+// EXPECT: PASS — `transaction { ... }` groups db writes into one atomic unit
+// (R33): the two updates commit together or roll back together. Server-only.
+model Account {
+  id: String
+  balance: Int
+}
+
+server fn transfer(from: String, to: String, amount: Int) -> Int {
+  transaction {
+    db.exec("update accounts set balance = balance - $1 where id = $2", amount, from)
+    db.exec("update accounts set balance = balance + $1 where id = $2", amount, to)
+  }
+  return 1
+}

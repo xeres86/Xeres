@@ -107,6 +107,7 @@ fn stmt_uses_auth(s: &Stmt) -> bool {
         Stmt::Match { scrutinee, arms } => {
             expr_uses_auth(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_auth))
         }
+        Stmt::Transaction(body) => body.iter().any(stmt_uses_auth),
         Stmt::Break | Stmt::Continue => false,
     }
 }
@@ -157,6 +158,7 @@ fn stmt_uses_session(s: &Stmt) -> bool {
         Stmt::Match { scrutinee, arms } => {
             expr_uses_session(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_session))
         }
+        Stmt::Transaction(body) => body.iter().any(stmt_uses_session),
         Stmt::Break | Stmt::Continue => false,
     }
 }
@@ -202,6 +204,7 @@ fn stmt_uses_db(s: &Stmt) -> bool {
         Stmt::Match { scrutinee, arms } => {
             expr_uses_db(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_db))
         }
+        Stmt::Transaction(body) => body.iter().any(stmt_uses_db),
         Stmt::Break | Stmt::Continue => false,
     }
 }
@@ -1721,6 +1724,8 @@ fn emit_h_stmt(s: &Stmt, screen: &str, sv: &HashSet<String>) -> String {
             out.push('}');
             out
         }
+        // `transaction` is server-only (R33); a ui handler never contains one.
+        Stmt::Transaction(_) => String::new(),
     }
 }
 
@@ -1854,6 +1859,7 @@ fn stmts_have_await(stmts: &[Stmt]) -> bool {
         Stmt::Match { scrutinee, arms } => {
             expr_has_await(scrutinee) || arms.iter().any(|a| stmts_have_await(&a.body))
         }
+        Stmt::Transaction(body) => stmts_have_await(body),
         Stmt::Break | Stmt::Continue => false,
     })
 }
@@ -2552,6 +2558,19 @@ fn emit_stmt(s: &Stmt, let_kw: &str, ts: bool) -> String {
                 out
             }
         }
+        // R33 — atomic block: BEGIN on a shared connection, run the body (its
+        // `db.*` calls reuse that connection), COMMIT on normal completion or
+        // ROLLBACK if any operation failed. Server-only, so `ts` never sees it.
+        // Mirrors the interpreter. (A transaction directly in a fn body is emitted
+        // by `emit_server_stmt` with full db-return mapping; this handles one
+        // nested in control flow, where plain `db.exec` is the norm.)
+        Stmt::Transaction(body) => {
+            if ts {
+                format!("{{ {} }}", block(body))
+            } else {
+                format!("{{ tx_begin(); {} tx_end(); }}", block(body))
+            }
+        }
     }
 }
 
@@ -2590,6 +2609,15 @@ fn emit_server_stmt(s: &Stmt, f: &FunctionNode, program: &XeresProgram) -> Strin
                 return format!("let mut {} = {};", name, expr);
             }
         }
+    }
+    // `transaction { … }` — emit the body via `emit_server_stmt` so db.query_*
+    // return-mapping still applies inside it, wrapped in BEGIN/COMMIT/ROLLBACK
+    // (the body's db calls reuse the transaction's connection via the TX
+    // thread-local in DB_PRELUDE).
+    if let Stmt::Transaction(body) = s {
+        let inner: String =
+            body.iter().map(|x| emit_server_stmt(x, f, program)).collect::<Vec<_>>().join(" ");
+        return format!("{{ tx_begin(); {} tx_end(); }}", inner);
     }
     // `let mut` on the server: control flow makes reassignment common
     // (`total = total + i`); Rust needs the binding mutable.
@@ -2786,11 +2814,52 @@ fn db_client() -> postgres::Client {
     );
     postgres::Client::connect(&url, tls).expect("xeres: database connection failed")
 }
+// R33 transactions: a `transaction { … }` block holds one shared connection in
+// this thread-local for its duration (BEGIN..COMMIT/ROLLBACK). While it's set,
+// db_exec/db_query run on it (so they're part of the transaction) and flip the
+// `failed` flag on any error, so tx_end rolls back. Outside a transaction each
+// call opens its own connection, as before. Thread-per-connection + Connection:
+// close means the slot never crosses requests.
+thread_local! { static TX: std::cell::RefCell<Option<(postgres::Client, bool)>> = std::cell::RefCell::new(None); }
+fn tx_begin() {
+    let mut c = db_client();
+    let failed = c.batch_execute("BEGIN").is_err();
+    TX.with(|t| *t.borrow_mut() = Some((c, failed)));
+}
+fn tx_end() {
+    TX.with(|t| {
+        if let Some((mut c, failed)) = t.borrow_mut().take() {
+            let _ = c.batch_execute(if failed { "ROLLBACK" } else { "COMMIT" });
+        }
+    });
+}
 fn db_exec(sql: &str, params: &[&(dyn ToSql + Sync)]) -> i64 {
-    db_client().execute(sql, params).map(|n| n as i64).unwrap_or(0)
+    TX.with(|t| {
+        let mut b = t.borrow_mut();
+        if let Some((c, failed)) = b.as_mut() {
+            match c.execute(sql, params) {
+                Ok(n) => n as i64,
+                Err(_) => { *failed = true; 0 }
+            }
+        } else {
+            drop(b);
+            db_client().execute(sql, params).map(|n| n as i64).unwrap_or(0)
+        }
+    })
 }
 fn db_query(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Vec<postgres::Row> {
-    db_client().query(sql, params).expect("xeres: database query failed")
+    TX.with(|t| {
+        let mut b = t.borrow_mut();
+        if let Some((c, failed)) = b.as_mut() {
+            match c.query(sql, params) {
+                Ok(r) => r,
+                Err(_) => { *failed = true; Vec::new() }
+            }
+        } else {
+            drop(b);
+            db_client().query(sql, params).expect("xeres: database query failed")
+        }
+    })
 }
 "#;
 
