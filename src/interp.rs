@@ -398,6 +398,18 @@ impl<'a> Interp<'a> {
                     return self.db_exec(args, env);
                 }
                 let recv = self.eval(receiver, env)?;
+                // `optional.or(default)` — the receiver is an `Optional<T>`: a
+                // present value (of ANY type) returns itself, `none`/Null falls
+                // back to the default. This MUST precede the String/List dispatch:
+                // a present `Optional<String>` is a `Value::Str`, so checking `.or`
+                // after the String branch would mis-route it to `string_method`
+                // ("unknown String method `or`"). (`session.actor.or("")` hit this.)
+                if method == "or" {
+                    return match recv {
+                        Value::Null => self.eval(args.first().ok_or("`or` needs a default")?, env),
+                        other => Ok(other),
+                    };
+                }
                 // String stdlib methods.
                 if let Value::Str(s) = &recv {
                     let argv = args
@@ -413,13 +425,6 @@ impl<'a> Interp<'a> {
                         .map(|a| self.eval(a, env))
                         .collect::<Result<Vec<_>, _>>()?;
                     return list_method(items, method, &argv);
-                }
-                // `optional.or(default)` — null falls back to the default.
-                if method == "or" {
-                    return match recv {
-                        Value::Null => self.eval(args.first().ok_or("`or` needs a default")?, env),
-                        other => Ok(other),
-                    };
                 }
                 Err("unsupported method call in server runtime".into())
             }
@@ -978,5 +983,53 @@ fn pg_get(row: &postgres::Row, col: &str, ty: &str) -> Value {
         "Float" => row.try_get::<_, f64>(col).map(Value::Float).unwrap_or(Value::Null),
         "Bool" => row.try_get::<_, bool>(col).map(Value::Bool).unwrap_or(Value::Null),
         _ => row.try_get::<_, String>(col).map(Value::Str).unwrap_or(Value::Null),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_program() -> XeresProgram {
+        XeresProgram {
+            models: vec![],
+            enums: vec![],
+            functions: vec![],
+            states: vec![],
+            screens: vec![],
+            endpoints: vec![],
+        }
+    }
+
+    // `session.actor.or("")` — `.or` on a present Optional<String>.
+    fn actor_or(default: &str) -> Expr {
+        Expr::MethodCall {
+            receiver: Box::new(Expr::Field {
+                base: Box::new(Expr::Ident("session".to_string())),
+                field: "actor".to_string(),
+            }),
+            method: "or".to_string(),
+            args: vec![Expr::Str(default.to_string())],
+        }
+    }
+
+    // Regression: a present `Optional<String>` is a `Value::Str`, so `.or` must be
+    // resolved BEFORE the String-method dispatch. It used to mis-route to
+    // `string_method` → "unknown String method `or`" (broke `session.actor.or(..)`).
+    #[test]
+    fn optional_or_on_present_string_returns_the_value() {
+        let program = empty_program();
+        let interp = Interp::with_session(&program, Some("alice".to_string()));
+        let got = interp.eval(&actor_or(""), &HashMap::new());
+        assert!(matches!(&got, Ok(Value::Str(s)) if s == "alice"), "got {:?}", got);
+    }
+
+    // The `none` path still falls back to the default.
+    #[test]
+    fn optional_or_on_none_returns_the_default() {
+        let program = empty_program();
+        let interp = Interp::with_session(&program, None);
+        let got = interp.eval(&actor_or("anon"), &HashMap::new());
+        assert!(matches!(&got, Ok(Value::Str(s)) if s == "anon"), "got {:?}", got);
     }
 }

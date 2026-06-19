@@ -19,7 +19,7 @@
       {
         "language": "xeres",
         "scopeName": "source.xeres",
-        "path": "./syntaxes/xeres.tmLanguage.json"
+        "path": "./xeres.tmLanguage.json"
       }
     ]
   }

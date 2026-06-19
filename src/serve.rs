@@ -225,7 +225,12 @@ fn dispatch(
         let fname = &path["/__xeres/".len()..];
         return match rpc(program, fname, body, actor) {
             Ok((json, set_cookie)) => (200, "application/json", json, set_cookie),
-            Err(e) => (500, "application/json", format!("{{\"error\":{}}}", json_str(&e)), None),
+            Err(e) => {
+                // Surface server-fn failures in the dev terminal — otherwise a 500
+                // is opaque (the cause only rode in the response body).
+                eprintln!("xeres: rpc `{}` failed: {}", fname, e);
+                (500, "application/json", format!("{{\"error\":{}}}", json_str(&e)), None)
+            }
         };
     }
     // R31 auth-route guard: a protected route requires a valid session. `actor` is

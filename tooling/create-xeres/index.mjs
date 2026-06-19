@@ -39,13 +39,14 @@ console.log(`
   Done. Next steps:
 
     cd ${name}
-    npm install
-    npm run dev        # xeres dev: compile, serve, and rebuild on change
+    npm install        # downloads the xeres compiler + esbuild — no global install
+    npm run dev        # compile, serve, and rebuild on change
 
   Then open http://127.0.0.1:8080
 
-  Needs: the \`xeres\` compiler on your PATH, plus node. (No cargo for dev —
-  it runs in-process. cargo is only needed for \`npm run build\`.)
+  Node is the only prerequisite. \`npm install\` drops the prebuilt \`xeres\`
+  compiler into node_modules — no PATH, no Rust, no cargo. (cargo is only
+  needed for the optional \`npm run build\`: eject to a native Rust server.)
 `);
 
 // ---------------------------------------------------------------- templates
@@ -77,11 +78,14 @@ function PKG_JSON(app) {
       scripts: {
         dev: "xeres dev app.xrs",
         build:
-          "xeres build app.xrs && npx --yes esbuild out/server/static/client.ts --bundle --format=esm --outfile=out/server/static/client.js && cargo build --release --manifest-path out/server/Cargo.toml",
+          "xeres build app.xrs && esbuild out/server/static/client.ts --bundle --format=esm --outfile=out/server/static/client.js && cargo build --release --manifest-path out/server/Cargo.toml",
       },
-      // pulls the prebuilt compiler binary so `npm run dev` needs no global install
+      // `xeres-cli` pulls the prebuilt compiler binary (postinstall) so dev needs
+      // no global install / PATH; `esbuild` is the client bundler `xeres dev`/
+      // `build` use — pinned so the first run is instant + offline (no npx fetch).
       devDependencies: {
-        "xeres-cli": "^0.5.11",
+        "xeres-cli": "^0.5.12",
+        esbuild: "^0.28.0",
       },
     },
     null,
@@ -142,10 +146,14 @@ DATABASE_URL=postgres://user:password@localhost:5432/mydb
 \`xeres dev\` loads \`.env\` and passes it to the server. The connection string and
 credentials are server-only — they can never reach the browser.
 
-## Requirements (local)
+## Requirements
 
-- The \`xeres\` compiler on PATH (\`cargo install --path\` from the Xeres repo).
-- \`cargo\` to build the generated server (a full C toolchain is needed once you
-  use \`db\`, for the Postgres driver). Node is used for the client bundle.
+- **Node 18+** — the only prerequisite. \`npm install\` downloads the prebuilt
+  \`xeres\` compiler and esbuild into \`node_modules\`; no global install, no
+  \`PATH\`, no Rust toolchain. \`npm run dev\` runs the app in-process.
+- \`cargo\` is needed **only** for \`npm run build\` (the optional eject to a
+  standalone native Rust server). The released compiler is batteries-included
+  (Postgres + Argon2 + HTTP built in), so even \`db\` apps run under
+  \`npm run dev\` with no toolchain.
 `;
 }

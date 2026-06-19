@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.12 — 2026-06-18 — fix: interpreter `.or` on a present Optional; dev RPC error logging
+
+- **Fix (interpreter):** `optional.or(default)` on a *present* `Optional<String>`
+  — which is a `Value::Str` at runtime — was matched against the String-method
+  dispatch before `.or` was recognized, so it failed with "unknown String method
+  `or`". `.or` is now resolved *before* the String/List dispatch, so
+  `session.actor.or("")` (and any `Optional<String>.or(...)`) works in
+  `xeres dev`/`serve`. The generated/ejected server was already correct (it checks
+  `.or` first). Regression tests added in `src/interp.rs`.
+- **DX:** `xeres dev`/`serve` now logs a failing server fn to the terminal
+  (`xeres: rpc <name> failed: <error>`); previously a 500's cause only travelled in
+  the HTTP response body, making it invisible in the dev console.
+
 ## 0.5.11 — 2026-06-17 — R33 db transactions (`transaction { … }`)
 
 `db` was single statements (`query_one`/`query`/`exec`); a multi-statement write

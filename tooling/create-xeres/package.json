@@ -1,13 +1,20 @@
 {
   "name": "create-xeres",
-  "version": "0.5.11",
-  "description": "Scaffold a new Xeres app (tier-safe web, runs on the built-in Xeres server).",
+  "version": "0.5.12",
+  "description": "Scaffold a new Xeres app (type-safe web, runs on the built-in Xeres server).",
   "type": "module",
   "bin": {
     "create-xeres": "index.mjs"
   },
-  "files": ["index.mjs"],
-  "repository": { "type": "git", "url": "git+https://github.com/xeres86/Xeres.git" },
+  "files": [
+    "index.mjs"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xeres86/Xeres.git"
+  },
   "license": "MIT",
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }

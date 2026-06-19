@@ -63,16 +63,19 @@ response** — so the wire payload physically lacks them.
 
 ## Quickstart
 
-Requires the `xeres` compiler (built from this repo) on your `PATH`, plus
-[esbuild](https://esbuild.github.io/) (via `npx`) and a Rust toolchain.
+**The fast path — Node 18+ only.** No global install, no `PATH`, no Rust
+toolchain: `npm install` downloads the prebuilt `xeres` compiler and
+[esbuild](https://esbuild.github.io/) into `node_modules`.
 
 ```bash
-# scaffold (until create-xeres is published to npm)
-node tooling/create-xeres/index.mjs my-app
+npm create xeres@latest my-app
 cd my-app
-npm install
+npm install          # pulls the xeres compiler + esbuild
 npm run dev          # = `xeres dev app.xrs`
 ```
+
+(Contributors building the compiler from source instead: see
+[Building the compiler](#building-the-compiler).)
 
 Open **http://127.0.0.1:8080**.
 

@@ -51,11 +51,11 @@ Open http://127.0.0.1:8080. **Node-only** for db-free apps.
 
 ## Notes / current limits
 
-- **First release ships db-free binaries.** `release.yml` builds without the
-  `db` feature so the build can't fail on the (locally unverifiable) Postgres
-  code. Apps that use `db.*` will report "no database support" at runtime until
-  a `--features db` release is cut (flip the `cargo build` line in `release.yml`
-  once that build is green in CI).
+- **Released binaries are batteries-included.** `release.yml` builds
+  `--features full` (db + auth + http), so `db.*`, `hash()`/`verify()`, and
+  `endpoint` egress all work from the downloaded binary with **no toolchain on
+  the user's machine**. CI (`ci.yml`) builds both the default std-only profile
+  and `--features full` to keep both green.
 - **`npm run build`** (the eject path → a standalone Rust server) still needs
   `cargo`. `npm run dev` does not.
 
