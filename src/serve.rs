@@ -5,9 +5,15 @@
 use crate::interp::{json_str, Interp, Value};
 use crate::parser::{EnvModifier, XeresProgram};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+/// Keep-alive: idle read timeout that reaps a persistent connection holding a
+/// thread, and a per-connection request cap that recycles resources.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(15);
+const MAX_REQUESTS_PER_CONN: u32 = 1024;
 
 /// Paths to a PEM cert chain + private key for `xeres serve --tls`.
 pub struct TlsConfig {
@@ -34,6 +40,7 @@ pub fn serve(program: &XeresProgram, static_dir: &str, port: u16, tls: Option<Tl
         println!("xeres serve: https://{}", addr);
         std::thread::scope(|s| {
             for stream in listener.incoming().flatten() {
+                let _ = stream.set_read_timeout(Some(KEEPALIVE_IDLE));
                 let config = config.clone();
                 s.spawn(move || match rustls::ServerConnection::new(config) {
                     Ok(conn) => {
@@ -51,6 +58,7 @@ pub fn serve(program: &XeresProgram, static_dir: &str, port: u16, tls: Option<Tl
     // Scoped threads let each connection borrow `program` / `static_dir`.
     std::thread::scope(|s| {
         for stream in listener.incoming().flatten() {
+            let _ = stream.set_read_timeout(Some(KEEPALIVE_IDLE));
             s.spawn(move || {
                 let _ = handle_conn(stream, program, static_dir);
             });
@@ -79,60 +87,130 @@ fn load_tls(cert: &str, key: &str) -> rustls::ServerConfig {
         .expect("xeres serve --tls: invalid certificate/key pair")
 }
 
+/// One connection — **keep-alive**: a request/response loop reusing the socket
+/// until the client opts out, an idle read times out (reaping the thread), or the
+/// per-connection cap is hit. HTTP/1.1 framing: read the full headers, then exactly
+/// `Content-Length` body bytes, leaving any pipelined remainder buffered for the
+/// next iteration.
 fn handle_conn<S: Read + Write>(mut stream: S, program: &XeresProgram, static_dir: &str) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 65536];
-    let n = stream.read(&mut buf)?;
-    if n == 0 {
-        return Ok(());
-    }
-    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-    let first = req.lines().next().unwrap_or("");
-    let mut parts = first.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("/");
-    let body = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 16384];
+    let mut served: u32 = 0;
 
-    let csrf_cookie = cookie_value(&req, "xeres_csrf");
+    loop {
+        // 1) Read until the header terminator (\r\n\r\n) is buffered.
+        let head_end = loop {
+            if let Some(pos) = find_subseq(&buf, b"\r\n\r\n") {
+                break pos + 4;
+            }
+            if buf.len() > 1 << 20 {
+                return Ok(()); // oversized headers — drop the connection
+            }
+            match stream.read(&mut tmp) {
+                Ok(0) => return Ok(()),                   // peer closed cleanly
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(e) if is_idle(&e) => return Ok(()),   // idle keep-alive — reap
+                Err(e) => return Err(e),
+            }
+        };
+        // 2) Read until the full body (Content-Length bytes) is buffered.
+        let need = {
+            let head = String::from_utf8_lossy(&buf[..head_end]);
+            head_end + content_length(&head)
+        };
+        while buf.len() < need {
+            match stream.read(&mut tmp) {
+                Ok(0) => return Ok(()),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(e) if is_idle(&e) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+        // 3) Take exactly this request; any pipelined bytes stay in `buf`.
+        let req_bytes: Vec<u8> = buf.drain(..need).collect();
+        let req = String::from_utf8_lossy(&req_bytes);
+        let body = String::from_utf8_lossy(&req_bytes[head_end..]);
 
-    // Default S1 CSRF: a state-changing RPC fn call must echo the double-submit
-    // token (the `xeres_csrf` cookie value, resent as the X-CSRF-Token header).
-    // Sync replication is exempt. SameSite=Strict already blocks the cross-site
-    // case; this is defense-in-depth the developer never writes.
-    if method == "POST" && path.starts_with("/__xeres/") && !path.starts_with("/__xeres/sync/") {
-        let header = header_value(&req, "x-csrf-token");
-        let ok = matches!((&csrf_cookie, &header), (Some(c), Some(h)) if !c.is_empty() && c == h);
-        if !ok {
-            return write_response(
-                &mut stream,
-                403,
-                "application/json",
-                "{\"error\":\"csrf token missing or invalid\"}",
-                "",
-            );
+        let first = req.lines().next().unwrap_or("");
+        let mut parts = first.split_whitespace();
+        let method = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("/");
+        let version = parts.next().unwrap_or("HTTP/1.1");
+
+        // Keep-alive unless the client opts out (HTTP/1.0 defaults to close) or the
+        // per-connection request cap is reached.
+        served += 1;
+        let conn_hdr = header_value(&req, "connection").unwrap_or_default().to_ascii_lowercase();
+        let client_keep = if version.eq_ignore_ascii_case("HTTP/1.0") {
+            conn_hdr.contains("keep-alive")
+        } else {
+            !conn_hdr.contains("close")
+        };
+        let keep = client_keep && served < MAX_REQUESTS_PER_CONN;
+
+        let csrf_cookie = cookie_value(&req, "xeres_csrf");
+
+        // Default S1 CSRF: a state-changing RPC fn call must echo the double-submit
+        // token (the `xeres_csrf` cookie value, resent as the X-CSRF-Token header).
+        // Sync replication is exempt. SameSite=Strict already blocks the cross-site
+        // case; this is defense-in-depth the developer never writes.
+        if method == "POST" && path.starts_with("/__xeres/") && !path.starts_with("/__xeres/sync/") {
+            let header = header_value(&req, "x-csrf-token");
+            let ok = matches!((&csrf_cookie, &header), (Some(c), Some(h)) if !c.is_empty() && c == h);
+            if !ok {
+                write_response(&mut stream, 403, "application/json", "{\"error\":\"csrf token missing or invalid\"}", "", keep)?;
+                if keep { continue; } else { return Ok(()); }
+            }
+        }
+
+        // Recover the actor from a verified session cookie (None = anonymous).
+        let actor = cookie_value(&req, "xeres_session").and_then(|c| crate::interp::session_verify(&c));
+
+        let (code, ctype, payload, set_cookie) =
+            dispatch(method, path, &body, actor, program, static_dir);
+
+        // Set-Cookie(s): a session mint (if `session.login`/`logout` ran) plus a
+        // fresh CSRF token when the client doesn't have one yet (readable by JS so
+        // the client can echo it back as a header).
+        let mut cookies = String::new();
+        if let Some(c) = set_cookie {
+            cookies.push_str(&format!("Set-Cookie: {}\r\n", c));
+        }
+        if csrf_cookie.is_none() {
+            cookies.push_str(&format!(
+                "Set-Cookie: xeres_csrf={}; Secure; SameSite=Strict; Path=/\r\n",
+                rand_token()
+            ));
+        }
+
+        write_response(&mut stream, code, ctype, &payload, &cookies, keep)?;
+        if !keep {
+            return Ok(());
         }
     }
+}
 
-    // Recover the actor from a verified session cookie (None = anonymous).
-    let actor = cookie_value(&req, "xeres_session").and_then(|c| crate::interp::session_verify(&c));
-
-    let (code, ctype, payload, set_cookie) =
-        dispatch(method, path, body, actor, program, static_dir);
-
-    // Set-Cookie(s): a session mint (if `session.login`/`logout` ran) plus a
-    // fresh CSRF token when the client doesn't have one yet (readable by JS so
-    // the client can echo it back as a header).
-    let mut cookies = String::new();
-    if let Some(c) = set_cookie {
-        cookies.push_str(&format!("Set-Cookie: {}\r\n", c));
+/// First occurrence of `needle` in `hay` (used to find the \r\n\r\n header end).
+fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
     }
-    if csrf_cookie.is_none() {
-        cookies.push_str(&format!(
-            "Set-Cookie: xeres_csrf={}; Secure; SameSite=Strict; Path=/\r\n",
-            rand_token()
-        ));
-    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
 
-    write_response(&mut stream, code, ctype, &payload, &cookies)
+/// Parse `Content-Length` from a request head (0 if absent/invalid).
+fn content_length(head: &str) -> usize {
+    for line in head.lines() {
+        if line.len() > 15 && line[..15].eq_ignore_ascii_case("content-length:") {
+            return line[15..].trim().parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// A read that timed out (idle keep-alive connection) vs a real I/O error.
+fn is_idle(e: &std::io::Error) -> bool {
+    matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
 /// Default S1/S2: the always-on security headers. Strict CSP forbids inline
@@ -152,24 +230,27 @@ fn write_response<S: Write>(
     ctype: &str,
     payload: &str,
     cookies: &str,
+    keep: bool,
 ) -> std::io::Result<()> {
+    let conn = if keep { "keep-alive" } else { "close" };
     // A 302 carries no body; `payload` is the redirect target (the Location).
     if code == 302 {
         let resp = format!(
-            "HTTP/1.1 302 Found\r\nLocation: {}\r\n{}{}Content-Length: 0\r\nConnection: close\r\n\r\n",
-            payload, SECURITY_HEADERS, cookies
+            "HTTP/1.1 302 Found\r\nLocation: {}\r\n{}{}Content-Length: 0\r\nConnection: {}\r\n\r\n",
+            payload, SECURITY_HEADERS, cookies, conn
         );
         stream.write_all(resp.as_bytes())?;
         return stream.flush();
     }
     let resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: {}\r\n\r\n{}",
         code,
         reason(code),
         ctype,
         SECURITY_HEADERS,
         cookies,
         payload.as_bytes().len(),
+        conn,
         payload
     );
     stream.write_all(resp.as_bytes())?;

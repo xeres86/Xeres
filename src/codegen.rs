@@ -549,8 +549,14 @@ fn wire_serialize(path: &str, ty: &str, models: &HashSet<&str>) -> String {
     }
 }
 
-const SERVER_HEAD: &str = r#"use std::io::{Read, Write};
+const SERVER_HEAD: &str = r#"use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
+use std::time::Duration;
+
+// Keep-alive: idle read timeout that reaps a persistent connection holding a
+// thread, plus a per-connection request cap that recycles resources.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(15);
+const MAX_REQUESTS_PER_CONN: u32 = 1024;
 
 /// `.length()` on a String or List lowers to `.x_len()` so codegen needs no type
 /// info at the call site: both `str` (char count) and `[T]` (element count)
@@ -748,48 +754,99 @@ fn rand_token() -> String {
 // terminated in front; no Access-Control-Allow-Origin (the app is same-origin).
 const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n";
 
-fn write_response<S: Write>(stream: &mut S, code: u16, ctype: &str, payload: &str, cookies: &str) -> std::io::Result<()> {
+// First occurrence of `needle` in `hay` (finds the \r\n\r\n header terminator).
+fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() { return None; }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+// Parse Content-Length from a request head (0 if absent/invalid).
+fn content_length(head: &str) -> usize {
+    for line in head.lines() {
+        if line.len() > 15 && line[..15].eq_ignore_ascii_case("content-length:") {
+            return line[15..].trim().parse().unwrap_or(0);
+        }
+    }
+    0
+}
+// A read that timed out (idle keep-alive connection) vs a real I/O error.
+fn is_idle(e: &std::io::Error) -> bool { matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) }
+
+fn write_response<S: Write>(stream: &mut S, code: u16, ctype: &str, payload: &str, cookies: &str, keep: bool) -> std::io::Result<()> {
+    let conn = if keep { "keep-alive" } else { "close" };
     if code == 302 {
-        let resp = format!("HTTP/1.1 302 Found\r\nLocation: {}\r\n{}{}Content-Length: 0\r\nConnection: close\r\n\r\n", payload, SECURITY_HEADERS, cookies);
+        let resp = format!("HTTP/1.1 302 Found\r\nLocation: {}\r\n{}{}Content-Length: 0\r\nConnection: {}\r\n\r\n", payload, SECURITY_HEADERS, cookies, conn);
         stream.write_all(resp.as_bytes())?;
         return stream.flush();
     }
     let resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-        code, reason(code), ctype, SECURITY_HEADERS, cookies, payload.as_bytes().len(), payload
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Content-Length: {}\r\nConnection: {}\r\n\r\n{}",
+        code, reason(code), ctype, SECURITY_HEADERS, cookies, payload.as_bytes().len(), conn, payload
     );
     stream.write_all(resp.as_bytes())?;
     stream.flush()
 }
 
+// Keep-alive: a request/response loop reusing the socket until the client opts
+// out, an idle read times out (reaping the thread), or the per-connection cap is
+// hit. HTTP/1.1 framing: full headers, then exactly Content-Length body bytes;
+// any pipelined remainder stays buffered for the next iteration.
 fn handle_conn<S: Read + Write>(stream: &mut S) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 65536];
-    let n = stream.read(&mut buf)?;
-    if n == 0 { return Ok(()); }
-    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-    let first = req.lines().next().unwrap_or("");
-    let mut parts = first.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("/");
-    let body = req.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
-    let csrf_cookie = cookie_value(&req, "xeres_csrf");
-    // Default S1 CSRF: a state-changing RPC fn call must echo the double-submit
-    // token (xeres_csrf cookie value resent as X-CSRF-Token). Sync is exempt.
-    if method == "POST" && path.starts_with("/__xeres/") && !path.starts_with("/__xeres/sync/") {
-        let header = header_value(&req, "x-csrf-token");
-        let ok = matches!((&csrf_cookie, &header), (Some(c), Some(h)) if !c.is_empty() && c == h);
-        if !ok {
-            return write_response(stream, 403, "application/json", "{\"error\":\"csrf token missing or invalid\"}", "");
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 16384];
+    let mut served: u32 = 0;
+    loop {
+        let head_end = loop {
+            if let Some(pos) = find_subseq(&buf, b"\r\n\r\n") { break pos + 4; }
+            if buf.len() > 1 << 20 { return Ok(()); }
+            match stream.read(&mut tmp) {
+                Ok(0) => return Ok(()),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(e) if is_idle(&e) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        };
+        let need = { let head = String::from_utf8_lossy(&buf[..head_end]); head_end + content_length(&head) };
+        while buf.len() < need {
+            match stream.read(&mut tmp) {
+                Ok(0) => return Ok(()),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(e) if is_idle(&e) => return Ok(()),
+                Err(e) => return Err(e),
+            }
         }
-    }
+        let req_bytes: Vec<u8> = buf.drain(..need).collect();
+        let req = String::from_utf8_lossy(&req_bytes);
+        let body = String::from_utf8_lossy(&req_bytes[head_end..]);
+        let first = req.lines().next().unwrap_or("");
+        let mut parts = first.split_whitespace();
+        let method = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("/");
+        let version = parts.next().unwrap_or("HTTP/1.1");
+        served += 1;
+        let conn_hdr = header_value(&req, "connection").unwrap_or_default().to_ascii_lowercase();
+        let client_keep = if version.eq_ignore_ascii_case("HTTP/1.0") { conn_hdr.contains("keep-alive") } else { !conn_hdr.contains("close") };
+        let keep = client_keep && served < MAX_REQUESTS_PER_CONN;
+        let csrf_cookie = cookie_value(&req, "xeres_csrf");
+        // Default S1 CSRF: a state-changing RPC fn call must echo the double-submit
+        // token (xeres_csrf cookie value resent as X-CSRF-Token). Sync is exempt.
+        if method == "POST" && path.starts_with("/__xeres/") && !path.starts_with("/__xeres/sync/") {
+            let header = header_value(&req, "x-csrf-token");
+            let ok = matches!((&csrf_cookie, &header), (Some(c), Some(h)) if !c.is_empty() && c == h);
+            if !ok {
+                write_response(stream, 403, "application/json", "{\"error\":\"csrf token missing or invalid\"}", "", keep)?;
+                if keep { continue; } else { return Ok(()); }
+            }
+        }
     //__XERES_RECOVER__
-    let (code, ctype, payload) = dispatch(method, path, body);
-    let mut cookies = String::new();
+        let (code, ctype, payload) = dispatch(method, path, &body);
+        let mut cookies = String::new();
     //__XERES_SETCOOKIE__
-    if csrf_cookie.is_none() {
-        cookies.push_str(&format!("Set-Cookie: xeres_csrf={}; Secure; SameSite=Strict; Path=/\r\n", rand_token()));
+        if csrf_cookie.is_none() {
+            cookies.push_str(&format!("Set-Cookie: xeres_csrf={}; Secure; SameSite=Strict; Path=/\r\n", rand_token()));
+        }
+        write_response(stream, code, ctype, &payload, &cookies, keep)?;
+        if !keep { return Ok(()); }
     }
-    write_response(stream, code, ctype, &payload, &cookies)
 }
 
 // Plain-HTTP accept loop (the default). One thread per connection so an idle or
@@ -798,6 +855,7 @@ fn serve_plain(listener: TcpListener, addr: &str) {
     println!("xeres app serving http://{}", addr);
     for stream in listener.incoming() {
         if let Ok(mut s) = stream {
+            let _ = s.set_read_timeout(Some(KEEPALIVE_IDLE));
             std::thread::spawn(move || { let _ = handle_conn(&mut s); });
         }
     }
@@ -828,6 +886,7 @@ fn serve_loop(listener: TcpListener, addr: &str) {
         println!("xeres app serving https://{}", addr);
         for stream in listener.incoming() {
             if let Ok(s) = stream {
+                let _ = s.set_read_timeout(Some(KEEPALIVE_IDLE));
                 let config = config.clone();
                 std::thread::spawn(move || {
                     if let Ok(conn) = rustls::ServerConnection::new(config) {
