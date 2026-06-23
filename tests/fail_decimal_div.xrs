@@ -1,0 +1,6 @@
+// R29 (spec 18) — Decimal division is deferred: it needs an explicit rounding
+// mode (half-up vs banker's), so `/` on a Decimal is a compile error until a
+// later cut adds a rounding API.
+server fn split(total: Decimal, parts: Decimal) -> Decimal {
+  return total / parts
+}

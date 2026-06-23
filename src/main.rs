@@ -108,7 +108,7 @@ fn compile(path: &str) -> Option<XeresProgram> {
     };
     let mut lexer = Lexer::new(&source);
     let mut parser = Parser::new(&mut lexer);
-    let program = parser.parse_program();
+    let mut program = parser.parse_program();
     let analysis = checker::analyze(&program);
     if !analysis.errors.is_empty() {
         let lines: Vec<&str> = source.lines().collect();
@@ -119,6 +119,10 @@ fn compile(path: &str) -> Option<XeresProgram> {
         eprintln!("\nxeres: {} error{} - compilation aborted.", n, if n == 1 { "" } else { "s" });
         return None;
     }
+    // Typed desugaring (spec 18): rewrite Decimal `+ - * < > <= >=` into `__dec_*`
+    // builtin calls now that types are known — both backends emit these directly.
+    // Runs only on a checked program, so the R29 discipline already holds.
+    checker::lower(&mut program);
     Some(program)
 }
 

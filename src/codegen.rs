@@ -12,7 +12,8 @@
 //                stub — the dev never hand-writes a fetch.
 
 use crate::parser::{
-    BinOp, EnvModifier, Expr, FunctionNode, Handler, MatchPat, Stmt, UnOp, ViewNode, XeresProgram,
+    BinOp, EnvModifier, Expr, FunctionNode, Handler, MatchPat, ScreenNode, Stmt, UnOp, ViewNode,
+    XeresProgram,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -64,6 +65,11 @@ fn gen_cargo(program: &XeresProgram) -> String {
     if !program.endpoints.is_empty() {
         deps.push_str("ureq = \"2\"\n");
     }
+    // Exact Decimal money math (spec 18): rust_decimal, optional + gated behind a
+    // `decimal` cargo feature (made default below) — exact base-10, no f64.
+    if uses_decimal(program) {
+        deps.push_str("rust_decimal = { version = \"1\", optional = true }\n");
+    }
     // App-listener TLS (opt-in via `--features tls`), mirroring the compiler's own
     // `xeres serve --tls`: pure-Rust rustls on the `ring` backend, no system deps.
     // Optional, so a default build of the emitted crate stays HTTP-only and lean.
@@ -77,6 +83,11 @@ fn gen_cargo(program: &XeresProgram) -> String {
     let mut features = String::from("tls = [\"dep:rustls\", \"dep:rustls-pemfile\"]\n");
     if uses_session(program) {
         features.push_str("auth = [\"dep:hmac\", \"dep:sha2\"]\n");
+    }
+    // `decimal` carries the rust_decimal helpers; make it a default feature so the
+    // ejected crate builds out of the box (drop it with --no-default-features).
+    if uses_decimal(program) {
+        features.push_str("decimal = [\"dep:rust_decimal\"]\ndefault = [\"decimal\"]\n");
     }
     tail.push_str(&format!("\n[features]\n{}", features));
     format!(
@@ -230,6 +241,87 @@ fn expr_uses_db(e: &Expr) -> bool {
     }
 }
 
+/// Does the program use Decimal arithmetic? After the checker's typed desugaring
+/// (spec 18) that surfaces as `__dec_*` builtin calls. Scans functions AND screens
+/// (Decimal math runs on either tier) so both the server `rust_decimal` helpers +
+/// dep and the client BigInt runtime are gated on a single, never-missing signal.
+fn uses_decimal(program: &XeresProgram) -> bool {
+    program.functions.iter().any(|f| f.body.iter().any(stmt_uses_decimal))
+        || program.screens.iter().any(screen_uses_decimal)
+}
+fn screen_uses_decimal(s: &ScreenNode) -> bool {
+    s.states.iter().any(|st| expr_uses_decimal(&st.init))
+        || s.load.iter().any(stmt_uses_decimal)
+        || s.body.iter().any(view_uses_decimal)
+}
+fn view_uses_decimal(v: &ViewNode) -> bool {
+    match v {
+        ViewNode::Element { arg, style, event, children, .. } => {
+            arg.as_ref().is_some_and(expr_uses_decimal)
+                || style.as_ref().is_some_and(expr_uses_decimal)
+                || match event {
+                    Some(Handler::Call(e)) => expr_uses_decimal(e),
+                    Some(Handler::Block(stmts)) => stmts.iter().any(stmt_uses_decimal),
+                    None => false,
+                }
+                || children.iter().any(view_uses_decimal)
+        }
+        ViewNode::For { iter, body, .. } => {
+            expr_uses_decimal(iter) || body.iter().any(view_uses_decimal)
+        }
+        ViewNode::If { cond, then_body, else_body } => {
+            expr_uses_decimal(cond)
+                || then_body.iter().any(view_uses_decimal)
+                || else_body.iter().any(view_uses_decimal)
+        }
+        ViewNode::Component { args, .. } => args.iter().any(|(_, v)| expr_uses_decimal(v)),
+    }
+}
+fn stmt_uses_decimal(s: &Stmt) -> bool {
+    match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::Return(value)
+        | Stmt::Expr(value) => expr_uses_decimal(value),
+        Stmt::Try { body, handler } => {
+            body.iter().any(stmt_uses_decimal) || handler.iter().any(stmt_uses_decimal)
+        }
+        Stmt::If { cond, then_body, else_body } => {
+            expr_uses_decimal(cond)
+                || then_body.iter().any(stmt_uses_decimal)
+                || else_body.iter().any(stmt_uses_decimal)
+        }
+        Stmt::For { iter, body, .. } => expr_uses_decimal(iter) || body.iter().any(stmt_uses_decimal),
+        Stmt::While { cond, body } => expr_uses_decimal(cond) || body.iter().any(stmt_uses_decimal),
+        Stmt::Match { scrutinee, arms } => {
+            expr_uses_decimal(scrutinee) || arms.iter().any(|a| a.body.iter().any(stmt_uses_decimal))
+        }
+        Stmt::Transaction(body) => body.iter().any(stmt_uses_decimal),
+        Stmt::Break | Stmt::Continue => false,
+    }
+}
+fn expr_uses_decimal(e: &Expr) -> bool {
+    match e {
+        Expr::Call { callee, args } => {
+            callee.starts_with("__dec_") || args.iter().any(expr_uses_decimal)
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_uses_decimal(receiver) || args.iter().any(expr_uses_decimal)
+        }
+        Expr::Field { base, .. } => expr_uses_decimal(base),
+        Expr::Unary { expr, .. } => expr_uses_decimal(expr),
+        Expr::Binary { left, right, .. } => expr_uses_decimal(left) || expr_uses_decimal(right),
+        Expr::Declassify(i) | Expr::Await(i) | Expr::Raw(i) => expr_uses_decimal(i),
+        Expr::Record { fields, .. } => fields.iter().any(|(_, v)| expr_uses_decimal(v)),
+        Expr::ListLit(items) => items.iter().any(expr_uses_decimal),
+        Expr::Ternary { cond, then, otherwise } => {
+            expr_uses_decimal(cond) || expr_uses_decimal(then) || expr_uses_decimal(otherwise)
+        }
+        Expr::Range { start, end } => expr_uses_decimal(start) || expr_uses_decimal(end),
+        _ => false,
+    }
+}
+
 // ------------------------------------------------------------------ server.rs
 
 fn gen_server(program: &XeresProgram) -> String {
@@ -252,6 +344,11 @@ fn gen_server(program: &XeresProgram) -> String {
     // verbatim so a cookie minted by `xeres serve` verifies here and vice-versa.
     if uses_session(program) {
         out.push_str(SESSION_PRELUDE);
+        out.push('\n');
+    }
+    // Exact Decimal money (spec 18): rust_decimal helpers, gated behind `decimal`.
+    if uses_decimal(program) {
+        out.push_str(DECIMAL_PRELUDE);
         out.push('\n');
     }
     // Egress endpoints (R26): the ureq helpers + a fixed base const and bearer
@@ -990,6 +1087,12 @@ fn gen_client(program: &XeresProgram) -> String {
     out.push('\n');
     out.push_str(UID_FN);
     out.push('\n');
+    // Exact Decimal money math (spec 18): zero-dep BigInt fixed-point. Emitted
+    // only when the app does Decimal arithmetic (keeps a plain bundle lean).
+    if uses_decimal(program) {
+        out.push_str(DECIMAL_RUNTIME);
+        out.push('\n');
+    }
 
     // Enums — a string union (the variant names). String-backed end to end.
     for e in &program.enums {
@@ -1820,6 +1923,12 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
                     .map(|x| emit_h_expr(x, screen, sv))
                     .unwrap_or_else(|| "\"\"".to_string());
             }
+            // Lowered Decimal ops (spec 18) → the zero-dep `__dec.*` BigInt runtime.
+            if let Some(op) = callee.strip_prefix("__dec_") {
+                let a = args.first().map(|x| emit_h_expr(x, screen, sv)).unwrap_or_default();
+                let b = args.get(1).map(|x| emit_h_expr(x, screen, sv)).unwrap_or_default();
+                return format!("__dec.{}({}, {})", op, a, b);
+            }
             // `navigate(Screen)` — the argument is a screen *name* (R28), lowered
             // to the router's `__navigate("Screen")` (switch screen + URL). A
             // `navigate(Screen { id: x })` is a typed-route-param nav (R32) →
@@ -2130,6 +2239,53 @@ async function __rpc<T>(name: string, args: unknown[]): Promise<T> {
 }
 ";
 
+// Exact Decimal money math (spec 18), browser tier. Zero-dep and exact: a scaled
+// BigInt, never the binary `number`. A Decimal is a string end-to-end (parse ->
+// compute -> format). The checker's typed desugaring lowers Decimal `+ - * < >
+// <= >=` to `__dec.*` calls handled here; `Decimal * Int` accepts a number
+// operand. Mirrors the server's rust_decimal helpers and the interpreter's i128
+// core to the cent — the dual-backend parity rule.
+const DECIMAL_RUNTIME: &str = r#"const __dec = {
+  _p(x: any): [bigint, number] {
+    let s = String(x).trim();
+    const neg = s.charAt(0) === "-";
+    if (neg || s.charAt(0) === "+") s = s.slice(1);
+    const dot = s.indexOf(".");
+    const frac = dot < 0 ? "" : s.slice(dot + 1);
+    const digits = (dot < 0 ? s : s.slice(0, dot) + frac) || "0";
+    let v = BigInt(digits);
+    if (neg) v = -v;
+    return [v, frac.length];
+  },
+  _fmt(v: bigint, scale: number): string {
+    const neg = v < 0n;
+    let s = (neg ? -v : v).toString();
+    let body: string;
+    if (scale === 0) {
+      body = s;
+    } else {
+      if (s.length <= scale) s = s.padStart(scale + 1, "0");
+      const cut = s.length - scale;
+      body = s.slice(0, cut) + "." + s.slice(cut);
+    }
+    return neg ? "-" + body : body;
+  },
+  _bin(a: any, b: any): [bigint, bigint, number] {
+    const [av, asc] = this._p(a);
+    const [bv, bsc] = this._p(b);
+    const sc = asc > bsc ? asc : bsc;
+    return [av * 10n ** BigInt(sc - asc), bv * 10n ** BigInt(sc - bsc), sc];
+  },
+  add(a: any, b: any): string { const [x, y, sc] = this._bin(a, b); return this._fmt(x + y, sc); },
+  sub(a: any, b: any): string { const [x, y, sc] = this._bin(a, b); return this._fmt(x - y, sc); },
+  mul(a: any, b: any): string { const [av, asc] = this._p(a); const [bv, bsc] = this._p(b); return this._fmt(av * bv, asc + bsc); },
+  lt(a: any, b: any): boolean { const [x, y] = this._bin(a, b); return x < y; },
+  gt(a: any, b: any): boolean { const [x, y] = this._bin(a, b); return x > y; },
+  le(a: any, b: any): boolean { const [x, y] = this._bin(a, b); return x <= y; },
+  ge(a: any, b: any): boolean { const [x, y] = this._bin(a, b); return x >= y; },
+};
+"#;
+
 // Local-first sync runtime. Shape: on-device store + offline oplog + network
 // trawler, with last-write-wins merge by a Lamport counter. Swap MemoryStore
 // for a sql.js / cr-sqlite adapter to get real on-device SQLite + CRDT merge.
@@ -2358,6 +2514,20 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     .first()
                     .map(|a| emit_expr(a, ts))
                     .unwrap_or_else(|| if ts { "\"\"".to_string() } else { "String::new()".to_string() });
+            }
+            // Lowered Decimal ops (spec 18): the checker desugars Decimal
+            // `+ - * < > <= >=` to these. Browser/shared (ts): the zero-dep
+            // `__dec.*` BigInt runtime; server: the `rust_decimal` helpers, whose
+            // operands are taken by reference (a Decimal is a `String`, an `Int` an
+            // `i64`/`i32`, all `IntoDec`).
+            if let Some(op) = callee.strip_prefix("__dec_") {
+                let a = args.first().map(|x| emit_expr(x, ts)).unwrap_or_default();
+                let b = args.get(1).map(|x| emit_expr(x, ts)).unwrap_or_default();
+                return if ts {
+                    format!("__dec.{}({}, {})", op, a, b)
+                } else {
+                    format!("__dec_{}(&({}), &({}))", op, a, b)
+                };
             }
             // `navigate(Screen)` — browser-only (R28), so only the TS tier emits
             // it; lower to the router's `__navigate("Screen")`. The param form
@@ -2920,6 +3090,41 @@ fn db_query(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Vec<postgres::Row> {
         }
     })
 }
+"#;
+
+// Exact Decimal money math (spec 18 / R29), server tier. A Decimal is a `String`
+// end-to-end; these helpers parse → compute exactly in base-10 (rust_decimal,
+// never f64) → re-stringify. The checker's typed desugaring lowers Decimal
+// `+ - * < > <= >=` to `__dec_*` calls handled here. `Decimal * Int` accepts an
+// integer operand via `IntoDec`. Gated behind the `decimal` cargo feature (made
+// default when the app uses Decimal). Mirrors the interpreter's i128 core and the
+// browser's BigInt runtime to the cent — the dual-backend parity rule.
+const DECIMAL_PRELUDE: &str = r#"#[cfg(feature = "decimal")]
+use rust_decimal::Decimal;
+#[cfg(feature = "decimal")]
+trait IntoDec { fn into_dec(&self) -> Decimal; }
+#[cfg(feature = "decimal")]
+impl IntoDec for str { fn into_dec(&self) -> Decimal { std::str::FromStr::from_str(self).unwrap_or_default() } }
+#[cfg(feature = "decimal")]
+impl IntoDec for String { fn into_dec(&self) -> Decimal { std::str::FromStr::from_str(self.as_str()).unwrap_or_default() } }
+#[cfg(feature = "decimal")]
+impl IntoDec for i64 { fn into_dec(&self) -> Decimal { Decimal::from(*self) } }
+#[cfg(feature = "decimal")]
+impl IntoDec for i32 { fn into_dec(&self) -> Decimal { Decimal::from(*self) } }
+#[cfg(feature = "decimal")]
+fn __dec_add<A: IntoDec + ?Sized, B: IntoDec + ?Sized>(a: &A, b: &B) -> String { (a.into_dec() + b.into_dec()).to_string() }
+#[cfg(feature = "decimal")]
+fn __dec_sub<A: IntoDec + ?Sized, B: IntoDec + ?Sized>(a: &A, b: &B) -> String { (a.into_dec() - b.into_dec()).to_string() }
+#[cfg(feature = "decimal")]
+fn __dec_mul<A: IntoDec + ?Sized, B: IntoDec + ?Sized>(a: &A, b: &B) -> String { (a.into_dec() * b.into_dec()).to_string() }
+#[cfg(feature = "decimal")]
+fn __dec_lt<A: IntoDec + ?Sized, B: IntoDec + ?Sized>(a: &A, b: &B) -> bool { a.into_dec() < b.into_dec() }
+#[cfg(feature = "decimal")]
+fn __dec_gt<A: IntoDec + ?Sized, B: IntoDec + ?Sized>(a: &A, b: &B) -> bool { a.into_dec() > b.into_dec() }
+#[cfg(feature = "decimal")]
+fn __dec_le<A: IntoDec + ?Sized, B: IntoDec + ?Sized>(a: &A, b: &B) -> bool { a.into_dec() <= b.into_dec() }
+#[cfg(feature = "decimal")]
+fn __dec_ge<A: IntoDec + ?Sized, B: IntoDec + ?Sized>(a: &A, b: &B) -> bool { a.into_dec() >= b.into_dec() }
 "#;
 
 /// String stdlib methods, spelled for each tier (`recv`/`args` are already

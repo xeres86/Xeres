@@ -160,6 +160,12 @@ fn resolve_type(
             // decimal("19.99") — a string-backed exact money value, kept
             // distinct from Float so the two can't silently mix (R29).
             "decimal" => Some("Decimal".into()),
+            // Lowered Decimal ops (spec 18). The typed-desugaring pass below
+            // rewrites Decimal `+ - * < > <= >=` into these calls; typing them
+            // here lets nested arithmetic like `(a + b) * c` compose after the
+            // inner rewrite, and keeps `resolve_type` correct post-lowering.
+            "__dec_add" | "__dec_sub" | "__dec_mul" => Some("Decimal".into()),
+            "__dec_lt" | "__dec_gt" | "__dec_le" | "__dec_ge" => Some("Bool".into()),
             // math: result type follows the (numeric) argument
             "abs" | "min" | "max" => args
                 .first()
@@ -179,6 +185,16 @@ fn resolve_type(
             let rt = resolve_type(right, locals, table);
             match (lt.as_deref(), rt.as_deref()) {
                 (Some("Int"), Some("Int")) => Some("Int".into()),
+                // Exact money (R29 / spec 18): Decimal arithmetic stays Decimal,
+                // and `Decimal * Int` / `Int * Decimal` scales exactly. Mixing
+                // with Float, `Decimal {+,-} Int`, and `/` are rejected as R29 in
+                // `check_decimal_binary` (so they never reach lowering/codegen).
+                (Some("Decimal"), Some("Decimal")) if matches!(*op, BinOp::Add | BinOp::Sub | BinOp::Mul) => {
+                    Some("Decimal".into())
+                }
+                (Some("Decimal"), Some("Int")) | (Some("Int"), Some("Decimal")) if matches!(*op, BinOp::Mul) => {
+                    Some("Decimal".into())
+                }
                 (Some("Float"), _) | (_, Some("Float")) => Some("Float".into()),
                 // temporal: `DateTime - DateTime` is the elapsed milliseconds
                 // (Int); shifting a `DateTime` by `Int` ms yields a `DateTime`.
@@ -283,7 +299,15 @@ fn is_tainted(
             }
             false
         }
-        Expr::Call { callee, .. } => *returns_secret.get(callee).unwrap_or(&false),
+        Expr::Call { callee, args } => {
+            // Lowered Decimal arithmetic is pure: it carries taint like the binary
+            // op it replaced, so a secret-derived Decimal stays tainted (keeps R5
+            // sound even on the post-lowering re-analysis in build/serve).
+            if callee.starts_with("__dec_") {
+                return args.iter().any(|a| is_tainted(a, locals, table, returns_secret));
+            }
+            *returns_secret.get(callee).unwrap_or(&false)
+        }
         Expr::Unary { expr, .. } => is_tainted(expr, locals, table, returns_secret),
         Expr::Binary { left, right, .. } => {
             is_tainted(left, locals, table, returns_secret)
@@ -471,7 +495,7 @@ fn check_flow_stmts(
             Stmt::For { var, iter, body } => {
                 check_expr(iter, locals, f.env, &f.name, f.line, table, errors);
                 check_await(iter, false, in_browser, &f.name, f.line, table, errors);
-                let elem = element_type_of(iter, locals, table);
+                let elem = element_type_of(&*iter, locals, table);
                 let mut inner = locals.clone();
                 inner.insert(var.clone(), (elem, false));
                 check_flow_stmts(body, &mut inner, f, table, errors);
@@ -921,7 +945,7 @@ fn check_view(
         ViewNode::For { var, iter, body } => {
             check_screen_expr(iter, locals, sname, sline, table, errors);
             // bind the loop variable to the collection's element type when known.
-            let elem = element_type_of(iter, locals, table);
+            let elem = element_type_of(&*iter, locals, table);
             let mut inner = locals.clone();
             inner.insert(var.clone(), (elem, false));
             for c in body {
@@ -1494,9 +1518,15 @@ fn check_expr(
             }
         }
         Expr::Unary { expr, .. } => check_expr(expr, locals, fn_env, fn_name, fn_line, table, errors),
-        Expr::Binary { left, right, .. } => {
+        Expr::Binary { op, left, right } => {
             check_expr(left, locals, fn_env, fn_name, fn_line, table, errors);
             check_expr(right, locals, fn_env, fn_name, fn_line, table, errors);
+            // R29 (spec 18) — Decimal arithmetic/compare discipline: exact money
+            // never mixes with Float, `+ -` need both sides Decimal (only `*`
+            // scales by an Int), and `/` is deferred (needs a rounding mode).
+            let lt = resolve_type(left, locals, table);
+            let rt = resolve_type(right, locals, table);
+            check_decimal_binary(*op, lt.as_deref(), rt.as_deref(), fn_name, fn_line, errors);
         }
         Expr::Declassify(inner) => {
             if fn_env != EnvModifier::Server {
@@ -2602,4 +2632,323 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     errors.sort_by_key(|e| e.line);
 
     Analysis { errors, returns_secret }
+}
+
+/// R29 (spec 18) — Decimal arithmetic/ordered-compare discipline, checked on the
+/// *original* binary (pre-lowering). Decimal is a string-backed exact money type:
+/// it must never mix with `Float` (the binary-float error this primitive exists
+/// to prevent), `+`/`-` need both sides Decimal (only `*` scales by an `Int`),
+/// ordered/`==` compares need both sides Decimal, and `/` is deferred until a cut
+/// with an explicit rounding mode. `String {+} Decimal` is left alone — that's
+/// display concatenation (Cut 1), not arithmetic.
+fn check_decimal_binary(
+    op: BinOp,
+    lt: Option<&str>,
+    rt: Option<&str>,
+    fn_name: &str,
+    line: usize,
+    errors: &mut Vec<SemanticError>,
+) {
+    let l_dec = lt == Some("Decimal");
+    let r_dec = rt == Some("Decimal");
+    if !l_dec && !r_dec {
+        return; // no Decimal involved — not this rule's concern
+    }
+    // `"Total: " + amount` is display concatenation, not money math. Leave it.
+    if lt == Some("String") || rt == Some("String") {
+        return;
+    }
+    let other = if l_dec { rt } else { lt }.unwrap_or("?");
+    let mut bad = |message: String| errors.push(SemanticError { rule: "R29 decimal", message, line });
+    if lt == Some("Float") || rt == Some("Float") {
+        bad(format!(
+            "Decimal arithmetic in `{}` can't mix with Float — wrap the float with `decimal(...)` (e.g. `decimal(\"1.50\")`). Mixing exact money with binary float is exactly what Decimal prevents.",
+            fn_name
+        ));
+        return;
+    }
+    match op {
+        BinOp::Div => bad(format!(
+            "Decimal division in `{}` isn't supported yet — it needs an explicit rounding mode (half-up vs banker's). This is deferred to a later cut.",
+            fn_name
+        )),
+        BinOp::Add | BinOp::Sub => {
+            if !(l_dec && r_dec) {
+                bad(format!(
+                    "Decimal `{}` in `{}` needs both sides to be Decimal (the other side is `{}`). Only `*` scales a Decimal by an Int; wrap the other operand with `decimal(...)`.",
+                    if matches!(op, BinOp::Add) { "+" } else { "-" }, fn_name, other
+                ));
+            }
+        }
+        BinOp::Mul => {
+            let ok = (l_dec && r_dec)
+                || (l_dec && rt == Some("Int"))
+                || (r_dec && lt == Some("Int"));
+            if !ok {
+                bad(format!(
+                    "Decimal `*` in `{}` takes a Decimal or an Int, got `{}`.",
+                    fn_name, other
+                ));
+            }
+        }
+        BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::Eq | BinOp::NotEq => {
+            if !(l_dec && r_dec) {
+                bad(format!(
+                    "can't compare Decimal with `{}` in `{}` — compare against another Decimal (e.g. `decimal(\"0.00\")`).",
+                    other, fn_name
+                ));
+            }
+        }
+        BinOp::And | BinOp::Or => bad(format!(
+            "a Decimal can't be combined with `&&`/`||` in `{}`.",
+            fn_name
+        )),
+    }
+}
+
+// --------------------------------------------------------- typed lowering
+//
+// Decimal arithmetic desugaring (spec 18). `interp::binary` and codegen's
+// `emit_*` are type-blind — a Decimal is a *string*, so a bare `+`/`<` would
+// concatenate / compare lexicographically. After type-checking succeeds, this
+// pass rewrites Decimal `+ - * < > <= >=` into `__dec_*` builtin calls that every
+// backend emits exactly (the interpreter's `__dec_*` dispatch, the browser's
+// `__dec.*` BigInt runtime, the server's `rust_decimal` helpers). No new
+// `Value`/`Expr` shape, no `emit_*` refactor; the pattern generalizes to any
+// future typed operator. Runs only on a program that already passed `analyze`,
+// so it can assume types resolve and the R29 discipline holds.
+
+/// The `__dec_*` builtin a Decimal binary op lowers to, or `None` to leave the op
+/// as-is (native concat for `String + Decimal`, `==`/`!=`, plain numerics). Only
+/// the legal, R29-passing combinations lower — an `analyze`-rejected program
+/// never reaches here, so this never has to lower a `Decimal {+} Int` etc.
+fn dec_lowering_callee(op: BinOp, lt: Option<&str>, rt: Option<&str>) -> Option<&'static str> {
+    let l = lt == Some("Decimal");
+    let r = rt == Some("Decimal");
+    match op {
+        BinOp::Add if l && r => Some("__dec_add"),
+        BinOp::Sub if l && r => Some("__dec_sub"),
+        BinOp::Mul if (l && r) || (l && rt == Some("Int")) || (r && lt == Some("Int")) => {
+            Some("__dec_mul")
+        }
+        BinOp::Lt if l && r => Some("__dec_lt"),
+        BinOp::Gt if l && r => Some("__dec_gt"),
+        BinOp::LtEq if l && r => Some("__dec_le"),
+        BinOp::GtEq if l && r => Some("__dec_ge"),
+        _ => None,
+    }
+}
+
+/// Rewrite Decimal binary ops to `__dec_*` calls across the whole program. Called
+/// from `main::compile` after `analyze` succeeds, before interp/codegen.
+pub fn lower(program: &mut XeresProgram) {
+    // A read-only symbol table that borrows only the declarations lowering does
+    // NOT mutate (models/enums/states/endpoints). `fns` is owned (`FnSig`) and
+    // `resolve_type` never reads `screens`/`components`, so we can still take
+    // `&mut` to functions/screens below with no borrow conflict.
+    let XeresProgram { models, enums, functions, states, endpoints, screens } = program;
+    let table = SymbolTable {
+        models: models.iter().map(|m| (m.name.clone(), &*m)).collect(),
+        enums: enums.iter().map(|e| (e.name.clone(), &*e)).collect(),
+        fns: functions
+            .iter()
+            .map(|f| (f.name.clone(), FnSig { env: f.env, ret: f.return_type.clone() }))
+            .collect(),
+        states: states.iter().map(|s| (s.name.clone(), &*s)).collect(),
+        components: HashMap::new(),
+        screens: HashMap::new(),
+        endpoints: endpoints.iter().map(|e| (e.name.clone(), &*e)).collect(),
+    };
+
+    for f in functions.iter_mut() {
+        let mut locals: HashMap<String, (Option<String>, bool)> = HashMap::new();
+        for p in &f.params {
+            locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
+        }
+        lower_stmts(&mut f.body, &mut locals, &table);
+    }
+
+    for s in screens.iter_mut() {
+        let mut locals: HashMap<String, (Option<String>, bool)> = HashMap::new();
+        for p in &s.params {
+            locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
+        }
+        for st in &mut s.states {
+            lower_expr(&mut st.init, &locals, &table);
+            locals.insert(st.name.clone(), (Some(st.type_name.clone()), false));
+        }
+        for v in &mut s.body {
+            lower_view(v, &locals, &table);
+        }
+        // `on load` runs as a browser handler with props + state cells in scope.
+        let mut load_locals = locals.clone();
+        lower_stmts(&mut s.load, &mut load_locals, &table);
+    }
+}
+
+fn lower_stmts(
+    stmts: &mut [Stmt],
+    locals: &mut HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+) {
+    for stmt in stmts.iter_mut() {
+        match stmt {
+            Stmt::Let { name, type_ann, value } => {
+                lower_expr(value, locals, table);
+                let ty = type_ann.clone().or_else(|| resolve_type(&*value, locals, table));
+                locals.insert(name.clone(), (ty, false));
+            }
+            Stmt::Assign { value, .. } => lower_expr(value, locals, table),
+            Stmt::Return(e) | Stmt::Expr(e) => lower_expr(e, locals, table),
+            Stmt::Try { body, handler } => {
+                let mut b = locals.clone();
+                lower_stmts(body, &mut b, table);
+                let mut h = locals.clone();
+                lower_stmts(handler, &mut h, table);
+            }
+            Stmt::If { cond, then_body, else_body } => {
+                lower_expr(cond, locals, table);
+                let mut t = locals.clone();
+                lower_stmts(then_body, &mut t, table);
+                let mut e = locals.clone();
+                lower_stmts(else_body, &mut e, table);
+            }
+            Stmt::For { var, iter, body } => {
+                lower_expr(iter, locals, table);
+                let elem = element_type_of(&*iter, locals, table);
+                let mut inner = locals.clone();
+                inner.insert(var.clone(), (elem, false));
+                lower_stmts(body, &mut inner, table);
+            }
+            Stmt::While { cond, body } => {
+                lower_expr(cond, locals, table);
+                let mut inner = locals.clone();
+                lower_stmts(body, &mut inner, table);
+            }
+            Stmt::Match { scrutinee, arms } => {
+                lower_expr(scrutinee, locals, table);
+                for arm in arms.iter_mut() {
+                    let mut inner = locals.clone();
+                    lower_stmts(&mut arm.body, &mut inner, table);
+                }
+            }
+            Stmt::Transaction(body) => {
+                let mut inner = locals.clone();
+                lower_stmts(body, &mut inner, table);
+            }
+            Stmt::Break | Stmt::Continue => {}
+        }
+    }
+}
+
+fn lower_expr(
+    expr: &mut Expr,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+) {
+    match expr {
+        Expr::Binary { op, left, right } => {
+            let op = *op;
+            // Bottom-up: lower the operands first, so a nested `(a + b) * c`
+            // resolves the inner result as Decimal (via the `__dec_*` typing in
+            // `resolve_type`) before this level decides.
+            lower_expr(left, locals, table);
+            lower_expr(right, locals, table);
+            let lt = resolve_type(&**left, locals, table);
+            let rt = resolve_type(&**right, locals, table);
+            if let Some(callee) = dec_lowering_callee(op, lt.as_deref(), rt.as_deref()) {
+                let l = std::mem::replace(left.as_mut(), Expr::NoneLit);
+                let r = std::mem::replace(right.as_mut(), Expr::NoneLit);
+                *expr = Expr::Call { callee: callee.to_string(), args: vec![l, r] };
+            }
+        }
+        Expr::Field { base, .. } => lower_expr(base, locals, table),
+        Expr::Call { args, .. } => {
+            for a in args.iter_mut() {
+                lower_expr(a, locals, table);
+            }
+        }
+        Expr::Unary { expr: inner, .. } => lower_expr(inner, locals, table),
+        Expr::Declassify(inner) | Expr::Raw(inner) | Expr::Await(inner) => {
+            lower_expr(inner, locals, table)
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            lower_expr(receiver, locals, table);
+            for a in args.iter_mut() {
+                lower_expr(a, locals, table);
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for (_, v) in fields.iter_mut() {
+                lower_expr(v, locals, table);
+            }
+        }
+        Expr::ListLit(items) => {
+            for it in items.iter_mut() {
+                lower_expr(it, locals, table);
+            }
+        }
+        Expr::Ternary { cond, then, otherwise } => {
+            lower_expr(cond, locals, table);
+            lower_expr(then, locals, table);
+            lower_expr(otherwise, locals, table);
+        }
+        Expr::Range { start, end } => {
+            lower_expr(start, locals, table);
+            lower_expr(end, locals, table);
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
+        | Expr::NoneLit => {}
+    }
+}
+
+fn lower_view(
+    v: &mut ViewNode,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+) {
+    match v {
+        ViewNode::Element { arg, style, event, children, .. } => {
+            if let Some(a) = arg {
+                lower_expr(a, locals, table);
+            }
+            if let Some(st) = style {
+                lower_expr(st, locals, table);
+            }
+            match event {
+                Some(Handler::Call(e)) => lower_expr(e, locals, table),
+                Some(Handler::Block(stmts)) => {
+                    let mut inner = locals.clone();
+                    lower_stmts(stmts, &mut inner, table);
+                }
+                None => {}
+            }
+            for c in children.iter_mut() {
+                lower_view(c, locals, table);
+            }
+        }
+        ViewNode::For { var, iter, body } => {
+            lower_expr(iter, locals, table);
+            let elem = element_type_of(&*iter, locals, table);
+            let mut inner = locals.clone();
+            inner.insert(var.clone(), (elem, false));
+            for c in body.iter_mut() {
+                lower_view(c, &inner, table);
+            }
+        }
+        ViewNode::If { cond, then_body, else_body } => {
+            lower_expr(cond, locals, table);
+            for c in then_body.iter_mut() {
+                lower_view(c, locals, table);
+            }
+            for c in else_body.iter_mut() {
+                lower_view(c, locals, table);
+            }
+        }
+        ViewNode::Component { args, .. } => {
+            for (_, v) in args.iter_mut() {
+                lower_expr(v, locals, table);
+            }
+        }
+    }
 }

@@ -1,7 +1,8 @@
-// Decimal money primitive (v0.5.3) — exact, string-backed money kept distinct
-// from Float so it can never silently inherit binary-float error.
-// Cut 1: construct with decimal(".."), display, and == compare.
-// (Arithmetic and ordered comparison are a Cut-2 follow-up.)
+// Decimal money primitive — exact, string-backed money kept distinct from Float
+// so it can never silently inherit binary-float error.
+//   Cut 1 (v0.5.3): construct with decimal(".."), display, and == compare.
+//   Cut 2 (spec 18): arithmetic `+ - *` and ordered compare `< > <= >=` — exact
+//   money math, never routed through f64.
 model Invoice {
   id: String
   total: Decimal
@@ -11,14 +12,25 @@ server fn new_invoice(total: Decimal) -> Invoice {
   return Invoice { id: uid(), total: total }
 }
 
+// Exact line total: scaling a Decimal price by an Int quantity is exact (only `*`
+// mixes Decimal with Int). Server-tier math runs on rust_decimal.
+server fn line_total(price: Decimal, qty: Int) -> Decimal {
+  return price * qty
+}
+
 ui screen Cart {
-  state subtotal: Decimal = decimal("19.99")
+  state subtotal: Decimal = decimal("0.00")
   state note: String = ""
   view {
     column {
       text "Total: $" + subtotal
-      button "settle" -> {
-        if subtotal == decimal("0.00") { note = "Nothing to pay." } else { note = "Charging your card." }
+      button "add $19.99" -> {
+        subtotal = subtotal + decimal("19.99")
+        if subtotal > decimal("100.00") { note = "Over budget." } else { note = "Charging your card." }
+      }
+      button "reset" -> {
+        subtotal = decimal("0.00")
+        note = ""
       }
       text note
     }

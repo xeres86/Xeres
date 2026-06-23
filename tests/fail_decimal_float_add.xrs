@@ -1,0 +1,7 @@
+// R29 (spec 18) — Decimal `+` can't mix with Float: exact money must never be
+// pulled onto binary floating point (the whole point of the Decimal type). Wrap
+// the Float with decimal(...) instead.
+server fn bad(price: Decimal, tax: Float) -> Decimal {
+  let total = price + tax
+  return price
+}

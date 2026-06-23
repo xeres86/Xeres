@@ -150,6 +150,24 @@ impl<'a> Interp<'a> {
             // over its (already-string) argument (the checker enforces R29).
             return Ok(args.into_iter().next().unwrap_or(Value::Null));
         }
+        if let Some(op) = fn_name.strip_prefix("__dec_") {
+            // Lowered Decimal arithmetic / ordered comparison: the checker's typed
+            // desugaring rewrites Decimal `+ - * < > <= >=` into these. Operands
+            // arrive as decimal strings (or an `Int` for `Decimal * Int`).
+            let a = dec_str(args.first())?;
+            let b = dec_str(args.get(1))?;
+            use std::cmp::Ordering;
+            return match op {
+                "add" => Ok(Value::Str(dec_add(&a, &b)?)),
+                "sub" => Ok(Value::Str(dec_sub(&a, &b)?)),
+                "mul" => Ok(Value::Str(dec_mul(&a, &b)?)),
+                "lt" => Ok(Value::Bool(dec_cmp(&a, &b)? == Ordering::Less)),
+                "gt" => Ok(Value::Bool(dec_cmp(&a, &b)? == Ordering::Greater)),
+                "le" => Ok(Value::Bool(dec_cmp(&a, &b)? != Ordering::Greater)),
+                "ge" => Ok(Value::Bool(dec_cmp(&a, &b)? != Ordering::Less)),
+                _ => Err(format!("unknown decimal op `{}`", op)),
+            };
+        }
         if matches!(fn_name, "abs" | "min" | "max") {
             return math_fn(fn_name, &args);
         }
@@ -676,6 +694,85 @@ fn as_num(v: &Value) -> Option<f64> {
     }
 }
 
+// ---- exact decimal arithmetic (R29 / spec 18) -----------------------------
+// Decimal stays a string end-to-end; the checker's typed desugaring rewrites
+// `+ - * < > <= >=` on Decimals into `__dec_*` builtin calls handled here. Math
+// is exact (scaled i128), never f64 — that is the whole point of Decimal.
+
+/// Parse "12.34" / "-5" into a signed integer scaled by its own fractional
+/// length, plus that scale: "12.34" -> (1234, 2), "-5" -> (-5, 0).
+fn dec_parse(s: &str) -> Option<(i128, u32)> {
+    let s = s.trim();
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (int_part, frac_part) = s.split_once('.').unwrap_or((s, ""));
+    let digits = format!("{}{}", int_part, frac_part);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mag: i128 = digits.parse().ok()?;
+    Some((if neg { -mag } else { mag }, frac_part.len() as u32))
+}
+
+/// Rescale a value from `from` fractional digits up to `to` (>= from).
+fn dec_rescale(v: i128, from: u32, to: u32) -> i128 {
+    v * 10i128.pow(to - from)
+}
+
+/// Format a signed scaled value back to a decimal string.
+fn dec_format(value: i128, scale: u32) -> String {
+    let neg = value < 0;
+    let s = value.unsigned_abs().to_string();
+    let body = if scale == 0 {
+        s
+    } else {
+        let scale = scale as usize;
+        let s = if s.len() <= scale { format!("{:0>w$}", s, w = scale + 1) } else { s };
+        let dot = s.len() - scale;
+        format!("{}.{}", &s[..dot], &s[dot..])
+    };
+    if neg { format!("-{}", body) } else { body }
+}
+
+fn dec_add(a: &str, b: &str) -> Result<String, String> {
+    let (av, asc) = dec_parse(a).ok_or("invalid Decimal")?;
+    let (bv, bsc) = dec_parse(b).ok_or("invalid Decimal")?;
+    let sc = asc.max(bsc);
+    Ok(dec_format(dec_rescale(av, asc, sc) + dec_rescale(bv, bsc, sc), sc))
+}
+
+fn dec_sub(a: &str, b: &str) -> Result<String, String> {
+    let (av, asc) = dec_parse(a).ok_or("invalid Decimal")?;
+    let (bv, bsc) = dec_parse(b).ok_or("invalid Decimal")?;
+    let sc = asc.max(bsc);
+    Ok(dec_format(dec_rescale(av, asc, sc) - dec_rescale(bv, bsc, sc), sc))
+}
+
+fn dec_mul(a: &str, b: &str) -> Result<String, String> {
+    let (av, asc) = dec_parse(a).ok_or("invalid Decimal")?;
+    let (bv, bsc) = dec_parse(b).ok_or("invalid Decimal")?;
+    Ok(dec_format(av * bv, asc + bsc))
+}
+
+fn dec_cmp(a: &str, b: &str) -> Result<std::cmp::Ordering, String> {
+    let (av, asc) = dec_parse(a).ok_or("invalid Decimal")?;
+    let (bv, bsc) = dec_parse(b).ok_or("invalid Decimal")?;
+    let sc = asc.max(bsc);
+    Ok(dec_rescale(av, asc, sc).cmp(&dec_rescale(bv, bsc, sc)))
+}
+
+/// Coerce a builtin arg to a decimal string (`Decimal` is `Value::Str`; an `Int`
+/// operand of `Decimal * Int` arrives as `Value::Int`).
+fn dec_str(v: Option<&Value>) -> Result<String, String> {
+    match v {
+        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Int(n)) => Ok(n.to_string()),
+        other => Err(format!("decimal op needs a Decimal/Int, got {:?}", other)),
+    }
+}
+
 fn values_eq(l: &Value, r: &Value) -> bool {
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => a == b,
@@ -999,6 +1096,64 @@ mod tests {
             screens: vec![],
             endpoints: vec![],
         }
+    }
+
+    // Exact decimal arithmetic — never f64 (spec 18 / R29).
+    #[test]
+    fn decimal_arithmetic_is_exact() {
+        assert_eq!(dec_add("1.50", "2.50").unwrap(), "4.00");
+        assert_eq!(dec_add("0.1", "0.2").unwrap(), "0.3"); // no binary-float drift
+        assert_eq!(dec_sub("5.00", "1.25").unwrap(), "3.75");
+        assert_eq!(dec_mul("19.99", "2").unwrap(), "39.98"); // Decimal * Int
+        assert_eq!(dec_mul("1.5", "3").unwrap(), "4.5");
+        assert_eq!(dec_add("-1.5", "0.5").unwrap(), "-1.0");
+    }
+
+    // Ordered comparison is numeric, not the lexicographic compare a raw string
+    // would give ("10.00" must be > "9.99", though '1' < '9' as text).
+    #[test]
+    fn decimal_compare_is_numeric() {
+        use std::cmp::Ordering;
+        assert_eq!(dec_cmp("10.00", "9.99").unwrap(), Ordering::Greater);
+        assert_eq!(dec_cmp("1.5", "1.50").unwrap(), Ordering::Equal);
+        assert_eq!(dec_cmp("0.30", "0.3").unwrap(), Ordering::Equal);
+    }
+
+    // End-to-end (spec 18): real source → analyze → lower → interp `call`. Proves
+    // the checker's typed desugaring of Decimal `+ - * >` and the interpreter's
+    // `__dec_*` dispatch agree with the exact-math core — the same cases the
+    // rust_decimal (server) and BigInt (browser) backends are verified against.
+    #[test]
+    fn decimal_arithmetic_runs_end_to_end() {
+        let src = "\
+server fn line_total(price: Decimal, qty: Int) -> Decimal { return price * qty }\n\
+server fn running(subtotal: Decimal, line: Decimal) -> Decimal { return subtotal + line }\n\
+server fn change(paid: Decimal, due: Decimal) -> Decimal { return paid - due }\n\
+server fn over(total: Decimal, limit: Decimal) -> Bool { return total > limit }\n";
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let mut parser = crate::parser::Parser::new(&mut lexer);
+        let mut program = parser.parse_program();
+        let analysis = crate::checker::analyze(&program);
+        assert!(
+            analysis.errors.is_empty(),
+            "unexpected errors: {:?}",
+            analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        crate::checker::lower(&mut program);
+        let interp = Interp::with_session(&program, None);
+
+        // Decimal * Int — exact integer scaling, Int arg coerced via dec_str.
+        let r = interp.call("line_total", vec![Value::Str("19.99".into()), Value::Int(2)]).unwrap();
+        assert!(matches!(&r, Value::Str(s) if s == "39.98"), "line_total => {:?}", r);
+        // Decimal + Decimal — no binary-float drift.
+        let r = interp.call("running", vec![Value::Str("0.1".into()), Value::Str("0.2".into())]).unwrap();
+        assert!(matches!(&r, Value::Str(s) if s == "0.3"), "running => {:?}", r);
+        // Decimal - Decimal.
+        let r = interp.call("change", vec![Value::Str("5.00".into()), Value::Str("1.25".into())]).unwrap();
+        assert!(matches!(&r, Value::Str(s) if s == "3.75"), "change => {:?}", r);
+        // Ordered compare → Bool, numeric not lexicographic.
+        let r = interp.call("over", vec![Value::Str("10.00".into()), Value::Str("9.99".into())]).unwrap();
+        assert!(matches!(r, Value::Bool(true)), "over => {:?}", r);
     }
 
     // `session.actor.or("")` — `.or` on a present Optional<String>.

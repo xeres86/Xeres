@@ -179,7 +179,8 @@ expression-level closures — a later addition.)
 
 Enums (string-backed) pair with `match` — exhaustiveness is compiler-checked
 (**R20**), a `DateTime` (epoch ms) + `now()`, and a `Decimal` (exact,
-string-backed money via `decimal("19.99")` — never mixed with `Float`, **R29**)
+string-backed money via `decimal("19.99")` — never mixed with `Float`, **R29**;
+arithmetic `+ - *` and ordered compare `< > <= >=` are exact, never via `f64`)
 round out the primitives:
 
 ```xeres
@@ -473,7 +474,7 @@ Every program is checked against these. A violation is a compile error.
 | **R19** auth-builtin | `hash()` / `verify()` are server-only (no client-side hashing; the secret hash is compared on the server) |
 | **R20** match | a `match` scrutinee is an enum, each arm is a real variant, and the arms are exhaustive (all variants, or `_`); `Enum.Variant` must exist |
 | **R28** navigation | `navigate(X)` / `link … -> X` targets a known, prop-less, non-component screen (a route can't supply props); the imperative `navigate(...)` is browser-only |
-| **R29** decimal | `decimal(...)` takes exactly one `String` (money is written as a string, e.g. `decimal("19.99")`); `Decimal` is never assignable to/from `Float`/`Int`, so binary-float error can't leak into money math |
+| **R29** decimal | `decimal(...)` takes exactly one `String` (money is written as a string, e.g. `decimal("19.99")`); `Decimal` is never assignable to/from `Float`/`Int`, so binary-float error can't leak into money math. Arithmetic `+ - *` and ordered compare `< > <= >=` are exact (scaled-integer, never `f64`); `Decimal × Int` scales exactly, but `Decimal` with `Float`, `Decimal ± Int`, and `/` (rounding-mode, deferred) are compile errors |
 | **R30** raw-taint | `raw(...)` (the audited un-escaped HTML sink) may not wrap untrusted *inbound* data — a screen/component prop or an input-bound `state`. Render it with default escaping, or build the trusted HTML in a `server fn` and `await` it into a non-bound `state`. Closes reflected XSS |
 | **R31** auth-route | `auth ui screen X` is a protected route — needs a session (some fn calls `session.login`), can't be a component, and the default route must stay public. Unauthenticated requests are bounced to `/` on **both** tiers (client router + server shell guard) |
 | **R32** route-param | `ui screen Post(id: String) route "/post/:id"` — each `:name` segment binds a `String`/`Int` prop (every prop bound, ≥1 param). The param is untrusted (R30 applies), and a param route is navigated with all params: `navigate(Post { id: x })` |

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.13 — 2026-06-23 — `Decimal` Cut 2: exact arithmetic + ordered comparison (spec 18)
+
+`Decimal` (v0.5.3) could be constructed, displayed, and `==`-compared, but not
+*computed* — `price * qty` and `subtotal + line` didn't type-check. This cut makes
+`Decimal` a usable money type with **exact** arithmetic and ordered comparison,
+never routed through binary `f64`.
+
+- **Arithmetic + ordered comparison** — `Decimal + Decimal`, `Decimal - Decimal`,
+  `Decimal * Decimal`, and `Decimal * Int` / `Int * Decimal` (exact integer
+  scaling) now type-check and compute exactly, as do the ordered compares
+  `< > <= >=`. Extends **R29** — no new rule.
+- **Typed desugaring (the mechanism)** — both the interpreter's binary-op site and
+  codegen's expression emitters are type-blind (a `Decimal` is a `String`, so a
+  bare `+` would *concatenate* and `<` compare *lexicographically*). After
+  type-checking, a new pass in the checker rewrites Decimal `+ - * < > <= >=` into
+  explicit `__dec_*` builtin calls that every backend emits directly — no new
+  value/AST shape, and the pattern generalizes to any future typed operator.
+- **Exact on every backend, verified to the cent** — interpreter: a scaled-`i128`
+  core (never `f64`); server (ejected): `rust_decimal` helpers behind a new,
+  default-on `decimal` cargo feature; browser: a zero-dependency BigInt
+  fixed-point runtime. All three are unit/parity-tested against the same cases
+  (e.g. `0.1 + 0.2 == 0.3`, `19.99 * 2 == 39.98`, `10.00 > 9.99`).
+- **Still a compile error (R29):** mixing `Decimal` with `Float`, `Decimal ± Int`
+  (ambiguous — only `*` scales a Decimal by an Int), and `Decimal` *division* (it
+  needs an explicit rounding mode — deferred to a later cut). `Decimal == Decimal`
+  and `String + Decimal` display concatenation are unchanged (Cut 1).
+- Fixtures `pass_decimal_arith` / `fail_decimal_float_add` / `fail_decimal_div`,
+  interpreter unit + end-to-end tests, and `examples/cart.xrs` now computes a
+  running subtotal.
+
 ## 0.5.12 — 2026-06-18 — fix: interpreter `.or` on a present Optional; dev RPC error logging
 
 - **Fix (interpreter):** `optional.or(default)` on a *present* `Optional<String>`

@@ -130,8 +130,8 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   money via `decimal("19.99")`, type-distinct from `Float` so binary-float error
   can't leak into money math. Cut 1: construct, display (string concat), and
   `==`/`!=`; usable in model fields, RPC args, DB columns; both run modes
-  (`Decimal` ⇒ a `String` on the wire/DB). **Arithmetic + ordered comparison are
-  a deliberate Cut-2 follow-up** (see Later). Rules now span **R1–R29**.
+  (`Decimal` ⇒ a `String` on the wire/DB). **Cut 2 (below) adds arithmetic +
+  ordered comparison.** Rules now span **R1–R29**.
 - ~~**Typed numeric inputs (`number`)**~~ ✅ done (v0.5.4) — a `number` control
   binds an `Int`/`Float` `state` cell directly (`<input type="number">`; runtime
   coerces via `valueAsNumber`, empty → `0`), so a numeric field yields a number,
@@ -145,11 +145,15 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
 - Light touch: `cargo audit` in CI.
 
 ## Later
-- **`Decimal` Cut 2** — arithmetic (`+ - *`) and ordered comparison (`< > <=
-  >=`): server-side via the `rust_decimal` crate behind a new `decimal` cargo
-  feature, browser-side a tiny fixed-point helper. `Decimal × Int → Decimal`,
-  `Decimal ± Decimal → Decimal`; `Decimal` with `Float` stays a compile error.
-  Plus a `9.99d` literal, currency/locale formatting, and rounding modes.
+- ~~**`Decimal` Cut 2** — arithmetic (`+ - *`) and ordered comparison (`< > <=
+  >=`)~~ ✅ done (spec 18) — a typed-desugaring pass rewrites Decimal
+  `+ - * < > <= >=` into `__dec_*` builtin calls that every backend emits exactly:
+  server via `rust_decimal` behind a new `decimal` cargo feature, browser via a
+  zero-dep BigInt fixed-point runtime, interpreter via a scaled-`i128` core — all
+  three verified to agree to the cent. `Decimal × Int → Decimal`,
+  `Decimal ± Decimal → Decimal`; `Decimal` with `Float`, `Decimal ± Int`, and `/`
+  stay compile errors (**R29**, no new rule). **Still deferred:** division +
+  rounding modes (half-up/banker's), a `9.99d` literal, currency/locale formatting.
 - TLS follow-ups: HTTP→HTTPS redirect listener, ACME/Let's Encrypt automation,
   and HTTP/2 (v0.5.2 ships TLS termination; these were explicitly out of scope).
 - ~~`enum`s~~ ✅ (R20); the `Tainted`/information-flow layer — **cut 1 shipped as

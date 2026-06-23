@@ -1,0 +1,34 @@
+// spec 18 — Decimal arithmetic (Cut 2): `+ - *` and ordered compare `< > <= >=`,
+// exact money that never touches f64. Decimal stays distinct from Float (see the
+// fail_decimal_* fixtures); only `*` mixes with an Int (exact integer scaling).
+// String + Decimal stays display concatenation, not arithmetic.
+server fn line_total(price: Decimal, qty: Int) -> Decimal {
+  return price * qty
+}
+
+server fn running_total(subtotal: Decimal, line: Decimal) -> Decimal {
+  return subtotal + line
+}
+
+server fn change(paid: Decimal, due: Decimal) -> Decimal {
+  return paid - due
+}
+
+server fn affordable(total: Decimal, budget: Decimal) -> Bool {
+  return total <= budget
+}
+
+ui screen Cart {
+  state subtotal: Decimal = decimal("0.00")
+  state note: String = ""
+  view {
+    column {
+      text "Total: $" + subtotal
+      button "add item" -> {
+        subtotal = subtotal + decimal("19.99")
+        if subtotal > decimal("100.00") { note = "Over budget" } else { note = "Keep shopping" }
+      }
+      text note
+    }
+  }
+}
