@@ -1,0 +1,6 @@
+// R21 (spec 19) — a `filter` predicate must return Bool; `u.name` is a String.
+model User { id: String  name: String }
+
+server fn bad(users: List<User>) -> List<User> {
+  return users.filter(u -> u.name)
+}

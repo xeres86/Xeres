@@ -1,0 +1,5 @@
+// R21 (spec 19) — `reduce`'s body must have the same type as its `init`: here
+// `init` is Int but the closure body yields a String.
+server fn bad(xs: List<Int>) -> Int {
+  return xs.reduce(0, (acc, x) -> "oops")
+}

@@ -209,7 +209,7 @@ fn resolve_type(
         Expr::Declassify(inner) => resolve_type(inner, locals, table),
         Expr::Raw(inner) => resolve_type(inner, locals, table),
         Expr::Await(inner) => resolve_type(inner, locals, table),
-        Expr::MethodCall { receiver, method, args: _ } => {
+        Expr::MethodCall { receiver, method, args } => {
             if let Expr::Ident(name) = receiver.as_ref() {
                 // `db.exec` returns affected-row count; `db.query_one` is typed
                 // by the surrounding fn's return model (resolved in codegen).
@@ -247,6 +247,27 @@ fn resolve_type(
                         "length" => return Some("Int".into()),
                         "first" | "last" | "at" => return Some(format!("Optional<{}>", elem)),
                         "reverse" => return Some(format!("List<{}>", elem)),
+                        // Higher-order ops (spec 19). `map` binds the closure
+                        // param to the element type and the result element type is
+                        // the body's; `filter` keeps `List<T>`; `reduce` is the
+                        // type of its `init`; `contains` is Bool.
+                        "filter" => return Some(format!("List<{}>", elem)),
+                        "contains" => return Some("Bool".into()),
+                        "map" => {
+                            if let Some(Expr::Closure { params, body }) = args.first() {
+                                if params.len() == 1 {
+                                    let mut inner = locals.clone();
+                                    inner.insert(params[0].clone(), (Some(elem.clone()), false));
+                                    if let Some(u) = resolve_type(body, &inner, table) {
+                                        return Some(format!("List<{}>", u));
+                                    }
+                                }
+                            }
+                            return None;
+                        }
+                        "reduce" => {
+                            return args.first().and_then(|init| resolve_type(init, locals, table));
+                        }
                         _ => {}
                     }
                 }
@@ -274,6 +295,14 @@ fn resolve_type(
         }
         // `a..b` yields a sequence of Int (so `for i in 0..n` binds `i: Int`).
         Expr::Range { .. } => Some("List<Int>".into()),
+        // A closure has no first-class type in Cut 1 (argument-only); its body's
+        // type is resolved in context by the higher-order op above.
+        Expr::Closure { .. } => None,
+        // `xs[i]` is `.at(i)` sugar → `Optional<T>` (miss ⇒ `none`).
+        Expr::Index { base, .. } => {
+            let bt = resolve_type(base, locals, table)?;
+            generic_inner("List", &bt).map(|elem| format!("Optional<{}>", elem))
+        }
     }
 }
 
@@ -339,6 +368,12 @@ fn is_tainted(
             is_tainted(start, locals, table, returns_secret)
                 || is_tainted(end, locals, table, returns_secret)
         }
+        // A closure's body taint (best-effort; the param isn't tracked here, but
+        // R3 already blocks reading a secret in a non-server closure body, so a
+        // secret can't enter a non-server closure to begin with). An index into a
+        // tainted list yields a tainted element.
+        Expr::Closure { body, .. } => is_tainted(body, locals, table, returns_secret),
+        Expr::Index { base, .. } => is_tainted(base, locals, table, returns_secret),
     }
 }
 
@@ -812,8 +847,21 @@ fn raw_walk_expr(e: &Expr, tainted: &HashSet<String>, s: &ScreenNode, errors: &m
         Expr::Await(inner) => raw_walk_expr(inner, tainted, s, errors),
         Expr::MethodCall { receiver, args, .. } => {
             raw_walk_expr(receiver, tainted, s, errors);
+            // A closure over an untrusted list (e.g. `tags.map(t -> raw(t))` on a
+            // tainted prop) makes its element param untrusted too (R30, spec 19).
+            let recv_tainted = expr_untrusted(receiver, tainted);
             for a in args {
-                raw_walk_expr(a, tainted, s, errors);
+                if let Expr::Closure { params, body } = a {
+                    let mut inner = tainted.clone();
+                    if recv_tainted {
+                        for p in params {
+                            inner.insert(p.clone());
+                        }
+                    }
+                    raw_walk_expr(body, &inner, s, errors);
+                } else {
+                    raw_walk_expr(a, tainted, s, errors);
+                }
             }
         }
         Expr::Call { args, .. } => {
@@ -821,6 +869,13 @@ fn raw_walk_expr(e: &Expr, tainted: &HashSet<String>, s: &ScreenNode, errors: &m
                 raw_walk_expr(a, tainted, s, errors);
             }
         }
+        Expr::Index { base, index } => {
+            raw_walk_expr(base, tainted, s, errors);
+            raw_walk_expr(index, tainted, s, errors);
+        }
+        // A bare closure outside a method arg (rejected by the checker) — still
+        // scan its body so a `raw(...)` sink isn't missed.
+        Expr::Closure { body, .. } => raw_walk_expr(body, tainted, s, errors),
         Expr::Record { fields, .. } => {
             for (_, v) in fields {
                 raw_walk_expr(v, tainted, s, errors);
@@ -867,6 +922,11 @@ fn expr_untrusted(e: &Expr, tainted: &HashSet<String>) -> bool {
             expr_untrusted(cond, tainted) || expr_untrusted(then, tainted) || expr_untrusted(otherwise, tainted)
         }
         Expr::Range { start, end } => expr_untrusted(start, tainted) || expr_untrusted(end, tainted),
+        // An element of an untrusted list is untrusted (`xs[i]`, and the closure
+        // param when the receiver is untrusted — the latter is bound in
+        // `raw_walk_expr`'s closure descent).
+        Expr::Index { base, .. } => expr_untrusted(base, tainted),
+        Expr::Closure { body, .. } => expr_untrusted(body, tainted),
         // Laundered / clean: the audited downgrade, server-derived awaits, fn
         // results (not tracked as untrusted in this cut), and literals.
         Expr::Declassify(_) | Expr::Await(_) | Expr::Call { .. } => false,
@@ -1359,6 +1419,18 @@ fn check_bindings(
             check_bindings(start, locals, sname, sline, table, errors);
             check_bindings(end, locals, sname, sline, table, errors);
         }
+        // A closure's params are in scope for its body (spec 19).
+        Expr::Closure { params, body } => {
+            let mut inner = locals.clone();
+            for p in params {
+                inner.insert(p.clone(), (None, false));
+            }
+            check_bindings(body, &inner, sname, sline, table, errors);
+        }
+        Expr::Index { base, index } => {
+            check_bindings(base, locals, sname, sline, table, errors);
+            check_bindings(index, locals, sname, sline, table, errors);
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::NoneLit => {}
     }
 }
@@ -1546,6 +1618,17 @@ fn check_expr(
         // downgrade) — just check the inner expression.
         Expr::Raw(inner) => check_expr(inner, locals, fn_env, fn_name, fn_line, table, errors),
         Expr::MethodCall { receiver, method, args } => {
+            // Higher-order list ops (spec 19): the closure arg is checked with its
+            // param bound to the element type, so the whole call is handled here —
+            // the generic arg recursion below would mis-check the closure body (and
+            // a closure reaching `check_expr` any other way is rejected, R8-style).
+            if is_list_higher_order(receiver, method, locals, table) {
+                check_expr(receiver, locals, fn_env, fn_name, fn_line, table, errors);
+                check_list_higher_order(
+                    receiver, method, args, locals, fn_env, fn_name, fn_line, table, errors,
+                );
+                return;
+            }
             // `db.*` / `session.*` are server-only capabilities; everything else
             // is a synced-collection method. (Don't recurse into the capability
             // ident as a value.)
@@ -1653,6 +1736,42 @@ fn check_expr(
         Expr::Range { start, end } => {
             check_expr(start, locals, fn_env, fn_name, fn_line, table, errors);
             check_expr(end, locals, fn_env, fn_name, fn_line, table, errors);
+        }
+        // A closure reaching here is NOT a direct higher-order argument (those are
+        // handled in the MethodCall arm above) — reject it (spec 19: argument-only).
+        Expr::Closure { .. } => {
+            errors.push(SemanticError {
+                rule: "R21 stdlib",
+                message: format!(
+                    "a closure (`x -> …`) in `{}` may only be passed directly to `map`, `filter`, or `reduce` on a list — it can't be stored, returned, or used elsewhere in this cut.",
+                    fn_name
+                ),
+                line: fn_line,
+            });
+        }
+        // `xs[i]` index sugar (spec 19) → `Optional<T>`; the index must be `Int`.
+        Expr::Index { base, index } => {
+            check_expr(base, locals, fn_env, fn_name, fn_line, table, errors);
+            check_expr(index, locals, fn_env, fn_name, fn_line, table, errors);
+            if let Some(t) = resolve_type(index, locals, table) {
+                if t != "Int" {
+                    errors.push(SemanticError {
+                        rule: "R21 stdlib",
+                        message: format!("list index `[i]` in `{}` must be `Int`, got `{}`.", fn_name, t),
+                        line: fn_line,
+                    });
+                }
+            }
+            // Guard against indexing a non-list (when the base type is known).
+            if let Some(bt) = resolve_type(base, locals, table) {
+                if generic_inner("List", &bt).is_none() {
+                    errors.push(SemanticError {
+                        rule: "R21 stdlib",
+                        message: format!("`[i]` indexing in `{}` needs a list, got `{}`.", fn_name, bt),
+                        line: fn_line,
+                    });
+                }
+            }
         }
     }
 }
@@ -2072,6 +2191,108 @@ fn check_list_method(
     }
 }
 
+/// Is this a higher-order list op (spec 19)? `map`/`filter`/`reduce` take a
+/// closure; `contains` takes a value. All require a `List<T>` receiver (so a
+/// `String.contains` still routes to the String stdlib).
+fn is_list_higher_order(
+    receiver: &Expr,
+    method: &str,
+    locals: &HashMap<String, (Option<String>, bool)>,
+    table: &SymbolTable,
+) -> bool {
+    matches!(method, "map" | "filter" | "reduce" | "contains")
+        && resolve_type(receiver, locals, table)
+            .as_deref()
+            .and_then(|t| generic_inner("List", t))
+            .is_some()
+}
+
+/// Higher-order list ops (spec 19), reusing R21 ("stdlib", no new rule). The
+/// closure body is checked in the *enclosing fn's environment* with its param(s)
+/// bound to the element/accumulator type — so the tier/secret rules (R3/R4/R5)
+/// propagate into the body for free (a `ui` body still can't read a secret, etc.).
+#[allow(clippy::too_many_arguments)]
+fn check_list_higher_order(
+    receiver: &Expr,
+    method: &str,
+    args: &[Expr],
+    locals: &HashMap<String, (Option<String>, bool)>,
+    fn_env: EnvModifier,
+    fn_name: &str,
+    fn_line: usize,
+    table: &SymbolTable,
+    errors: &mut Vec<SemanticError>,
+) {
+    let elem = match resolve_type(receiver, locals, table)
+        .as_deref()
+        .and_then(|t| generic_inner("List", t).map(str::to_string))
+    {
+        Some(e) => e,
+        None => return, // unresolved element type — leave to R1
+    };
+    let mk = |message: String| SemanticError { rule: "R21 stdlib", message, line: fn_line };
+    match method {
+        "map" | "filter" => match args {
+            [Expr::Closure { params, body }] if params.len() == 1 => {
+                let mut inner = locals.clone();
+                inner.insert(params[0].clone(), (Some(elem.clone()), false));
+                check_expr(body, &inner, fn_env, fn_name, fn_line, table, errors);
+                if method == "filter" {
+                    if let Some(t) = resolve_type(body, &inner, table) {
+                        if t != "Bool" {
+                            errors.push(mk(format!(
+                                "`filter`'s predicate in `{}` must return Bool, got `{}`.",
+                                fn_name, t
+                            )));
+                        }
+                    }
+                }
+            }
+            _ => errors.push(mk(format!(
+                "`{}` in `{}` takes exactly one closure, e.g. `xs.{}(x -> …)`.",
+                method, fn_name, method
+            ))),
+        },
+        "reduce" => match args {
+            [init, Expr::Closure { params, body }] if params.len() == 2 => {
+                check_expr(init, locals, fn_env, fn_name, fn_line, table, errors);
+                let u = resolve_type(init, locals, table);
+                let mut inner = locals.clone();
+                inner.insert(params[0].clone(), (u.clone(), false)); // acc: U
+                inner.insert(params[1].clone(), (Some(elem.clone()), false)); // x: T
+                check_expr(body, &inner, fn_env, fn_name, fn_line, table, errors);
+                if let (Some(ut), Some(bt)) = (u, resolve_type(body, &inner, table)) {
+                    if !type_compatible(&bt, &ut) {
+                        errors.push(mk(format!(
+                            "`reduce` body in `{}` must match the init type `{}`, got `{}`.",
+                            fn_name, ut, bt
+                        )));
+                    }
+                }
+            }
+            _ => errors.push(mk(format!(
+                "`reduce` in `{}` takes `(init, (acc, x) -> …)`.",
+                fn_name
+            ))),
+        },
+        "contains" => match args {
+            [needle] => {
+                check_expr(needle, locals, fn_env, fn_name, fn_line, table, errors);
+                if let Some(t) = resolve_type(needle, locals, table) {
+                    if !type_compatible(&t, &elem) && !type_compatible(&elem, &t) {
+                        errors.push(mk(format!(
+                            "`contains` in `{}` expects `{}` (the element type), got `{}`.",
+                            fn_name, elem, t
+                        )));
+                    }
+                }
+            }
+            _ => errors.push(mk(format!("`contains` in `{}` takes exactly one value.", fn_name))),
+        },
+        _ => {}
+    }
+}
+
 /// R12 — method calls are only on `synced` collections, and only client-side.
 /// `add(row)` takes the element type; `remove(id)` takes a String.
 #[allow(clippy::too_many_arguments)]
@@ -2218,6 +2439,11 @@ fn check_await(
         Expr::Range { start, end } => {
             check_await(start, false, in_browser, fn_name, line, table, errors);
             check_await(end, false, in_browser, fn_name, line, table, errors);
+        }
+        Expr::Closure { body, .. } => check_await(body, false, in_browser, fn_name, line, table, errors),
+        Expr::Index { base, index } => {
+            check_await(base, false, in_browser, fn_name, line, table, errors);
+            check_await(index, false, in_browser, fn_name, line, table, errors);
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
         | Expr::NoneLit => {}
@@ -2872,10 +3098,52 @@ fn lower_expr(
         Expr::Declassify(inner) | Expr::Raw(inner) | Expr::Await(inner) => {
             lower_expr(inner, locals, table)
         }
-        Expr::MethodCall { receiver, args, .. } => {
+        Expr::MethodCall { receiver, method, args } => {
             lower_expr(receiver, locals, table);
+            let recv_elem = resolve_type(&**receiver, locals, table)
+                .as_deref()
+                .and_then(|t| generic_inner("List", t).map(str::to_string));
+            // Higher-order closures (spec 19 × 18): lower the body with the closure
+            // param(s) bound to the element/accumulator type, so a Decimal op inside
+            // the body still desugars (otherwise its operand types wouldn't resolve).
+            if let Some(elem) = &recv_elem {
+                match method.as_str() {
+                    "map" | "filter" => {
+                        if let [Expr::Closure { params, body }] = args.as_mut_slice() {
+                            if params.len() == 1 {
+                                let mut inner = locals.clone();
+                                inner.insert(params[0].clone(), (Some(elem.clone()), false));
+                                lower_expr(body, &inner, table);
+                                return;
+                            }
+                        }
+                    }
+                    "reduce" => {
+                        if let [init, Expr::Closure { params, body }] = args.as_mut_slice() {
+                            if params.len() == 2 {
+                                lower_expr(init, locals, table);
+                                let u = resolve_type(&*init, locals, table);
+                                let mut inner = locals.clone();
+                                inner.insert(params[0].clone(), (u, false));
+                                inner.insert(params[1].clone(), (Some(elem.clone()), false));
+                                lower_expr(body, &inner, table);
+                                return;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             for a in args.iter_mut() {
                 lower_expr(a, locals, table);
+            }
+            // `List.contains(x)` → a distinct `__list_contains(list, x)` builtin so
+            // the type-blind backends don't confuse it with `String.contains`
+            // (which has a different per-tier spelling). Spec 19.
+            if recv_elem.is_some() && method == "contains" && args.len() == 1 {
+                let recv = std::mem::replace(receiver.as_mut(), Expr::NoneLit);
+                let needle = std::mem::replace(&mut args[0], Expr::NoneLit);
+                *expr = Expr::Call { callee: "__list_contains".to_string(), args: vec![recv, needle] };
             }
         }
         Expr::Record { fields, .. } => {
@@ -2896,6 +3164,13 @@ fn lower_expr(
         Expr::Range { start, end } => {
             lower_expr(start, locals, table);
             lower_expr(end, locals, table);
+        }
+        // Closure reached outside a higher-order call (unreachable for a checked
+        // program) — lower the body best-effort. `xs[i]` lowers its base + index.
+        Expr::Closure { body, .. } => lower_expr(body, locals, table),
+        Expr::Index { base, index } => {
+            lower_expr(base, locals, table);
+            lower_expr(index, locals, table);
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
         | Expr::NoneLit => {}

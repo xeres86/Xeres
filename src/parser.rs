@@ -1,6 +1,17 @@
 // src/parser.rs
 use crate::token::Token;
-use crate::lexer::Lexer;
+use crate::lexer::{Lexer, LexerState};
+
+/// A saved parse position for backtracking (lexer cursor + buffered tokens).
+struct Checkpoint {
+    lex: LexerState,
+    cur: Token,
+    peek: Token,
+    cur_line: usize,
+    cur_col: usize,
+    peek_line: usize,
+    peek_col: usize,
+}
 
 // --- AST Structures ---
 
@@ -64,6 +75,14 @@ pub enum Expr {
     Ternary { cond: Box<Expr>, then: Box<Expr>, otherwise: Box<Expr> },
     /// `start..end` — a half-open integer range (used by `for i in 0..n`).
     Range { start: Box<Expr>, end: Box<Expr> },
+    /// `x -> expr` / `(acc, x) -> expr` — an expression-bodied closure (spec 19).
+    /// Cut 1: argument-only — it may appear *only* as a direct argument to a
+    /// higher-order list method (`map`/`filter`/`reduce`/`sort_by`); the checker
+    /// rejects it anywhere else. No first-class function type (see spec).
+    Closure { params: Vec<String>, body: Box<Expr> },
+    /// `base[index]` — list index sugar (spec 19). Lowers to `.at(index)`, so it
+    /// yields `Optional<T>` (out-of-bounds is `none`, never a panic).
+    Index { base: Box<Expr>, index: Box<Expr> },
 }
 
 #[derive(Debug)]
@@ -263,6 +282,31 @@ impl<'a> Parser<'a> {
         self.peek_token = self.lexer.next_token();
         self.peek_line = self.lexer.token_line();
         self.peek_col = self.lexer.token_col();
+    }
+
+    /// Capture the full parse position (lexer cursor + the two buffered tokens)
+    /// for speculative parsing; pair with `restore`. Used to disambiguate a
+    /// `( … ) -> …` closure from a parenthesized expression (spec 19).
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            lex: self.lexer.save(),
+            cur: self.current_token.clone(),
+            peek: self.peek_token.clone(),
+            cur_line: self.cur_line,
+            cur_col: self.cur_col,
+            peek_line: self.peek_line,
+            peek_col: self.peek_col,
+        }
+    }
+
+    fn restore(&mut self, cp: &Checkpoint) {
+        self.lexer.restore(&cp.lex);
+        self.current_token = cp.cur.clone();
+        self.peek_token = cp.peek.clone();
+        self.cur_line = cp.cur_line;
+        self.cur_col = cp.cur_col;
+        self.peek_line = cp.peek_line;
+        self.peek_col = cp.peek_col;
     }
 
     pub fn parse_program(&mut self) -> XeresProgram {
@@ -830,28 +874,122 @@ impl<'a> Parser<'a> {
 
     fn parse_postfix(&mut self) -> Option<Expr> {
         let mut e = self.parse_primary()?;
-        while self.current_token == Token::Dot {
-            self.next_token(); // consume '.'
-            let name = match &self.current_token {
-                Token::Identifier(f) => f.clone(),
-                _ => break,
-            };
-            self.next_token(); // consume name
-            if self.current_token == Token::LParen {
-                // method call: receiver.name(args)
-                self.next_token(); // consume '('
-                let mut args = Vec::new();
-                while self.current_token != Token::RParen && self.current_token != Token::EOF {
-                    if let Some(a) = self.parse_expr() { args.push(a); } else { break; }
-                    if self.current_token == Token::Comma { self.next_token(); }
+        loop {
+            match self.current_token {
+                Token::Dot => {
+                    self.next_token(); // consume '.'
+                    let name = match &self.current_token {
+                        Token::Identifier(f) => f.clone(),
+                        _ => break,
+                    };
+                    self.next_token(); // consume name
+                    if self.current_token == Token::LParen {
+                        // method call: receiver.name(args) — args may be closures (spec 19)
+                        self.next_token(); // consume '('
+                        let args = self.parse_call_args();
+                        e = Expr::MethodCall { receiver: Box::new(e), method: name, args };
+                    } else {
+                        e = Expr::Field { base: Box::new(e), field: name };
+                    }
                 }
-                if self.current_token == Token::RParen { self.next_token(); }
-                e = Expr::MethodCall { receiver: Box::new(e), method: name, args };
-            } else {
-                e = Expr::Field { base: Box::new(e), field: name };
+                // `base[index]` — list index sugar (spec 19), chains with `.`/`[`.
+                Token::LBracket => {
+                    self.next_token(); // consume '['
+                    let index = self.parse_expr()?;
+                    if self.current_token != Token::RBracket {
+                        return None;
+                    }
+                    self.next_token(); // consume ']'
+                    e = Expr::Index { base: Box::new(e), index: Box::new(index) };
+                }
+                _ => break,
             }
         }
         Some(e)
+    }
+
+    /// Parse a `(...)` call/method argument list (caller has consumed `(`). Each
+    /// argument may be a closure (`x -> e` / `(a, b) -> e`, spec 19); the checker
+    /// restricts where a closure is actually allowed.
+    fn parse_call_args(&mut self) -> Vec<Expr> {
+        let mut args = Vec::new();
+        while self.current_token != Token::RParen && self.current_token != Token::EOF {
+            match self.parse_arg() {
+                Some(a) => args.push(a),
+                None => break,
+            }
+            if self.current_token == Token::Comma {
+                self.next_token();
+            }
+        }
+        if self.current_token == Token::RParen {
+            self.next_token();
+        }
+        args
+    }
+
+    /// One argument: a closure if it has the closure shape, else an expression.
+    fn parse_arg(&mut self) -> Option<Expr> {
+        if let Some(c) = self.try_parse_closure() {
+            return Some(c);
+        }
+        self.parse_expr()
+    }
+
+    /// Recognize an expression-bodied closure in argument position (spec 19):
+    /// `ident -> expr` (peek-detectable) or `( ident (, ident)* ) -> expr` (needs
+    /// backtracking to tell from a parenthesized expression). Returns `None`
+    /// (leaving the cursor put) when the next tokens aren't a closure.
+    fn try_parse_closure(&mut self) -> Option<Expr> {
+        // single param: `x -> expr`
+        if let Token::Identifier(name) = &self.current_token {
+            if self.peek_token == Token::Arrow {
+                let p = name.clone();
+                self.next_token(); // ident
+                self.next_token(); // ->
+                let body = self.parse_expr()?;
+                return Some(Expr::Closure { params: vec![p], body: Box::new(body) });
+            }
+        }
+        // multi/parenthesized param: `( ident (, ident)* ) -> expr`
+        if self.current_token == Token::LParen {
+            let cp = self.checkpoint();
+            if let Some(c) = self.parse_paren_closure() {
+                return Some(c);
+            }
+            self.restore(&cp); // not a closure — rewind, parse as a normal expr
+        }
+        None
+    }
+
+    /// `( ident (, ident)* ) -> expr` with the cursor on `(`. `None` ⇒ not a
+    /// closure (the caller restores the checkpoint).
+    fn parse_paren_closure(&mut self) -> Option<Expr> {
+        self.next_token(); // consume '('
+        let mut params = Vec::new();
+        loop {
+            match &self.current_token {
+                Token::Identifier(p) => {
+                    params.push(p.clone());
+                    self.next_token();
+                }
+                _ => return None, // not a pure identifier list ⇒ not a closure
+            }
+            match self.current_token {
+                Token::Comma => self.next_token(),
+                Token::RParen => {
+                    self.next_token();
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        if params.is_empty() || self.current_token != Token::Arrow {
+            return None;
+        }
+        self.next_token(); // consume '->'
+        let body = self.parse_expr()?;
+        Some(Expr::Closure { params, body: Box::new(body) })
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
@@ -905,12 +1043,7 @@ impl<'a> Parser<'a> {
                 self.next_token();
                 if self.current_token == Token::LParen {
                     self.next_token(); // consume '('
-                    let mut args = Vec::new();
-                    while self.current_token != Token::RParen && self.current_token != Token::EOF {
-                        if let Some(a) = self.parse_expr() { args.push(a); } else { break; }
-                        if self.current_token == Token::Comma { self.next_token(); }
-                    }
-                    if self.current_token == Token::RParen { self.next_token(); }
+                    let args = self.parse_call_args();
                     Some(Expr::Call { callee: name, args })
                 } else if self.allow_record && self.current_token == Token::LBrace {
                     self.parse_record(name)

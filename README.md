@@ -171,11 +171,27 @@ server fn total(items: List<Int>) -> Int {
 }
 ```
 
-`List<T>` carries a small stdlib alongside `for`: `.length()`, `.first()`,
-`.last()`, `.at(i)`, and `.reverse()`. The accessors are **safe** —
-`.first()`/`.last()`/`.at(i)` return `Optional<T>`, so an empty or out-of-bounds
-read is `none` (unwrap with `.or(default)`), never a crash. (`map`/`filter` await
-expression-level closures — a later addition.)
+`List<T>` carries a stdlib alongside `for`: the safe accessors `.length()`,
+`.first()`, `.last()`, `.at(i)`, `.reverse()` plus the index sugar `xs[i]` (all of
+`.first()`/`.last()`/`.at(i)`/`xs[i]` return `Optional<T>`, so an empty or
+out-of-bounds read is `none` — unwrap with `.or(default)` — never a crash), the
+higher-order ops `.map`/`.filter`/`.reduce`, and `.contains(x)`:
+
+```xeres
+let names    = users.map(u -> u.name)               // List<String>
+let adults   = users.filter(u -> u.age >= 18)       // List<User>
+let total    = items.reduce(0, (acc, x) -> acc + x.qty)  // Int
+let first    = users.filter(u -> u.role == "admin").first()  // chains
+let urgent   = tags.contains("urgent")              // Bool
+let second   = xs[1].or(0)                          // safe index
+```
+
+Closures (`x -> expr`) are **argument-only** in this cut — they may be passed
+directly to `map`/`filter`/`reduce` but not stored, returned, or passed around
+(first-class closures are a later addition). The tier/secret rules propagate into
+the closure body for free: a `ui` closure still can't read a `secret` (R3) or
+surface one to the wire (R5). Math stays exact end to end — a closure over a
+`List<Decimal>` uses the same exact `Decimal` arithmetic.
 
 Enums (string-backed) pair with `match` — exhaustiveness is compiler-checked
 (**R20**), a `DateTime` (epoch ms) + `now()`, and a `Decimal` (exact,

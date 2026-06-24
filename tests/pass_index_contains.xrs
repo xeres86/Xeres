@@ -1,0 +1,19 @@
+// spec 19 — `xs[i]` index sugar (→ Optional<T>, safe) and list `.contains`.
+server fn third_or_zero(xs: List<Int>) -> Int {
+  return xs[2].or(0)
+}
+
+server fn has_urgent(tags: List<String>) -> Bool {
+  return tags.contains("urgent")
+}
+
+ui screen Tags {
+  state tags: List<String> = []
+  state idx: Int = 0
+  view {
+    column {
+      text "First: " + tags[idx].or("(none)")
+      text "Has urgent: " + tags.contains("urgent")
+    }
+  }
+}

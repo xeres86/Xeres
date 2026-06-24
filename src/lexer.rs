@@ -1,6 +1,18 @@
 // src/lexer.rs
 use crate::token::Token;
 
+/// A saved scan cursor (see `Lexer::save`/`restore`) for parser backtracking.
+#[derive(Clone)]
+pub struct LexerState {
+    position: usize,
+    read_position: usize,
+    ch: char,
+    line: usize,
+    col: usize,
+    tok_line: usize,
+    tok_col: usize,
+}
+
 pub struct Lexer {
     input: Vec<char>,
     position: usize,
@@ -38,6 +50,32 @@ impl Lexer {
     pub fn keep_comments(mut self) -> Self {
         self.keep_comments = true;
         self
+    }
+
+    /// Snapshot the scan cursor so the parser can try a speculative parse and
+    /// backtrack (spec 19 needs `(a, b) ->` lookahead to spot a closure vs. a
+    /// parenthesized expression). Cheap: just the cursor scalars, not `input`.
+    pub fn save(&self) -> LexerState {
+        LexerState {
+            position: self.position,
+            read_position: self.read_position,
+            ch: self.ch,
+            line: self.line,
+            col: self.col,
+            tok_line: self.tok_line,
+            tok_col: self.tok_col,
+        }
+    }
+
+    /// Restore a cursor captured by `save` (rewind a speculative scan).
+    pub fn restore(&mut self, s: &LexerState) {
+        self.position = s.position;
+        self.read_position = s.read_position;
+        self.ch = s.ch;
+        self.line = s.line;
+        self.col = s.col;
+        self.tok_line = s.tok_line;
+        self.tok_col = s.tok_col;
     }
 
     fn read_char(&mut self) {

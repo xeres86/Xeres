@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.5.14 — 2026-06-24 — closures + higher-order list ops (`map`/`filter`/`reduce`), `xs[i]`, `.contains` (spec 19)
+
+A `List<T>` was iterate-only (`for x in xs` + the safe accessors). This cut closes
+the gap with every language you'd migrate from: expression-level closures and the
+three core higher-order ops, plus index sugar and membership.
+
+- **`map` / `filter` / `reduce`** with **argument-only** closures (`x -> expr`,
+  `(acc, x) -> expr`): `users.map(u -> u.name)` → `List<String>`,
+  `users.filter(u -> u.age >= 18)` → `List<User>`,
+  `items.reduce(0, (acc, x) -> acc + x.qty)` → `Int`. Pipelines chain
+  (`xs.filter(…).map(…)`). The closure body is type-checked with its param bound to
+  the element/accumulator type — **no first-class function type** is introduced
+  (closures can't be stored, returned, or passed around; that's a later cut).
+- **`xs[i]` index sugar** → `Optional<T>` (lowers to `.at(i)`; out-of-bounds or
+  negative is `none`, never a panic) — unwrap with `.or(default)`.
+- **`List.contains(x)`** — element equality (models derive `PartialEq`; the interp
+  does a deep value-compare). Lowered to a distinct `__list_contains` builtin so the
+  type-blind backends don't confuse it with `String.contains` (different spelling
+  per tier).
+- **Tier & secret safety propagate into the closure for free — no new rule.** The
+  body is checked in the enclosing fn's environment, so a `ui` closure still can't
+  read a `secret` (R3) or surface one to the wire (R5), and R30 still trips on
+  `raw(x)` over an element of a tainted list. Reuses **R21** for the closure/arity
+  diagnostics. (Confirmed by `fail_closure_secret_leak`, which R3 rejects.)
+- **Exact on every backend, verified to agree.** Interpreter evaluates the closure
+  body per element in a child env; the ejected server lowers to
+  `iter()/into_iter().map/filter().collect()` + `fold` (cloning the receiver so the
+  source list survives); the browser uses `Array.map/filter/reduce` (reduce's
+  `(callback, init)` order) and a structural `.some(JSON.stringify)` for
+  `contains`. All three are checked against the same pipeline (interp unit + e2e
+  tests, an ejected-crate parity test, and a bundled-in-node parity test).
+- A closure over a `List<Decimal>` keeps spec-18 exact math (the lowering binds the
+  param type before desugaring Decimal ops in the body).
+- Fixtures `pass_map_filter_reduce` / `pass_index_contains` /
+  `fail_filter_nonbool` / `fail_reduce_type` / `fail_closure_secret_leak`. Parser
+  gains `Expr::Closure`/`Expr::Index` + a lexer save/restore for `(a, b) ->`
+  backtracking; `xeres fmt` stays idempotent over the new syntax.
+
 ## 0.5.13 — 2026-06-23 — `Decimal` Cut 2: exact arithmetic + ordered comparison (spec 18)
 
 `Decimal` (v0.5.3) could be constructed, displayed, and `==`-compared, but not

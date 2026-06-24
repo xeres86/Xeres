@@ -1,0 +1,33 @@
+// spec 19 — higher-order list ops: `map`/`filter`/`reduce` with argument-only
+// closures, typed end-to-end. Used in both `server fn`s and a view.
+model User {
+  id: String
+  name: String
+  age: Int
+}
+
+server fn adults(users: List<User>) -> List<User> {
+  return users.filter(u -> u.age >= 18)
+}
+
+server fn adult_names(users: List<User>) -> List<String> {
+  // chains: filter then map; result element type is the closure body's type.
+  return users.filter(u -> u.age >= 18).map(u -> u.name)
+}
+
+server fn total_age(users: List<User>) -> Int {
+  return users.reduce(0, (acc, u) -> acc + u.age)
+}
+
+ui screen Roster {
+  state users: List<User> = []
+  view {
+    column {
+      text "Adults:"
+      for adult in users.filter(u -> u.age >= 18) {
+        text adult.name
+      }
+      text "Total age: " + users.reduce(0, (acc, u) -> acc + u.age)
+    }
+  }
+}

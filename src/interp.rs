@@ -168,6 +168,18 @@ impl<'a> Interp<'a> {
                 _ => Err(format!("unknown decimal op `{}`", op)),
             };
         }
+        if fn_name == "__list_contains" {
+            // Lowered `List.contains(x)` (spec 19): structural element equality
+            // (so it agrees with the browser's JSON match and the server's
+            // `Vec::contains`). `String.contains` stays the String method.
+            let needle = args.get(1).cloned().unwrap_or(Value::Null);
+            return match args.first() {
+                Some(Value::List(items)) => {
+                    Ok(Value::Bool(items.iter().any(|e| values_eq(e, &needle))))
+                }
+                _ => Err("`contains` needs a list".into()),
+            };
+        }
         if matches!(fn_name, "abs" | "min" | "max") {
             return math_fn(fn_name, &args);
         }
@@ -308,6 +320,22 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// Evaluate a closure body (spec 19) with its params bound to `vals` in a
+    /// child of the enclosing env. Drives map/filter/reduce.
+    fn eval_closure(
+        &self,
+        params: &[String],
+        body: &Expr,
+        vals: &[Value],
+        env: &HashMap<String, Value>,
+    ) -> Result<Value, String> {
+        let mut child = env.clone();
+        for (p, v) in params.iter().zip(vals) {
+            child.insert(p.clone(), v.clone());
+        }
+        self.eval(body, &child)
+    }
+
     fn eval(&self, e: &Expr, env: &HashMap<String, Value>) -> Result<Value, String> {
         match e {
             Expr::Int(n) => Ok(Value::Int(*n)),
@@ -398,6 +426,23 @@ impl<'a> Interp<'a> {
                 };
                 Ok(Value::List((s..e).map(Value::Int).collect()))
             }
+            // `xs[i]` (spec 19): `.at` semantics — out-of-bounds / negative ⇒ none.
+            Expr::Index { base, index } => {
+                let b = self.eval(base, env)?;
+                let i = self.eval(index, env)?;
+                match (b, i) {
+                    (Value::List(items), Value::Int(n)) if n >= 0 => {
+                        Ok(items.get(n as usize).cloned().unwrap_or(Value::Null))
+                    }
+                    (Value::List(_), Value::Int(_)) => Ok(Value::Null),
+                    _ => Err("index `[i]` needs a list and an Int".into()),
+                }
+            }
+            // A closure is only valid as a higher-order argument (handled in the
+            // MethodCall arm); reaching here is a checker-prevented misuse.
+            Expr::Closure { .. } => {
+                Err("a closure may only be passed to map/filter/reduce".into())
+            }
             Expr::MethodCall { receiver, method, args } => {
                 // `session.login(id)` / `session.logout()` — receiver is the
                 // capability, not a value, so handle before evaluating it.
@@ -438,6 +483,38 @@ impl<'a> Interp<'a> {
                 }
                 // List stdlib methods (spec 08) — safe accessors return Null on a miss.
                 if let Value::List(items) = &recv {
+                    // Higher-order ops (spec 19): the closure body is evaluated per
+                    // element in a child env. (`contains` was lowered to a builtin.)
+                    match method.as_str() {
+                        "map" => {
+                            let (params, body) = closure_arg(args, 0)?;
+                            let mut out = Vec::with_capacity(items.len());
+                            for it in items {
+                                out.push(self.eval_closure(params, body, &[it.clone()], env)?);
+                            }
+                            return Ok(Value::List(out));
+                        }
+                        "filter" => {
+                            let (params, body) = closure_arg(args, 0)?;
+                            let mut out = Vec::new();
+                            for it in items {
+                                if as_bool(&self.eval_closure(params, body, &[it.clone()], env)?)? {
+                                    out.push(it.clone());
+                                }
+                            }
+                            return Ok(Value::List(out));
+                        }
+                        "reduce" => {
+                            let init = self.eval(args.first().ok_or("`reduce` needs an init value")?, env)?;
+                            let (params, body) = closure_arg(args, 1)?;
+                            let mut acc = init;
+                            for it in items {
+                                acc = self.eval_closure(params, body, &[acc.clone(), it.clone()], env)?;
+                            }
+                            return Ok(acc);
+                        }
+                        _ => {}
+                    }
                     let argv = args
                         .iter()
                         .map(|a| self.eval(a, env))
@@ -773,12 +850,37 @@ fn dec_str(v: Option<&Value>) -> Result<String, String> {
     }
 }
 
+/// Extract the closure at argument position `i` (spec 19): `(params, body)`.
+fn closure_arg(args: &[Expr], i: usize) -> Result<(&[String], &Expr), String> {
+    match args.get(i) {
+        Some(Expr::Closure { params, body }) => Ok((params.as_slice(), &**body)),
+        _ => Err("expected a closure argument (`x -> …`)".into()),
+    }
+}
+
+/// A `filter` predicate result must be a Bool.
+fn as_bool(v: &Value) -> Result<bool, String> {
+    match v {
+        Value::Bool(b) => Ok(*b),
+        _ => Err("`filter` predicate must return a Bool".into()),
+    }
+}
+
 fn values_eq(l: &Value, r: &Value) -> bool {
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Null, Value::Null) => true,
+        // Deep equality for `.contains` on List<Model>/nested lists (spec 19).
+        (Value::Record(an, af), Value::Record(bn, bf)) => {
+            an == bn
+                && af.len() == bf.len()
+                && af.iter().zip(bf).all(|((ak, av), (bk, bv))| ak == bk && values_eq(av, bv))
+        }
+        (Value::List(a), Value::List(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values_eq(x, y))
+        }
         _ => as_num(l).zip(as_num(r)).map(|(a, b)| a == b).unwrap_or(false),
     }
 }
@@ -1154,6 +1256,49 @@ server fn over(total: Decimal, limit: Decimal) -> Bool { return total > limit }\
         // Ordered compare → Bool, numeric not lexicographic.
         let r = interp.call("over", vec![Value::Str("10.00".into()), Value::Str("9.99".into())]).unwrap();
         assert!(matches!(r, Value::Bool(true)), "over => {:?}", r);
+    }
+
+    // End-to-end (spec 19): source → analyze → lower → interp `call`. Proves the
+    // closure binding + map/filter/reduce dispatch, `xs[i]` sugar, and the lowered
+    // `__list_contains` all run (the same cases the codegen tiers are checked on).
+    #[test]
+    fn higher_order_list_ops_run_end_to_end() {
+        let src = "\
+server fn doubled(xs: List<Int>) -> List<Int> { return xs.map(x -> x * 2) }\n\
+server fn big(xs: List<Int>) -> List<Int> { return xs.filter(x -> x >= 2) }\n\
+server fn total(xs: List<Int>) -> Int { return xs.reduce(0, (acc, x) -> acc + x) }\n\
+server fn nth(xs: List<Int>) -> Int { return xs[1].or(0) }\n\
+server fn oob(xs: List<Int>) -> Int { return xs[9].or(-1) }\n\
+server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let mut parser = crate::parser::Parser::new(&mut lexer);
+        let mut program = parser.parse_program();
+        let analysis = crate::checker::analyze(&program);
+        assert!(
+            analysis.errors.is_empty(),
+            "unexpected errors: {:?}",
+            analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        crate::checker::lower(&mut program);
+        let interp = Interp::with_session(&program, None);
+        let ints = |v: &[i64]| Value::List(v.iter().map(|n| Value::Int(*n)).collect());
+        let as_ints = |v: Value| -> Vec<i64> {
+            match v {
+                Value::List(xs) => xs.iter().map(|x| if let Value::Int(n) = x { *n } else { -999 }).collect(),
+                other => panic!("expected a list, got {:?}", other),
+            }
+        };
+
+        assert_eq!(as_ints(interp.call("doubled", vec![ints(&[1, 2, 3])]).unwrap()), vec![2, 4, 6]);
+        assert_eq!(as_ints(interp.call("big", vec![ints(&[1, 2, 3])]).unwrap()), vec![2, 3]);
+        assert!(matches!(interp.call("total", vec![ints(&[1, 2, 3])]).unwrap(), Value::Int(6)));
+        assert!(matches!(interp.call("nth", vec![ints(&[10, 20, 30])]).unwrap(), Value::Int(20)));
+        // `xs[9]` is out of bounds ⇒ none ⇒ the `.or(-1)` fallback (never a panic).
+        assert!(matches!(interp.call("oob", vec![ints(&[1])]).unwrap(), Value::Int(-1)));
+        let tags = Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]);
+        assert!(matches!(interp.call("has", vec![tags]).unwrap(), Value::Bool(true)));
+        let tags2 = Value::List(vec![Value::Str("a".into())]);
+        assert!(matches!(interp.call("has", vec![tags2]).unwrap(), Value::Bool(false)));
     }
 
     // `session.actor.or("")` — `.or` on a present Optional<String>.

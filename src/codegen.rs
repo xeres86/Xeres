@@ -140,6 +140,8 @@ fn expr_uses_auth(e: &Expr) -> bool {
             expr_uses_auth(cond) || expr_uses_auth(then) || expr_uses_auth(otherwise)
         }
         Expr::Range { start, end } => expr_uses_auth(start) || expr_uses_auth(end),
+        Expr::Closure { body, .. } => expr_uses_auth(body),
+        Expr::Index { base, index } => expr_uses_auth(base) || expr_uses_auth(index),
         _ => false,
     }
 }
@@ -190,6 +192,8 @@ fn expr_uses_session(e: &Expr) -> bool {
             expr_uses_session(cond) || expr_uses_session(then) || expr_uses_session(otherwise)
         }
         Expr::Range { start, end } => expr_uses_session(start) || expr_uses_session(end),
+        Expr::Closure { body, .. } => expr_uses_session(body),
+        Expr::Index { base, index } => expr_uses_session(base) || expr_uses_session(index),
         _ => false,
     }
 }
@@ -237,6 +241,8 @@ fn expr_uses_db(e: &Expr) -> bool {
             expr_uses_db(cond) || expr_uses_db(then) || expr_uses_db(otherwise)
         }
         Expr::Range { start, end } => expr_uses_db(start) || expr_uses_db(end),
+        Expr::Closure { body, .. } => expr_uses_db(body),
+        Expr::Index { base, index } => expr_uses_db(base) || expr_uses_db(index),
         _ => false,
     }
 }
@@ -318,6 +324,8 @@ fn expr_uses_decimal(e: &Expr) -> bool {
             expr_uses_decimal(cond) || expr_uses_decimal(then) || expr_uses_decimal(otherwise)
         }
         Expr::Range { start, end } => expr_uses_decimal(start) || expr_uses_decimal(end),
+        Expr::Closure { body, .. } => expr_uses_decimal(body),
+        Expr::Index { base, index } => expr_uses_decimal(base) || expr_uses_decimal(index),
         _ => false,
     }
 }
@@ -392,7 +400,9 @@ fn gen_server(program: &XeresProgram) -> String {
     // Models: full fidelity (secrets stay server-side) + a wire projection that
     // OMITS secret fields. The wire codec is the runtime half of R3/R5.
     for m in &program.models {
-        out.push_str(&format!("#[derive(Debug, Clone, Default)]\npub struct {} {{\n", m.name));
+        // `PartialEq` powers `List<Model>.contains` (spec 19). Not `Eq` — a model
+        // may carry a `Float` field, which isn't `Eq`.
+        out.push_str(&format!("#[derive(Debug, Clone, Default, PartialEq)]\npub struct {} {{\n", m.name));
         for p in &m.properties {
             let note = if p.is_secret { "  // secret — never leaves the server" } else { "" };
             out.push_str(&format!(
@@ -1929,6 +1939,13 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
                 let b = args.get(1).map(|x| emit_h_expr(x, screen, sv)).unwrap_or_default();
                 return format!("__dec.{}({}, {})", op, a, b);
             }
+            // `__list_contains(list, x)` — lowered `List.contains` (spec 19); a
+            // structural (JSON) match so it agrees with the server/interp.
+            if callee == "__list_contains" {
+                let list = args.first().map(|x| emit_h_expr(x, screen, sv)).unwrap_or_default();
+                let needle = args.get(1).map(|x| emit_h_expr(x, screen, sv)).unwrap_or_default();
+                return format!("{}.some((__e) => JSON.stringify(__e) === JSON.stringify({}))", list, needle);
+            }
             // `navigate(Screen)` — the argument is a screen *name* (R28), lowered
             // to the router's `__navigate("Screen")` (switch screen + URL). A
             // `navigate(Screen { id: x })` is a typed-route-param nav (R32) →
@@ -1978,6 +1995,25 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
                 );
             }
             let recv = emit_h_expr(receiver, screen, sv);
+            // Higher-order list ops (spec 19) — Array.map/filter/reduce; reduce's
+            // args are `(callback, init)`, so reverse our `(init, closure)`.
+            match method.as_str() {
+                "map" if args.len() == 1 => {
+                    return format!("{}.map({})", recv, emit_h_expr(&args[0], screen, sv))
+                }
+                "filter" if args.len() == 1 => {
+                    return format!("{}.filter({})", recv, emit_h_expr(&args[0], screen, sv))
+                }
+                "reduce" if args.len() == 2 => {
+                    return format!(
+                        "{}.reduce({}, {})",
+                        recv,
+                        emit_h_expr(&args[1], screen, sv),
+                        emit_h_expr(&args[0], screen, sv)
+                    )
+                }
+                _ => {}
+            }
             let a: Vec<String> = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect();
             if let Some(s) = emit_string_method(&recv, method, &a, true) {
                 return s;
@@ -2008,6 +2044,16 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
             "Array.from({{length: ({e}) - ({s})}}, (_, __i) => __i + ({s}))",
             s = emit_h_expr(start, screen, sv), e = emit_h_expr(end, screen, sv)
         ),
+        // Closure (spec 19): an arrow fn in the view tier.
+        Expr::Closure { params, body } => {
+            format!("({}) => {}", params.join(", "), emit_h_expr(body, screen, sv))
+        }
+        // `xs[i]` → `.at(i)` → Optional<T> (`?? null`).
+        Expr::Index { base, index } => {
+            let b = emit_h_expr(base, screen, sv);
+            let i = emit_h_expr(index, screen, sv);
+            emit_list_method(&b, "at", &[i], true).unwrap_or_default()
+        }
     }
 }
 
@@ -2049,6 +2095,8 @@ fn expr_has_await(e: &Expr) -> bool {
             expr_has_await(cond) || expr_has_await(then) || expr_has_await(otherwise)
         }
         Expr::Range { start, end } => expr_has_await(start) || expr_has_await(end),
+        Expr::Closure { body, .. } => expr_has_await(body),
+        Expr::Index { base, index } => expr_has_await(base) || expr_has_await(index),
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
         | Expr::NoneLit => false,
     }
@@ -2529,6 +2577,19 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     format!("__dec_{}(&({}), &({}))", op, a, b)
                 };
             }
+            // `__list_contains(list, x)` — lowered `List.contains` (spec 19), kept
+            // distinct from `String.contains` (different per-tier spelling). TS uses
+            // a structural (JSON) match so it agrees with the server/interp value
+            // equality; Rust uses `Vec::contains` (models derive PartialEq).
+            if callee == "__list_contains" {
+                let list = args.first().map(|x| emit_expr(x, ts)).unwrap_or_default();
+                let needle = args.get(1).map(|x| emit_expr(x, ts)).unwrap_or_default();
+                return if ts {
+                    format!("{}.some((__e) => JSON.stringify(__e) === JSON.stringify({}))", list, needle)
+                } else {
+                    format!("{}.contains(&({}))", list, needle)
+                };
+            }
             // `navigate(Screen)` — browser-only (R28), so only the TS tier emits
             // it; lower to the router's `__navigate("Screen")`. The param form
             // `navigate(Screen { id: x })` (R32) lowers to `__navigateTo`.
@@ -2640,6 +2701,38 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                 };
             }
             let recv = emit_expr(receiver, ts);
+            // Higher-order list ops (spec 19): the closure arg emits as `(x) => e`
+            // (TS) / `|x| e` (Rust). TS uses Array.map/filter/reduce directly (but
+            // reduce's args are `(callback, init)`); Rust iterates + collects (and
+            // `fold` for reduce), cloning the receiver so the source list survives.
+            match method.as_str() {
+                "map" if args.len() == 1 => {
+                    let cl = emit_expr(&args[0], ts);
+                    return if ts {
+                        format!("{}.map({})", recv, cl)
+                    } else {
+                        format!("{}.clone().into_iter().map({}).collect::<Vec<_>>()", recv, cl)
+                    };
+                }
+                "filter" if args.len() == 1 => {
+                    let cl = emit_expr(&args[0], ts);
+                    return if ts {
+                        format!("{}.filter({})", recv, cl)
+                    } else {
+                        format!("{}.clone().into_iter().filter({}).collect::<Vec<_>>()", recv, cl)
+                    };
+                }
+                "reduce" if args.len() == 2 => {
+                    let init = emit_expr(&args[0], ts);
+                    let cl = emit_expr(&args[1], ts);
+                    return if ts {
+                        format!("{}.reduce({}, {})", recv, cl, init)
+                    } else {
+                        format!("{}.clone().into_iter().fold({}, {})", recv, init, cl)
+                    };
+                }
+                _ => {}
+            }
             let a: Vec<String> = args.iter().map(|x| emit_expr(x, ts)).collect();
             // String stdlib methods (tier-specific spelling).
             if let Some(s) = emit_string_method(&recv, method, &a, ts) {
@@ -2699,6 +2792,21 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
             } else {
                 format!("(({}..{}).collect::<Vec<i64>>())", emit_expr(start, ts), emit_expr(end, ts))
             }
+        }
+        // Closure (spec 19): only as a higher-order arg. TS arrow / Rust `|x| e`.
+        Expr::Closure { params, body } => {
+            let ps = params.join(", ");
+            if ts {
+                format!("({}) => {}", ps, emit_expr(body, ts))
+            } else {
+                format!("|{}| {}", ps, emit_expr(body, ts))
+            }
+        }
+        // `xs[i]` index sugar → `.at(i)` → Optional<T>.
+        Expr::Index { base, index } => {
+            let b = emit_expr(base, ts);
+            let i = emit_expr(index, ts);
+            emit_list_method(&b, "at", &[i], ts).unwrap_or_default()
         }
     }
 }

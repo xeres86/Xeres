@@ -162,9 +162,14 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   (deferred): a dedicated in-view `sanitize(...)` launder, untrusted-in → outbound
   `endpoint` body/path, and a fuller multi-level taint lattice.
 - **Collections** — `List<T>` stdlib **cut 1 shipped** (v0.5.8): `length`/`first`/
-  `last`/`at`/`reverse` (safe, `Optional`-returning). Pending: `map`/`filter`/
-  `reduce` (need **expression-level closures** — `x -> expr`), list `.contains`
-  (needs element equality), `xs[i]` sugar, slicing, and a `Map<K,V>` type.
+  `last`/`at`/`reverse` (safe, `Optional`-returning). **Cut 2 done (spec 19):**
+  `map`/`filter`/`reduce` with **argument-only** expression closures (`x -> expr`,
+  `(acc, x) -> expr`), `xs[i]` index sugar (→ `Optional<T>`), and list `.contains`
+  (element equality — models derive `PartialEq`, lowered to `__list_contains` so the
+  type-blind backends don't confuse it with `String.contains`). Tier/secret rules
+  propagate into the closure body for free (no new rule — reuses R21/R3/R5).
+  **Still pending:** first-class closures (stored/returned/passed), block-bodied
+  closures, `sort_by`/`flatMap`/`zip`/slicing, and a `Map<K,V>` type.
 - LSP (inline R-rule diagnostics in editors), format-on-save / editor integration.
 - **DB transactions** ✅ done (v0.5.11, **R33**) — `transaction { … }` groups
   `db` writes atomically (commit/rollback on one shared connection), both
