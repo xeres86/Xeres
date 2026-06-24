@@ -84,7 +84,7 @@ function PKG_JSON(app) {
       // no global install / PATH; `esbuild` is the client bundler `xeres dev`/
       // `build` use — pinned so the first run is instant + offline (no npx fetch).
       devDependencies: {
-        "xeres-cli": "^0.5.12",
+        "xeres-cli": "^0.5.13",
         esbuild: "^0.28.0",
       },
     },

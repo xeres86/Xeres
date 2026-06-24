@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.5.14 — 2026-06-24 — closures + higher-order list ops (`map`/`filter`/`reduce`), `xs[i]`, `.contains` (spec 19)
+## 0.5.13 — 2026-06-24 — postgres DoS CVE fix · `Decimal` Cut 2 · closures + higher-order list ops
+
+A security fix plus two language-completeness features, released together. The
+published 0.5.12 binaries predate the security fix, so this is the release that
+ships it.
+
+### Security
+- **Postgres dependency chain bumped for RUSTSEC-2026-0178 / -0179 / -0180**
+  (denial-of-service). These affect only builds that use the `db` capability (the
+  `postgres` / `postgres-native-tls` / `native-tls` chain). `cargo audit` reports
+  no known vulnerabilities on 0.5.13.
+
+### Closures + higher-order list ops (spec 19)
 
 A `List<T>` was iterate-only (`for x in xs` + the safe accessors). This cut closes
 the gap with every language you'd migrate from: expression-level closures and the
@@ -38,7 +50,7 @@ three core higher-order ops, plus index sugar and membership.
   gains `Expr::Closure`/`Expr::Index` + a lexer save/restore for `(a, b) ->`
   backtracking; `xeres fmt` stays idempotent over the new syntax.
 
-## 0.5.13 — 2026-06-23 — `Decimal` Cut 2: exact arithmetic + ordered comparison (spec 18)
+### `Decimal` Cut 2 — exact arithmetic + ordered comparison (spec 18)
 
 `Decimal` (v0.5.3) could be constructed, displayed, and `==`-compared, but not
 *computed* — `price * qty` and `subtotal + line` didn't type-check. This cut makes
