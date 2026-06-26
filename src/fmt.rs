@@ -20,8 +20,8 @@
 // view nodes (it won't join or force-split them) and leaves `style "css"` strings
 // untouched.
 
-use crate::lexer::Lexer;
-use crate::token::Token;
+use crate::frontend::lexer::Lexer;
+use crate::frontend::token::Token;
 
 /// Which kind of `{ … }` block we're inside. Member contexts (model/enum/
 /// endpoint) lay their members out one-per-line; `Normal` (fn bodies, views,

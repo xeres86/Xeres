@@ -33,9 +33,9 @@
 // single-file fast path (no imports) returns the parsed program UNCHANGED, so
 // import-free apps are byte-identical to before this pass existed.
 
-use crate::lexer::Lexer;
-use crate::parser::{Expr, Handler, Parser, Stmt, ViewNode, XeresProgram};
-use crate::diagnostics::Diagnostic;
+use crate::frontend::lexer::Lexer;
+use crate::frontend::parser::{Expr, Handler, Parser, Stmt, ViewNode, XeresProgram};
+use crate::middle::diagnostics::Diagnostic;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -50,8 +50,8 @@ const CAPABILITIES: &[&str] = &["db", "session", "endpoint"];
 /// checked under R1–R33, with no ambient authority (none of these modules
 /// `requires` a capability). See `std/*.xrs` and ARCHITECTURE.md.
 const STDLIB: &[(&str, &str)] = &[
-    ("math", include_str!("../std/math.xrs")),
-    ("text", include_str!("../std/text.xrs")),
+    ("math", include_str!("../../std/math.xrs")),
+    ("text", include_str!("../../std/text.xrs")),
 ];
 
 /// Embedded source for a `std:<module>` import, if it exists.

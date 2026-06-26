@@ -3,7 +3,7 @@
 // handles local-first sync — all with no generated Rust and no cargo.
 
 use crate::interp::{json_str, Interp, Value};
-use crate::parser::{EnvModifier, XeresProgram};
+use crate::frontend::parser::{EnvModifier, XeresProgram};
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;

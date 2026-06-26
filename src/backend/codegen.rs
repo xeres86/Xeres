@@ -11,7 +11,7 @@
 //                real code, and every `server` fn replaced by a typed async RPC
 //                stub — the dev never hand-writes a fetch.
 
-use crate::parser::{
+use crate::frontend::parser::{
     BinOp, EnvModifier, Expr, FunctionNode, Handler, MatchPat, ScreenNode, Stmt, UnOp, ViewNode,
     XeresProgram,
 };
@@ -656,9 +656,9 @@ fn wire_serialize(path: &str, ty: &str, models: &HashSet<&str>) -> String {
     }
 }
 
-const SERVER_HEAD: &str = include_str!("../runtime/server_head.rs");
+const SERVER_HEAD: &str = include_str!("../../runtime/server_head.rs");
 
-const SERVER_MAIN: &str = include_str!("../runtime/server_main.rs");
+const SERVER_MAIN: &str = include_str!("../../runtime/server_main.rs");
 
 // Sync endpoint: a generic, field-level LWW store. Each row is a map of
 // field -> Cell (the field's raw-JSON value + its own Lamport stamp + site id),
@@ -669,7 +669,7 @@ const SERVER_MAIN: &str = include_str!("../runtime/server_main.rs");
 // site id) ⇒ replicas converge regardless of arrival order. No per-model code —
 // client rows are already secret-free. This MUST stay identical to the merge in
 // `src/serve.rs` (the two run modes would otherwise diverge).
-const SYNC_SERVER: &str = include_str!("../runtime/sync_server.rs");
+const SYNC_SERVER: &str = include_str!("../../runtime/sync_server.rs");
 
 // ------------------------------------------------------------------ client.ts
 
@@ -832,7 +832,7 @@ fn gen_client(program: &XeresProgram) -> String {
 /// mount hook). Empty when the program has no mountable screen (unchanged: no
 /// auto-mount, as before).
 fn gen_router(program: &XeresProgram) -> String {
-    let navigable: Vec<&crate::parser::ScreenNode> = program
+    let navigable: Vec<&crate::frontend::parser::ScreenNode> = program
         .screens
         .iter()
         .filter(|s| !s.is_component && s.params.is_empty())
@@ -840,7 +840,7 @@ fn gen_router(program: &XeresProgram) -> String {
     let Some(default) = navigable.first() else {
         return String::new();
     };
-    let path_of = |sc: &crate::parser::ScreenNode| -> String {
+    let path_of = |sc: &crate::frontend::parser::ScreenNode| -> String {
         if sc.name == default.name {
             "/".to_string()
         } else {
@@ -851,9 +851,9 @@ fn gen_router(program: &XeresProgram) -> String {
     // Param routes (`route "/post/:id"`) match by pattern, not an exact path, so
     // they join the render/loader maps but not __path/__byPath. R32 keeps a param
     // route's props in sync with its `:name` segments.
-    let param_routes: Vec<&crate::parser::ScreenNode> =
+    let param_routes: Vec<&crate::frontend::parser::ScreenNode> =
         program.screens.iter().filter(|s| !s.is_component && s.route.is_some()).collect();
-    let all_routes: Vec<&crate::parser::ScreenNode> =
+    let all_routes: Vec<&crate::frontend::parser::ScreenNode> =
         navigable.iter().copied().chain(param_routes.iter().copied()).collect();
 
     let render = all_routes
@@ -1002,7 +1002,7 @@ __start("app");
 /// Emit one screen: its `state` object, inline click-handler functions, and a
 /// reactive render function (re-reads state each draw).
 fn gen_screen(
-    sc: &crate::parser::ScreenNode,
+    sc: &crate::frontend::parser::ScreenNode,
     synced: &HashSet<String>,
     components: &HashMap<String, Vec<String>>,
 ) -> String {
@@ -1685,7 +1685,7 @@ fn expr_has_await(e: &Expr) -> bool {
     }
 }
 
-const MOUNT_RUNTIME: &str = include_str!("../runtime/mount_runtime.ts");
+const MOUNT_RUNTIME: &str = include_str!("../../runtime/mount_runtime.ts");
 
 // ------------------------------------------------------------------ index.html
 
@@ -1733,21 +1733,21 @@ fn gen_index(program: &XeresProgram) -> String {
 
 /// A screen "owns the canvas" when one of its top-level view nodes is a styled
 /// element — the dev has taken explicit control of the page's look.
-fn screen_is_bleed(sc: &crate::parser::ScreenNode) -> bool {
+fn screen_is_bleed(sc: &crate::frontend::parser::ScreenNode) -> bool {
     sc.body
         .iter()
         .any(|n| matches!(n, ViewNode::Element { style: Some(_), .. }))
 }
 
-const INDEX_HEAD: &str = include_str!("../runtime/index_head.html");
+const INDEX_HEAD: &str = include_str!("../../runtime/index_head.html");
 
 // Full-bleed host page for screens that style their own root. No centered card,
 // no logo/footer, no purple gradient — the screen controls the whole viewport.
 // Nested unstyled `row`/`column` still get sensible flex defaults; `button` and
 // `input` get neutral (theme-agnostic) styling that inline `style` can override.
-const INDEX_HEAD_BLEED: &str = include_str!("../runtime/index_head_bleed.html");
+const INDEX_HEAD_BLEED: &str = include_str!("../../runtime/index_head_bleed.html");
 
-const UID_FN: &str = include_str!("../runtime/uid_fn.ts");
+const UID_FN: &str = include_str!("../../runtime/uid_fn.ts");
 
 const RPC_RUNTIME: &str = "\
 function __csrf(): string {
@@ -1770,12 +1770,12 @@ async function __rpc<T>(name: string, args: unknown[]): Promise<T> {
 // <= >=` to `__dec.*` calls handled here; `Decimal * Int` accepts a number
 // operand. Mirrors the server's rust_decimal helpers and the interpreter's i128
 // core to the cent — the dual-backend parity rule.
-const DECIMAL_RUNTIME: &str = include_str!("../runtime/decimal_runtime.ts");
+const DECIMAL_RUNTIME: &str = include_str!("../../runtime/decimal_runtime.ts");
 
 // Local-first sync runtime. Shape: on-device store + offline oplog + network
 // trawler, with last-write-wins merge by a Lamport counter. Swap MemoryStore
 // for a sql.js / cr-sqlite adapter to get real on-device SQLite + CRDT merge.
-const SYNC_RUNTIME: &str = include_str!("../runtime/sync_runtime.ts");
+const SYNC_RUNTIME: &str = include_str!("../../runtime/sync_runtime.ts");
 
 // ------------------------------------------------------------------ shared
 
@@ -2257,7 +2257,7 @@ fn db_map_expr(method: &str, args: &[Expr], ty: &str, program: &XeresProgram) ->
 }
 
 /// `name: __r.get("name"), ...` — map a postgres Row's columns onto a model.
-fn row_fields(model: &crate::parser::ModelNode) -> String {
+fn row_fields(model: &crate::frontend::parser::ModelNode) -> String {
     model
         .properties
         .iter()
@@ -2268,7 +2268,7 @@ fn row_fields(model: &crate::parser::ModelNode) -> String {
 
 // The `hash`/`verify` builtins, server side: Argon2id with a random salt,
 // emitting/parsing a standard PHC string. Added only when the app uses them.
-const CRYPTO_PRELUDE: &str = include_str!("../runtime/crypto_prelude.rs");
+const CRYPTO_PRELUDE: &str = include_str!("../../runtime/crypto_prelude.rs");
 
 // The `session` capability, server side — a verbatim port of the interpreter's
 // signed-cookie machinery (src/interp.rs). The cookie value is `<actor-id>.<hmac>`
@@ -2283,11 +2283,11 @@ const CRYPTO_PRELUDE: &str = include_str!("../runtime/crypto_prelude.rs");
 // and the cookie taken after never cross requests. The crypto rides the `auth`
 // feature (same as hash/verify); a non-`auth` build gets the same inert stubs the
 // interpreter uses.
-const SESSION_PRELUDE: &str = include_str!("../runtime/session_prelude.rs");
+const SESSION_PRELUDE: &str = include_str!("../../runtime/session_prelude.rs");
 
-const HTTP_PRELUDE: &str = include_str!("../runtime/http_prelude.rs");
+const HTTP_PRELUDE: &str = include_str!("../../runtime/http_prelude.rs");
 
-const DB_PRELUDE: &str = include_str!("../runtime/db_prelude.rs");
+const DB_PRELUDE: &str = include_str!("../../runtime/db_prelude.rs");
 
 // Exact Decimal money math (spec 18 / R29), server tier. A Decimal is a `String`
 // end-to-end; these helpers parse → compute exactly in base-10 (rust_decimal,
@@ -2296,7 +2296,7 @@ const DB_PRELUDE: &str = include_str!("../runtime/db_prelude.rs");
 // integer operand via `IntoDec`. Gated behind the `decimal` cargo feature (made
 // default when the app uses Decimal). Mirrors the interpreter's i128 core and the
 // browser's BigInt runtime to the cent — the dual-backend parity rule.
-const DECIMAL_PRELUDE: &str = include_str!("../runtime/decimal_prelude.rs");
+const DECIMAL_PRELUDE: &str = include_str!("../../runtime/decimal_prelude.rs");
 
 /// String stdlib methods, spelled for each tier (`recv`/`args` are already
 /// emitted). Returns None if `method` isn't a String method.

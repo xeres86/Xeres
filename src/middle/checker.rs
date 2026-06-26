@@ -1,9 +1,9 @@
 // src/checker.rs
-use crate::parser::{
+use crate::frontend::parser::{
     BinOp, EndpointNode, EnumNode, EnvModifier, Expr, FunctionNode, Handler, MatchArm, MatchPat,
     ModelNode, ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
 };
-use crate::diagnostics::Diagnostic;
+use crate::middle::diagnostics::Diagnostic;
 use std::collections::{HashMap, HashSet};
 
 const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime", "Decimal"];
@@ -172,8 +172,8 @@ fn resolve_type(
             _ => table.fns.get(callee).and_then(|s| s.ret.clone()),
         },
         Expr::Unary { op, expr } => match op {
-            crate::parser::UnOp::Not => Some("Bool".into()),
-            crate::parser::UnOp::Neg => resolve_type(expr, locals, table),
+            crate::frontend::parser::UnOp::Not => Some("Bool".into()),
+            crate::frontend::parser::UnOp::Neg => resolve_type(expr, locals, table),
         },
         Expr::Binary { op, left, right } => {
             if is_bool_op(*op) {

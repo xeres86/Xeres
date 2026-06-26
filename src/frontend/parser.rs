@@ -1,6 +1,6 @@
 // src/parser.rs
-use crate::token::Token;
-use crate::lexer::{Lexer, LexerState};
+use crate::frontend::token::Token;
+use crate::frontend::lexer::{Lexer, LexerState};
 use std::collections::HashSet;
 
 /// A saved parse position for backtracking (lexer cursor + buffered tokens).

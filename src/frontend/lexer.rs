@@ -1,5 +1,5 @@
 // src/lexer.rs
-use crate::token::Token;
+use crate::frontend::token::Token;
 
 /// A saved scan cursor (see `Lexer::save`/`restore`) for parser backtracking.
 #[derive(Clone)]

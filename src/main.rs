@@ -1,16 +1,17 @@
 // src/main.rs
-mod token;
-mod lexer;
-mod parser;
-mod diagnostics;
-mod loader;
-mod checker;
-mod codegen;
+// Compiler phases. `frontend` lexes + parses, `middle` resolves/checks/loads
+// modules, `backend` emits the Rust server + TS client. `interp`/`serve` are the
+// in-process runtime for `xeres serve`; `fmt` is the canonical formatter.
+mod frontend;
+mod middle;
+mod backend;
 mod interp;
 mod serve;
 mod fmt;
 
-use parser::XeresProgram;
+use frontend::parser::XeresProgram;
+use middle::{checker, diagnostics, loader};
+use backend::codegen;
 use std::fs;
 use std::path::Path;
 use std::process::{exit, Child, Command};

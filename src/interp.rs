@@ -2,7 +2,7 @@
 // runtime (`xeres serve`) uses this instead of generating + compiling Rust, so
 // running an app needs no cargo. Database access is feature-gated (`db`).
 
-use crate::parser::{BinOp, Expr, MatchPat, Stmt, UnOp, XeresProgram};
+use crate::frontend::parser::{BinOp, Expr, MatchPat, Stmt, UnOp, XeresProgram};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -1234,16 +1234,16 @@ server fn line_total(price: Decimal, qty: Int) -> Decimal { return price * qty }
 server fn running(subtotal: Decimal, line: Decimal) -> Decimal { return subtotal + line }\n\
 server fn change(paid: Decimal, due: Decimal) -> Decimal { return paid - due }\n\
 server fn over(total: Decimal, limit: Decimal) -> Bool { return total > limit }\n";
-        let mut lexer = crate::lexer::Lexer::new(src);
-        let mut parser = crate::parser::Parser::new(&mut lexer);
+        let mut lexer = crate::frontend::lexer::Lexer::new(src);
+        let mut parser = crate::frontend::parser::Parser::new(&mut lexer);
         let mut program = parser.parse_program();
-        let analysis = crate::checker::analyze(&program);
+        let analysis = crate::middle::checker::analyze(&program);
         assert!(
             analysis.errors.is_empty(),
             "unexpected errors: {:?}",
             analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
         );
-        crate::checker::lower(&mut program);
+        crate::middle::checker::lower(&mut program);
         let interp = Interp::with_session(&program, None);
 
         // Decimal * Int — exact integer scaling, Int arg coerced via dec_str.
@@ -1272,16 +1272,16 @@ server fn total(xs: List<Int>) -> Int { return xs.reduce(0, (acc, x) -> acc + x)
 server fn nth(xs: List<Int>) -> Int { return xs[1].or(0) }\n\
 server fn oob(xs: List<Int>) -> Int { return xs[9].or(-1) }\n\
 server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
-        let mut lexer = crate::lexer::Lexer::new(src);
-        let mut parser = crate::parser::Parser::new(&mut lexer);
+        let mut lexer = crate::frontend::lexer::Lexer::new(src);
+        let mut parser = crate::frontend::parser::Parser::new(&mut lexer);
         let mut program = parser.parse_program();
-        let analysis = crate::checker::analyze(&program);
+        let analysis = crate::middle::checker::analyze(&program);
         assert!(
             analysis.errors.is_empty(),
             "unexpected errors: {:?}",
             analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
         );
-        crate::checker::lower(&mut program);
+        crate::middle::checker::lower(&mut program);
         let interp = Interp::with_session(&program, None);
         let ints = |v: &[i64]| Value::List(v.iter().map(|n| Value::Int(*n)).collect());
         let as_ints = |v: Value| -> Vec<i64> {
@@ -1327,19 +1327,19 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
         )
         .unwrap();
 
-        let mut program = crate::loader::load_program(app.to_str().unwrap()).unwrap_or_else(|errs| {
+        let mut program = crate::middle::loader::load_program(app.to_str().unwrap()).unwrap_or_else(|errs| {
             panic!(
                 "load failed: {:?}",
                 errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
             )
         });
-        let analysis = crate::checker::analyze(&program);
+        let analysis = crate::middle::checker::analyze(&program);
         assert!(
             analysis.errors.is_empty(),
             "unexpected errors: {:?}",
             analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
         );
-        crate::checker::lower(&mut program);
+        crate::middle::checker::lower(&mut program);
         let interp = Interp::with_session(&program, None);
         // checkout(2, 5) = to_cents(2) + 5 = 200 + 5 = 205.
         let r = interp.call("checkout", vec![Value::Int(2), Value::Int(5)]).unwrap();
@@ -1374,19 +1374,19 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
         )
         .unwrap();
 
-        let mut program = crate::loader::load_program(app.to_str().unwrap()).unwrap_or_else(|errs| {
+        let mut program = crate::middle::loader::load_program(app.to_str().unwrap()).unwrap_or_else(|errs| {
             panic!(
                 "load failed: {:?}",
                 errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
             )
         });
-        let analysis = crate::checker::analyze(&program);
+        let analysis = crate::middle::checker::analyze(&program);
         assert!(
             analysis.errors.is_empty(),
             "stdlib errors: {:?}",
             analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
         );
-        crate::checker::lower(&mut program);
+        crate::middle::checker::lower(&mut program);
         let interp = Interp::with_session(&program, None);
         let ints = |v: &[i64]| Value::List(v.iter().map(|n| Value::Int(*n)).collect());
 
@@ -1410,11 +1410,11 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
     // library is Xeres compiled under the same R1–R33 rules as user code.
     #[test]
     fn stdlib_modules_are_valid_xeres() {
-        for (name, source) in crate::loader::stdlib_modules() {
-            let mut lexer = crate::lexer::Lexer::new(source);
-            let mut parser = crate::parser::Parser::new(&mut lexer);
+        for (name, source) in crate::middle::loader::stdlib_modules() {
+            let mut lexer = crate::frontend::lexer::Lexer::new(source);
+            let mut parser = crate::frontend::parser::Parser::new(&mut lexer);
             let program = parser.parse_program();
-            let analysis = crate::checker::analyze(&program);
+            let analysis = crate::middle::checker::analyze(&program);
             assert!(
                 analysis.errors.is_empty(),
                 "std:{} has errors: {:?}",
