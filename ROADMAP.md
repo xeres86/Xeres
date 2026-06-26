@@ -156,11 +156,17 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   merged server crate + client bundle; import-free apps unchanged. This is the
   keystone for the **two-layer trust model** ([ARCHITECTURE.md](ARCHITECTURE.md)):
   a tiny audited native-core TCB + a stdlib/packages written in Xeres with no
-  ambient authority. **Next cuts:** a package **registry** + `xeres.toml`
-  **manifest** + **semver**/remote/cached packages + signing; `module__name`
-  **mangling** (private-name reuse); re-exports/glob imports/nested namespaces;
-  capability **attenuation** (a narrowed `db`); and migrating the String/List
-  stdlib into self-hosted `std/*.xrs` (the Layer-2 dogfood).
+  ambient authority. **Cut 1.5 shipped (the Layer-2 proof):** the first
+  self-hosted stdlib — `std/math.xrs` + `std/text.xrs`, written in Xeres and
+  compiled into the binary (`include_str!`), imported via the embedded `std:`
+  scheme (`import "std:math"`), zero ambient authority, verified across all three
+  backends. **Next cuts:** a package **registry** + `xeres.toml` **manifest** +
+  **semver**/remote/cached packages + signing; `module__name` **mangling**
+  (private-name reuse); a codegen **clone/borrow pass** so a `List`/`String` arg
+  can be reused after a call (dogfooding found the Rust backend moves it);
+  re-exports/glob imports/nested namespaces; capability **attenuation** (a
+  narrowed `db`); and growing `std/*.xrs` (more modules; migrate the
+  Xeres-expressible String/List builtins).
 - ~~**`Decimal` Cut 2** — arithmetic (`+ - *`) and ordered comparison (`< > <=
   >=`)~~ ✅ done (spec 18) — a typed-desugaring pass rewrites Decimal
   `+ - * < > <= >=` into `__dec_*` builtin calls that every backend emits exactly:

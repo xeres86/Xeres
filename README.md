@@ -496,8 +496,21 @@ The loader merges every imported file into **one** program before the checker
 runs, so the tier/secret rules compose across files for free (a module can't
 widen the boundary). Everything still flattens to the same single server crate +
 client bundle. See [ARCHITECTURE.md](ARCHITECTURE.md) for the two-layer trust
-model this enables. *(Cut 1: relative-path imports + `pub fn` exports; a package
-registry / manifest / versioning are later cuts.)*
+model this enables.
+
+The **standard library is itself written in Xeres** — `import "std:math"` /
+`import "std:text"` pull in modules ([`std/*.xrs`](std)) compiled into the
+compiler binary. They declare no capabilities, so a stdlib import grants nothing:
+
+```xeres
+import "std:math"
+import "std:text"
+server fn band(x: Int) -> Int { return math.clamp(x, 0, 100) }
+ui screen S { view { column { text text.slugify("Hello World") } } }
+```
+
+*(Cut 1: relative-path imports + the embedded `std:` scheme + `pub fn` exports; a
+package registry / manifest / versioning are later cuts.)*
 
 ---
 

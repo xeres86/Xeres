@@ -38,10 +38,27 @@ for the two-layer trust model this establishes.
   `pass_import_basic`, `pass_module_grant`, `fail_import_private`,
   `fail_module_undeclared_cap`, `fail_module_secret_cross` (+ sibling modules).
 
+### Self-hosted stdlib (spec 20, Cut 1.5 — the Layer-2 proof)
+
+- The first standard-library modules — **`std/math.xrs`** (`clamp`, `in_range`,
+  `pow`, `sum`, `average`) and **`std/text.xrs`** (`is_blank`, `word_count`,
+  `slugify`) — are written **in Xeres** and compiled into the compiler binary via
+  `include_str!`. `import "std:math"` resolves to that embedded source (no file on
+  disk, no parser change — the `std:` scheme is purely loader resolution).
+- This is **Layer 2 made real**: the stdlib is ordinary Xeres checked under the
+  same R1–R33 rules as your app, and declares **no `requires`** — zero ambient
+  authority. The functions are pure (tier-`None`), so they run on both tiers.
+- Verified end-to-end: a new interp test runs the embedded modules
+  (`stdlib_runs_end_to_end`), a build-time test asserts every shipped module
+  parses + analyzes clean (`stdlib_modules_are_valid_xeres`), and `pass_import_std`
+  ejects + `cargo build`s + bundles. Dogfooding finding: the Rust backend moves a
+  non-`Copy` argument (`List`/`String`) into a call, so the stdlib is written to
+  pass a value as its last use (a codegen clone/borrow pass is the proper fix).
+
 **Deferred to later cuts:** a package registry, an `xeres.toml` manifest, semver /
 remote / cached packages, signing; `module__name` mangling (private-name reuse);
-re-exports / glob imports; capability attenuation; and migrating the String/List
-stdlib into self-hosted `std/*.xrs`. Cut 1 is local files only.
+re-exports / glob imports; capability attenuation; and growing the self-hosted
+`std/*.xrs` library. Cut 1 imports are local files + the embedded `std:` scheme.
 
 ## 0.5.13 — 2026-06-24 — postgres DoS CVE fix · `Decimal` Cut 2 · closures + higher-order list ops
 

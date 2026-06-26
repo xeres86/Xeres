@@ -129,10 +129,23 @@ risk.
 single merged server crate + client bundle. Verified across all three backends
 (interpreter, ejected Rust, esbuild bundle).
 
+**Shipped (spec 20, Cut 1.5 — the Layer-2 proof):** the first self-hosted stdlib
+modules, [`std/math.xrs`](std/math.xrs) and [`std/text.xrs`](std/text.xrs),
+written in Xeres and **compiled into the compiler binary** (`include_str!`).
+`import "std:math"` resolves to embedded source rather than a file; the modules
+declare **no `requires`**, so they have zero ambient authority — Layer 2 made
+real. They are checked under the same R1–R33 rules and run on both tiers (pure
+functions). A dogfooding finding worth recording: the Rust backend currently
+**moves** a non-`Copy` argument (`List`/`String`) into a call, so a value can't be
+reused after being passed to another function — the stdlib is written around it
+(pass-as-last-use); a liveness-based clone/borrow in codegen is the proper fix and
+a good next cut.
+
 **Deliberately deferred (later cuts):** a package **registry**, an `xeres.toml`
 **manifest**, **semver** resolution and **remote/cached** packages, package
 **signing**; `module__name` **mangling** (so private helpers may share a name
 across modules); per-module separate compilation; re-exports / glob imports /
 nested namespaces; capability **attenuation** (granting a *narrowed* `db`); and
-migrating the String/List stdlib into self-hosted `std/*.xrs` (the Layer 2
-dogfood). Cut 1 is local files only — but the syntax is shaped so these slot in.
+growing the self-hosted `std/*.xrs` library (more modules, and migrating the
+native String/List builtins that are expressible in Xeres). Imports are local
+files + the embedded `std:` scheme only — but the syntax is shaped so these slot in.

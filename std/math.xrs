@@ -1,0 +1,54 @@
+// std/math.xrs — pure numeric helpers, written in Xeres itself.
+//
+// This is Layer 2 of the two-layer trust model (see ARCHITECTURE.md): the
+// standard library is ordinary Xeres source, compiled under the same R1–R33
+// rules as your app. The module declares no `requires`, so it has ZERO ambient
+// authority — every function here touches nothing but its arguments. Import it
+// with `import "std:math"` and call `math.clamp(...)`, etc.
+//
+// These are plain (tier-`None`) functions: pure, so they run on either tier —
+// inlined into a `server fn` or into a browser handler as needed.
+
+// Constrain `x` to the inclusive range [lo, hi].
+pub fn clamp(x: Int, lo: Int, hi: Int) -> Int {
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+// Is `x` within the inclusive range [lo, hi]?
+pub fn in_range(x: Int, lo: Int, hi: Int) -> Bool {
+    return x >= lo && x <= hi
+}
+
+// Integer power. A negative exponent yields 1 (Int math has no fractions).
+pub fn pow(base: Int, exp: Int) -> Int {
+    let result = 1
+    let i = 0
+    while i < exp {
+        result = result * base
+        i = i + 1
+    }
+    return result
+}
+
+// Sum of a list of ints (dogfoods `reduce`).
+pub fn sum(xs: List<Int>) -> Int {
+    return xs.reduce(0, (acc, x) -> acc + x)
+}
+
+// Integer mean, or 0 for an empty list. Calls `sum` — a same-module call,
+// proving intra-module composition. Note the ordering: `xs` is passed to `sum`
+// as its LAST use (the length is read into `n` first), because the Rust backend
+// moves a `List`/`String` argument into a call (no implicit clone/borrow yet).
+pub fn average(xs: List<Int>) -> Int {
+    let n = xs.length()
+    if n == 0 {
+        return 0
+    }
+    return sum(xs) / n
+}

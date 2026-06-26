@@ -1,0 +1,24 @@
+// pass_import_std.xrs — uses the self-hosted standard library (spec 20, Cut 1.5).
+// `std:math` and `std:text` are compiled INTO the xeres binary (no sibling file
+// on disk), proving Layer 2: the stdlib is Xeres source with no ambient
+// authority. The helpers are pure, so they run on both tiers — a `server fn`
+// here, and the browser handlers below.
+import "std:math"
+import "std:text"
+
+server fn price_band(raw: Int) -> Int {
+    return math.clamp(raw, 0, 100)
+}
+
+ui screen Home {
+    state n: Int = 0
+    state slug: String = ""
+    view {
+        column {
+            heading "Stdlib demo"
+            button "clamp" -> { n = math.clamp(150, 0, 100) }
+            button "slug" -> { slug = text.slugify("Hello World") }
+            text slug
+        }
+    }
+}

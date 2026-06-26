@@ -42,6 +42,29 @@ use std::path::{Path, PathBuf};
 /// are exactly the server-only authority builtins exposed by the native core.
 const CAPABILITIES: &[&str] = &["db", "session", "endpoint"];
 
+/// The self-hosted standard library (spec 20, Cut 1.5). Each entry is a module
+/// written in Xeres and **compiled into this binary** via `include_str!`, so
+/// `import "std:math"` resolves to embedded source rather than a file on disk.
+/// This is Layer 2 of the trust model made real: the stdlib is ordinary Xeres
+/// checked under R1–R33, with no ambient authority (none of these modules
+/// `requires` a capability). See `std/*.xrs` and ARCHITECTURE.md.
+const STDLIB: &[(&str, &str)] = &[
+    ("math", include_str!("../std/math.xrs")),
+    ("text", include_str!("../std/text.xrs")),
+];
+
+/// Embedded source for a `std:<module>` import, if it exists.
+fn stdlib_source(module: &str) -> Option<&'static str> {
+    STDLIB.iter().find(|(n, _)| *n == module).map(|(_, s)| *s)
+}
+
+/// The embedded stdlib modules (name, source) — used by tests to verify the
+/// shipped library itself parses + analyzes clean.
+#[cfg(test)]
+pub fn stdlib_modules() -> &'static [(&'static str, &'static str)] {
+    STDLIB
+}
+
 /// A loader diagnostic. Multi-file programs need per-file attribution (the source
 /// snippet lives in a specific file), so unlike `checker::SemanticError` this
 /// carries the file it occurred in. Same `rule`/`message`/`line` shape otherwise.
@@ -293,16 +316,32 @@ fn load_recursive(
         return;
     }
 
-    let source = match std::fs::read_to_string(key) {
-        Ok(s) => s,
-        Err(e) => {
-            errors.push(LoadError {
-                file: display.to_string(),
-                line: 1,
-                rule: "R35 module-visibility",
-                message: format!("cannot read module `{}`: {}", display, e),
-            });
-            return;
+    // `std:<module>` resolves to embedded source; anything else is a file.
+    let source = if let Some(m) = key.strip_prefix("std:") {
+        match stdlib_source(m) {
+            Some(s) => s.to_string(),
+            None => {
+                errors.push(LoadError {
+                    file: display.to_string(),
+                    line: 1,
+                    rule: "R35 module-visibility",
+                    message: format!("unknown stdlib module `{}` — there is no `std:{}`.", display, m),
+                });
+                return;
+            }
+        }
+    } else {
+        match std::fs::read_to_string(key) {
+            Ok(s) => s,
+            Err(e) => {
+                errors.push(LoadError {
+                    file: display.to_string(),
+                    line: 1,
+                    rule: "R35 module-visibility",
+                    message: format!("cannot read module `{}`: {}", display, e),
+                });
+                return;
+            }
         }
     };
     let mut lexer = Lexer::new(&source);
@@ -318,8 +357,16 @@ fn load_recursive(
     stack.push(key.to_string());
     let mut edges = Vec::new();
     for im in &program.imports {
-        let child_key = canon_key(&canon_dir.join(&im.path));
-        let child_display = display_dir.join(&im.path).to_string_lossy().to_string();
+        // `std:<module>` is an embedded-stdlib edge (no filesystem); everything
+        // else resolves relative to the importing file.
+        let (child_key, child_display) = if im.path.starts_with("std:") {
+            (im.path.clone(), im.path.clone())
+        } else {
+            (
+                canon_key(&canon_dir.join(&im.path)),
+                display_dir.join(&im.path).to_string_lossy().to_string(),
+            )
+        };
         edges.push((child_key.clone(), module_name(&child_key), im.grants.clone(), im.line));
         load_recursive(&child_key, &child_display, loaded, order, stack, errors);
     }
@@ -634,8 +681,13 @@ fn collect_caps_expr(e: &Expr, endpoints: &HashSet<String>, out: &mut HashSet<St
 
 // --- small helpers ---
 
-/// The module name for a path: its file stem (`a/money.xrs` ⇒ `money`).
+/// The module name for a path: the part after `std:` for an embedded stdlib
+/// module (`std:math` ⇒ `math`), otherwise the file stem (`a/money.xrs` ⇒
+/// `money`).
 fn module_name(path: &str) -> String {
+    if let Some(m) = path.strip_prefix("std:") {
+        return m.to_string();
+    }
     Path::new(path)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

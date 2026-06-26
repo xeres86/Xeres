@@ -1,0 +1,25 @@
+// std/text.xrs — pure string helpers, written in Xeres itself (Layer 2; see
+// ARCHITECTURE.md). No `requires` ⇒ zero ambient authority. Import with
+// `import "std:text"` and call `text.slugify(...)`, etc. Plain (tier-`None`)
+// functions, so they run on either tier.
+
+// True if the string is empty or only whitespace.
+pub fn is_blank(s: String) -> Bool {
+    return s.trim().length() == 0
+}
+
+// Number of whitespace-separated words (a blank string is 0). Dogfoods `trim` +
+// `split` + `.length()`. `s` is trimmed once into a local — the Rust backend
+// moves a `String` into a call, so we don't pass `s` around and reuse it.
+pub fn word_count(s: String) -> Int {
+    let trimmed = s.trim()
+    if trimmed.length() == 0 {
+        return 0
+    }
+    return trimmed.split(" ").length()
+}
+
+// A URL-ish slug: trimmed, lowercased, spaces turned to hyphens.
+pub fn slugify(s: String) -> String {
+    return s.trim().lower().replace(" ", "-")
+}

@@ -1351,6 +1351,79 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // End-to-end (spec 20, Cut 1.5): the self-hosted stdlib. An app imports the
+    // EMBEDDED `std:math` / `std:text` modules (compiled into the binary), and
+    // the merged program runs through the interpreter. Proves Layer 2 — the
+    // stdlib is Xeres checked under R1–R33 — and exercises `if`/`while`/`reduce`/
+    // `split`, intra-module calls (`average`→`sum`, `word_count`→`is_blank`), and
+    // integer division, all written in Xeres.
+    #[test]
+    fn stdlib_runs_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("xeres_stdlib_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let app = dir.join("app.xrs");
+        std::fs::write(
+            &app,
+            "import \"std:math\"\n\
+             import \"std:text\"\n\
+             server fn band(x: Int) -> Int { return math.clamp(x, 0, 10) }\n\
+             server fn p(b: Int, e: Int) -> Int { return math.pow(b, e) }\n\
+             server fn avg(xs: List<Int>) -> Int { return math.average(xs) }\n\
+             server fn slug(s: String) -> String { return text.slugify(s) }\n\
+             server fn wc(s: String) -> Int { return text.word_count(s) }\n",
+        )
+        .unwrap();
+
+        let mut program = crate::loader::load_program(app.to_str().unwrap()).unwrap_or_else(|errs| {
+            panic!(
+                "load failed: {:?}",
+                errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+            )
+        });
+        let analysis = crate::checker::analyze(&program);
+        assert!(
+            analysis.errors.is_empty(),
+            "stdlib errors: {:?}",
+            analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        crate::checker::lower(&mut program);
+        let interp = Interp::with_session(&program, None);
+        let ints = |v: &[i64]| Value::List(v.iter().map(|n| Value::Int(*n)).collect());
+
+        // clamp (if), pow (while loop + reassignment), average (intra-module call
+        // `sum` + integer division), slugify + word_count (String methods, and
+        // `word_count` calls `is_blank` — another intra-module call).
+        assert!(matches!(interp.call("band", vec![Value::Int(50)]).unwrap(), Value::Int(10)));
+        assert!(matches!(interp.call("band", vec![Value::Int(0 - 5)]).unwrap(), Value::Int(0)));
+        assert!(matches!(interp.call("band", vec![Value::Int(7)]).unwrap(), Value::Int(7)));
+        assert!(matches!(interp.call("p", vec![Value::Int(2), Value::Int(10)]).unwrap(), Value::Int(1024)));
+        assert!(matches!(interp.call("avg", vec![ints(&[2, 4, 6])]).unwrap(), Value::Int(4)));
+        let r = interp.call("slug", vec![Value::Str("  Hello World  ".into())]).unwrap();
+        assert!(matches!(&r, Value::Str(s) if s == "hello-world"), "slug => {:?}", r);
+        assert!(matches!(interp.call("wc", vec![Value::Str("a b c".into())]).unwrap(), Value::Int(3)));
+        assert!(matches!(interp.call("wc", vec![Value::Str("   ".into())]).unwrap(), Value::Int(0)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Every embedded stdlib module must itself parse + analyze clean — the shipped
+    // library is Xeres compiled under the same R1–R33 rules as user code.
+    #[test]
+    fn stdlib_modules_are_valid_xeres() {
+        for (name, source) in crate::loader::stdlib_modules() {
+            let mut lexer = crate::lexer::Lexer::new(source);
+            let mut parser = crate::parser::Parser::new(&mut lexer);
+            let program = parser.parse_program();
+            let analysis = crate::checker::analyze(&program);
+            assert!(
+                analysis.errors.is_empty(),
+                "std:{} has errors: {:?}",
+                name,
+                analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+            );
+        }
+    }
+
     // `session.actor.or("")` — `.or` on a present Optional<String>.
     fn actor_or(default: &str) -> Expr {
         Expr::MethodCall {
