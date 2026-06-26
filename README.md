@@ -461,6 +461,44 @@ server fn login(username: String, password: String) -> Bool {
 used**. The full screen is [`examples/login_db.xrs`](examples/login_db.xrs) —
 verified end-to-end against a live Postgres.
 
+### Modules: imports & capability discipline
+
+Split an app across files. A module is a file; only `pub` declarations cross a
+boundary, and an imported module has **no ambient authority** — it can touch a
+`Located` capability (`db` / `session` / `endpoint`) only if it *declares* the
+need and the importing app *grants* it. This is the supply-chain guarantee: a
+dependency's authority is explicit and auditable, so a left-pad / xz-style attack
+is inexpressible.
+
+```xeres
+// money.xrs — a pure library module (no capabilities).
+fn scale(n: Int) -> Int { return n * 100 }                       // module-private
+pub fn to_cents(dollars: Int) -> Int { return scale(dollars) }   // exported
+
+// app.xrs
+import "money.xrs"
+server fn checkout(dollars: Int) -> Int { return money.to_cents(dollars) }
+```
+
+A module that uses the database must say so, and the app must authorize it:
+
+```xeres
+// repo.xrs
+requires db
+pub server fn purge() -> Int { return db.exec("DELETE FROM sessions") }
+
+// app.xrs
+import "repo.xrs" grant db        // omit the grant ⇒ R34 compile error
+server fn admin() -> Int { return repo.purge() }
+```
+
+The loader merges every imported file into **one** program before the checker
+runs, so the tier/secret rules compose across files for free (a module can't
+widen the boundary). Everything still flattens to the same single server crate +
+client bundle. See [ARCHITECTURE.md](ARCHITECTURE.md) for the two-layer trust
+model this enables. *(Cut 1: relative-path imports + `pub fn` exports; a package
+registry / manifest / versioning are later cuts.)*
+
 ---
 
 ## The rules (what the compiler guarantees)
@@ -495,6 +533,8 @@ Every program is checked against these. A violation is a compile error.
 | **R31** auth-route | `auth ui screen X` is a protected route — needs a session (some fn calls `session.login`), can't be a component, and the default route must stay public. Unauthenticated requests are bounced to `/` on **both** tiers (client router + server shell guard) |
 | **R32** route-param | `ui screen Post(id: String) route "/post/:id"` — each `:name` segment binds a `String`/`Int` prop (every prop bound, ≥1 param). The param is untrusted (R30 applies), and a param route is navigated with all params: `navigate(Post { id: x })` |
 | **R33** transaction | `transaction { … }` runs its `db` writes as one atomic unit (commit on success, roll back on any failure). Server-only (it wraps `db`) and not nestable |
+| **R34** module-capability | an imported module that uses a `Located` capability (`db`/`session`/`endpoint`) must `requires` it **and** the importing app must `grant` it (`import "m.xrs" grant db`) — undeclared or ungranted authority is a compile error (the supply-chain guarantee). The entry app is the root of authority and is never gated |
+| **R35** module-visibility | only `pub` declarations cross a module boundary; referencing a non-`pub` declaration in another module is a compile error |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,
@@ -513,7 +553,7 @@ escape hatch for genuinely-trusted HTML is to produce it in a `server fn` and
 ## How it compiles
 
 ```
-app.xrs ──► lexer ──► parser ──► checker (R1–R20) ──► codegen
+app.xrs ──► lexer ──► parser ──► loader ──► checker (R1–R35) ──► codegen
                                                        ├─► out/server/         a self-contained Rust crate
                                                        │     ├─ src/main.rs      std-only HTTP server: router,
                                                        │     │                   RPC, secret-stripping, sync
@@ -524,6 +564,9 @@ app.xrs ──► lexer ──► parser ──► checker (R1–R20) ──► 
                                                        └─ esbuild client.ts ──► static/client.js   (~1 kb, no framework)
 ```
 
+- The **loader** resolves `import`s, detects cycles, and merges a multi-file
+  program into one before checking (enforcing R34/R35 while module identity is
+  known); import-free apps take an unchanged fast path.
 - The **server** is a `std`-only HTTP server (thread-per-connection) with a
   generated router, a hand-rolled JSON codec, per-model wire serialization that
   omits `secret` fields, and a generic local-first sync endpoint.

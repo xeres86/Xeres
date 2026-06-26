@@ -1,0 +1,12 @@
+// pass_module_grant.xrs — the R34 happy path: an imported module `requires db`,
+// uses it, and the app explicitly `grant`s it. Authority is declared on both
+// sides, so it compiles (spec 20, Cut 1).
+import "repo.xrs" grant db
+
+server fn admin() -> Int {
+    return repo.purge()
+}
+
+ui screen Home {
+    heading "Admin"
+}

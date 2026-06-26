@@ -1,0 +1,9 @@
+// lib_private.xrs — exports `shown`, keeps `hidden` module-private (spec 20).
+// Imported by fail_import_private.xrs, which tries to reach `hidden`.
+fn hidden() -> Int {
+    return 42
+}
+
+pub fn shown() -> Int {
+    return hidden()
+}

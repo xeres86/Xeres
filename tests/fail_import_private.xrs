@@ -1,0 +1,7 @@
+// fail_import_private.xrs — referencing a non-`pub` function in another module
+// is rejected: only `pub` declarations cross a boundary (spec 20, R35).
+import "lib_private.xrs"
+
+server fn go() -> Int {
+    return lib_private.hidden()
+}

@@ -18,6 +18,11 @@ fn fixtures() {
 
     for path in entries {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // Files that are neither pass_ nor fail_ are sibling modules imported by a
+        // fixture (spec 20), not standalone cases — skip them.
+        if !name.starts_with("pass_") && !name.starts_with("fail_") {
+            continue;
+        }
         let want_ok = name.starts_with("pass_");
         let out = Command::new(bin)
             .arg("build")

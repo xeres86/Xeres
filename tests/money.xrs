@@ -1,0 +1,13 @@
+// money.xrs — a pure, capability-free library module (spec 20). Imported by
+// pass_import_basic.xrs. Not a fixture itself (the harness only runs pass_*/fail_*).
+fn scale(n: Int) -> Int {
+    return n * 100
+}
+
+pub fn to_cents(dollars: Int) -> Int {
+    return scale(dollars)
+}
+
+pub fn add(a: Int, b: Int) -> Int {
+    return a + b
+}

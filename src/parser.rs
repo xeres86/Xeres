@@ -1,6 +1,7 @@
 // src/parser.rs
 use crate::token::Token;
 use crate::lexer::{Lexer, LexerState};
+use std::collections::HashSet;
 
 /// A saved parse position for backtracking (lexer cursor + buffered tokens).
 struct Checkpoint {
@@ -28,6 +29,13 @@ pub struct ModelNode {
     pub name: String,
     pub properties: Vec<ModelProperty>,
     pub line: usize,
+    /// `pub` (spec 20) — reserved; Cut 1 enforces module visibility for functions
+    /// only, but the modifier is parsed on every decl so it slots in next cut.
+    #[allow(dead_code)]
+    pub is_pub: bool,
+    /// Source module (file stem) this decl belongs to; set by the loader on the
+    /// merged program, empty on a freshly-parsed single file.
+    pub module: String,
 }
 
 impl ModelNode {
@@ -136,6 +144,12 @@ pub struct FunctionNode {
     pub return_type: Option<String>,
     pub body: Vec<Stmt>,
     pub line: usize,
+    /// `pub fn` — exported so another module may call it as `module.fn(...)`
+    /// (R35, spec 20). Non-`pub` functions are module-private.
+    pub is_pub: bool,
+    /// Source module (file stem); set by the loader when merging, empty on a
+    /// freshly-parsed single file.
+    pub module: String,
 }
 
 #[derive(Debug)]
@@ -143,6 +157,10 @@ pub struct SyncedStateNode {
     pub name: String,
     pub collection_type: String,
     pub line: usize,
+    /// `pub` (spec 20) — reserved; see `ModelNode::is_pub`.
+    #[allow(dead_code)]
+    pub is_pub: bool,
+    pub module: String,
 }
 
 /// A click handler: either a reference/call to a fn, or an inline block.
@@ -211,6 +229,11 @@ pub struct ScreenNode {
     /// segments bind the screen's props from the URL; `None` = a plain route
     /// (path is `/` or `/<name>`). Lets a route carry props (relaxes R28).
     pub route: Option<String>,
+    /// `pub` (spec 20) — reserved; see `ModelNode::is_pub`.
+    #[allow(dead_code)]
+    pub is_pub: bool,
+    /// Source module (file stem); set by the loader when merging.
+    pub module: String,
 }
 
 /// `enum Name { Variant1 Variant2 ... }` — a closed set of unit variants.
@@ -220,6 +243,11 @@ pub struct EnumNode {
     pub name: String,
     pub variants: Vec<String>,
     pub line: usize,
+    /// `pub` (spec 20) — reserved; see `ModelNode::is_pub`.
+    #[allow(dead_code)]
+    pub is_pub: bool,
+    /// Source module (file stem); set by the loader when merging.
+    pub module: String,
 }
 
 /// `endpoint Name { base "https://host" secret key: String }` — the egress
@@ -234,6 +262,24 @@ pub struct EndpointNode {
     /// secret fields (name, type) — server-only, env-loaded, never on the wire.
     pub secrets: Vec<(String, String)>,
     pub line: usize,
+    /// `pub` (spec 20) — reserved; see `ModelNode::is_pub`.
+    #[allow(dead_code)]
+    pub is_pub: bool,
+    /// Source module (file stem); set by the loader when merging. A non-entry
+    /// module that declares an `endpoint` is using the egress capability (R34).
+    pub module: String,
+}
+
+/// `import "relative/path.xrs"` (spec 20) — a dependency edge to another file,
+/// with the Located capabilities the importer `grant`s to it. Relative paths
+/// only in Cut 1 (resolved against the importing file's directory).
+#[derive(Debug)]
+pub struct ImportDecl {
+    pub path: String,
+    /// `grant db, session` — capabilities the importing app hands to the module
+    /// (R34). Empty for a pure, capability-free import.
+    pub grants: HashSet<String>,
+    pub line: usize,
 }
 
 #[derive(Debug)]
@@ -244,6 +290,12 @@ pub struct XeresProgram {
     pub states: Vec<SyncedStateNode>,
     pub screens: Vec<ScreenNode>,
     pub endpoints: Vec<EndpointNode>,
+    /// `import "…"` edges declared in this file (spec 20). Empty ⇒ the
+    /// single-file fast path (the loader returns the program unchanged).
+    pub imports: Vec<ImportDecl>,
+    /// `requires <cap>` — Located capabilities (db/session/endpoint) this module
+    /// declares it needs, so an importer can `grant` them (R34). Per-file.
+    pub requires: HashSet<String>,
 }
 
 // --- The Parser ---
@@ -312,52 +364,72 @@ impl<'a> Parser<'a> {
     pub fn parse_program(&mut self) -> XeresProgram {
         let mut program = XeresProgram {
             models: vec![], enums: vec![], functions: vec![], states: vec![], screens: vec![],
-            endpoints: vec![],
+            endpoints: vec![], imports: vec![], requires: HashSet::new(),
         };
 
         while self.current_token != Token::EOF {
+            // `import "path"` / `requires <cap>` are top-level, contextual (spec 20).
+            if self.cur_is_kw("import") {
+                if let Some(im) = self.parse_import() {
+                    program.imports.push(im);
+                }
+                continue;
+            }
+            if self.cur_is_kw("requires") {
+                for cap in self.parse_cap_list_after_kw() {
+                    program.requires.insert(cap);
+                }
+                continue;
+            }
+            // `pub` modifier (spec 20) precedes a declaration; capture and consume.
+            let is_pub = if self.cur_is_kw("pub") {
+                self.next_token();
+                true
+            } else {
+                false
+            };
             // `enum` is a contextual keyword (top-level only).
             if self.cur_is_kw("enum") {
-                if let Some(e) = self.parse_enum() {
+                if let Some(e) = self.parse_enum(is_pub) {
                     program.enums.push(e);
                 }
                 continue;
             }
             // `endpoint` is a contextual keyword (top-level only).
             if self.cur_is_kw("endpoint") {
-                if let Some(ep) = self.parse_endpoint() {
+                if let Some(ep) = self.parse_endpoint(is_pub) {
                     program.endpoints.push(ep);
                 }
                 continue;
             }
             match self.current_token {
                 Token::Model => {
-                    if let Some(m) = self.parse_model() { program.models.push(m); }
+                    if let Some(m) = self.parse_model(is_pub) { program.models.push(m); }
                 }
                 Token::Ui => {
                     // `ui screen Name {…}` / `ui component Name(…) {…}` vs `ui fn name() {…}`
                     if self.peek_token == Token::Identifier("screen".to_string())
                         || self.peek_token == Token::Identifier("component".to_string())
                     {
-                        if let Some(s) = self.parse_screen() { program.screens.push(s); }
-                    } else if let Some(f) = self.parse_function() {
+                        if let Some(s) = self.parse_screen(is_pub) { program.screens.push(s); }
+                    } else if let Some(f) = self.parse_function(is_pub) {
                         program.functions.push(f);
                     }
                 }
                 Token::Server | Token::Fn => {
-                    if let Some(f) = self.parse_function() { program.functions.push(f); }
+                    if let Some(f) = self.parse_function(is_pub) { program.functions.push(f); }
                 }
                 Token::Auth => {
                     // `auth ui screen/component` is a protected screen (R31);
                     // otherwise `auth` heads an `auth server fn`.
                     if self.peek_token == Token::Ui {
-                        if let Some(s) = self.parse_screen() { program.screens.push(s); }
-                    } else if let Some(f) = self.parse_function() {
+                        if let Some(s) = self.parse_screen(is_pub) { program.screens.push(s); }
+                    } else if let Some(f) = self.parse_function(is_pub) {
                         program.functions.push(f);
                     }
                 }
                 Token::Synced => {
-                    if let Some(s) = self.parse_synced_state() { program.states.push(s); }
+                    if let Some(s) = self.parse_synced_state(is_pub) { program.states.push(s); }
                 }
                 _ => self.next_token(),
             }
@@ -365,7 +437,48 @@ impl<'a> Parser<'a> {
         program
     }
 
-    fn parse_model(&mut self) -> Option<ModelNode> {
+    /// `import "relative/path.xrs"` with an optional `grant cap, cap` (spec 20).
+    /// The path is resolved by the loader against the importing file's directory.
+    fn parse_import(&mut self) -> Option<ImportDecl> {
+        let line = self.cur_line;
+        self.next_token(); // consume 'import'
+        let path = match &self.current_token {
+            Token::Str(s) => s.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume the path string
+        let grants = if self.cur_is_kw("grant") {
+            self.parse_cap_list_after_kw().into_iter().collect()
+        } else {
+            HashSet::new()
+        };
+        Some(ImportDecl { path, grants, line })
+    }
+
+    /// Parse a comma-separated capability list after a `requires`/`grant` keyword
+    /// (e.g. `requires db, session`). Consumes the keyword, then reads bare
+    /// identifiers separated by commas; the loader validates the names (R34).
+    fn parse_cap_list_after_kw(&mut self) -> Vec<String> {
+        self.next_token(); // consume 'requires' / 'grant'
+        let mut caps = Vec::new();
+        loop {
+            match &self.current_token {
+                Token::Identifier(c) => {
+                    caps.push(c.clone());
+                    self.next_token();
+                }
+                _ => break,
+            }
+            if self.current_token == Token::Comma {
+                self.next_token(); // consume ',', expect another cap
+            } else {
+                break;
+            }
+        }
+        caps
+    }
+
+    fn parse_model(&mut self, is_pub: bool) -> Option<ModelNode> {
         let model_line = self.cur_line;
         self.next_token(); // consume 'model'
 
@@ -403,12 +516,12 @@ impl<'a> Parser<'a> {
         }
 
         if self.current_token == Token::RBrace { self.next_token(); }
-        Some(ModelNode { name, properties, line: model_line })
+        Some(ModelNode { name, properties, line: model_line, is_pub, module: String::new() })
     }
 
     /// `enum Name { Variant1 Variant2 ... }` — variants are bare identifiers,
     /// whitespace- or comma-separated.
-    fn parse_enum(&mut self) -> Option<EnumNode> {
+    fn parse_enum(&mut self, is_pub: bool) -> Option<EnumNode> {
         let line = self.cur_line;
         self.next_token(); // consume 'enum'
         let name = match &self.current_token {
@@ -434,11 +547,11 @@ impl<'a> Parser<'a> {
         if self.current_token == Token::RBrace {
             self.next_token();
         }
-        Some(EnumNode { name, variants, line })
+        Some(EnumNode { name, variants, line, is_pub, module: String::new() })
     }
 
     /// `endpoint Name { base "https://host" secret key: String … }` (R26).
-    fn parse_endpoint(&mut self) -> Option<EndpointNode> {
+    fn parse_endpoint(&mut self, is_pub: bool) -> Option<EndpointNode> {
         let line = self.cur_line;
         self.next_token(); // consume 'endpoint'
         let name = match &self.current_token {
@@ -482,10 +595,10 @@ impl<'a> Parser<'a> {
         if self.current_token == Token::RBrace {
             self.next_token();
         }
-        Some(EndpointNode { name, base, secrets, line })
+        Some(EndpointNode { name, base, secrets, line, is_pub, module: String::new() })
     }
 
-    fn parse_function(&mut self) -> Option<FunctionNode> {
+    fn parse_function(&mut self, is_pub: bool) -> Option<FunctionNode> {
         let fn_line = self.cur_line;
         // `auth` modifier precedes the tier: `auth server fn …`.
         let is_auth = if self.current_token == Token::Auth {
@@ -533,7 +646,10 @@ impl<'a> Parser<'a> {
             if self.current_token == Token::RBrace { self.next_token(); }
         }
 
-        Some(FunctionNode { env, is_auth, name, params, return_type, body, line: fn_line })
+        Some(FunctionNode {
+            env, is_auth, name, params, return_type, body, line: fn_line,
+            is_pub, module: String::new(),
+        })
     }
 
     /// Parse a type name: `Ident` or a one-level generic `Ident<Ident>`
@@ -1057,7 +1173,7 @@ impl<'a> Parser<'a> {
 
     // --- View / screen parsing ---
 
-    fn parse_screen(&mut self) -> Option<ScreenNode> {
+    fn parse_screen(&mut self, is_pub: bool) -> Option<ScreenNode> {
         self.allow_record = false; // in views, `{` opens a child block, not a record
         let screen_line = self.cur_line;
         // `auth ui screen` — an optional leading `auth` marks a protected route.
@@ -1131,7 +1247,10 @@ impl<'a> Parser<'a> {
         }
 
         if self.current_token == Token::RBrace { self.next_token(); } // close screen
-        Some(ScreenNode { name, params, states, load, body, line: screen_line, is_component, is_auth, route })
+        Some(ScreenNode {
+            name, params, states, load, body, line: screen_line, is_component, is_auth, route,
+            is_pub, module: String::new(),
+        })
     }
 
     fn parse_state_decl(&mut self) -> Option<StateDecl> {
@@ -1331,7 +1450,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn parse_synced_state(&mut self) -> Option<SyncedStateNode> {
+    fn parse_synced_state(&mut self, is_pub: bool) -> Option<SyncedStateNode> {
         let state_line = self.cur_line;
         self.next_token(); // consume 'synced'
 
@@ -1364,6 +1483,6 @@ impl<'a> Parser<'a> {
         if self.current_token != Token::RAngle { return None; }
         self.next_token();
 
-        Some(SyncedStateNode { name, collection_type, line: state_line })
+        Some(SyncedStateNode { name, collection_type, line: state_line, is_pub, module: String::new() })
     }
 }

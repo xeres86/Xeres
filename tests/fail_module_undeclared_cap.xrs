@@ -1,0 +1,9 @@
+// fail_module_undeclared_cap.xrs — the supply-chain guarantee (spec 20, R34):
+// an imported module that reaches for `db` without declaring `requires db` does
+// not compile. A left-pad/xz-style dependency silently touching the database is
+// inexpressible — its authority would have to be written down and granted.
+import "data_layer.xrs" grant db
+
+server fn run() -> Int {
+    return data_layer.wipe()
+}

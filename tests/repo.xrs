@@ -1,0 +1,7 @@
+// repo.xrs — a data-access module that DECLARES the db capability it uses
+// (spec 20, R34). Imported by pass_module_grant.xrs, which must `grant db`.
+requires db
+
+pub server fn purge() -> Int {
+    return db.exec("DELETE FROM sessions")
+}

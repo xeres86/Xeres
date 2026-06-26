@@ -1197,6 +1197,8 @@ mod tests {
             states: vec![],
             screens: vec![],
             endpoints: vec![],
+            imports: vec![],
+            requires: Default::default(),
         }
     }
 
@@ -1299,6 +1301,54 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
         assert!(matches!(interp.call("has", vec![tags]).unwrap(), Value::Bool(true)));
         let tags2 = Value::List(vec![Value::Str("a".into())]);
         assert!(matches!(interp.call("has", vec![tags2]).unwrap(), Value::Bool(false)));
+    }
+
+    // End-to-end (spec 20): two real files → loader (resolve imports + merge) →
+    // analyze → lower → interp `call`. Proves a cross-module qualified call
+    // (`money.add` / `money.to_cents`) resolves, a module-private helper
+    // (`scale`) runs, and the merged program executes identically to a single
+    // file — the same program the ejected Rust crate and esbuild bundle run.
+    #[test]
+    fn modules_run_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("xeres_spec20_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("money.xrs"),
+            "fn scale(n: Int) -> Int { return n * 100 }\n\
+             pub fn to_cents(dollars: Int) -> Int { return scale(dollars) }\n\
+             pub fn add(a: Int, b: Int) -> Int { return a + b }\n",
+        )
+        .unwrap();
+        let app = dir.join("app.xrs");
+        std::fs::write(
+            &app,
+            "import \"money.xrs\"\n\
+             server fn checkout(dollars: Int, tax: Int) -> Int { return money.add(money.to_cents(dollars), tax) }\n",
+        )
+        .unwrap();
+
+        let mut program = crate::loader::load_program(app.to_str().unwrap()).unwrap_or_else(|errs| {
+            panic!(
+                "load failed: {:?}",
+                errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+            )
+        });
+        let analysis = crate::checker::analyze(&program);
+        assert!(
+            analysis.errors.is_empty(),
+            "unexpected errors: {:?}",
+            analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        crate::checker::lower(&mut program);
+        let interp = Interp::with_session(&program, None);
+        // checkout(2, 5) = to_cents(2) + 5 = 200 + 5 = 205.
+        let r = interp.call("checkout", vec![Value::Int(2), Value::Int(5)]).unwrap();
+        assert!(matches!(r, Value::Int(205)), "checkout => {:?}", r);
+        // The exported helpers are also directly callable in the merged program.
+        let r = interp.call("add", vec![Value::Int(40), Value::Int(2)]).unwrap();
+        assert!(matches!(r, Value::Int(42)), "add => {:?}", r);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // `session.actor.or("")` — `.or` on a present Optional<String>.

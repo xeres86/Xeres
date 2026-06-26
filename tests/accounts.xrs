@@ -1,0 +1,6 @@
+// accounts.xrs — a model carrying a `secret` field (spec 20). Imported by
+// fail_module_secret_cross.xrs to show secret containment composes across files.
+pub model Account {
+    id: String
+    secret pin: String
+}

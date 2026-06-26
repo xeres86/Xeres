@@ -706,6 +706,8 @@ fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<SemanticEr
             return_type: None,
             body: vec![],
             line: s.line,
+            is_pub: false,
+            module: s.module.clone(),
         };
         check_flow_stmts(&s.load, &mut locals, &synthetic, table, errors);
     }
@@ -2972,7 +2974,7 @@ pub fn lower(program: &mut XeresProgram) {
     // NOT mutate (models/enums/states/endpoints). `fns` is owned (`FnSig`) and
     // `resolve_type` never reads `screens`/`components`, so we can still take
     // `&mut` to functions/screens below with no borrow conflict.
-    let XeresProgram { models, enums, functions, states, endpoints, screens } = program;
+    let XeresProgram { models, enums, functions, states, endpoints, screens, .. } = program;
     let table = SymbolTable {
         models: models.iter().map(|m| (m.name.clone(), &*m)).collect(),
         enums: enums.iter().map(|e| (e.name.clone(), &*e)).collect(),

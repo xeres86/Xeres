@@ -145,6 +145,22 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
 - Light touch: `cargo audit` in CI.
 
 ## Later
+- **Modules & capability-secure packages** — **Cut 1 shipped (spec 20):** local
+  multi-file modules with a pre-checker **loader** ([`src/loader.rs`](src/loader.rs))
+  that resolves `import "…"` edges (relative paths), detects cycles, and merges
+  every file into one program — so the tier/secret rules compose across the
+  boundary for free. Only `pub` declarations cross a boundary (**R35**), and an
+  imported module that uses a `Located` capability (`db`/`session`/`endpoint`)
+  must `requires` it *and* be `grant`ed it by the app (**R34**) — the
+  supply-chain guarantee that makes a left-pad/xz-style attack inexpressible. One
+  merged server crate + client bundle; import-free apps unchanged. This is the
+  keystone for the **two-layer trust model** ([ARCHITECTURE.md](ARCHITECTURE.md)):
+  a tiny audited native-core TCB + a stdlib/packages written in Xeres with no
+  ambient authority. **Next cuts:** a package **registry** + `xeres.toml`
+  **manifest** + **semver**/remote/cached packages + signing; `module__name`
+  **mangling** (private-name reuse); re-exports/glob imports/nested namespaces;
+  capability **attenuation** (a narrowed `db`); and migrating the String/List
+  stdlib into self-hosted `std/*.xrs` (the Layer-2 dogfood).
 - ~~**`Decimal` Cut 2** — arithmetic (`+ - *`) and ordered comparison (`< > <=
   >=`)~~ ✅ done (spec 18) — a typed-desugaring pass rewrites Decimal
   `+ - * < > <= >=` into `__dec_*` builtin calls that every backend emits exactly:

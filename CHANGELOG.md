@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.6.0 — unreleased — modules & capability-secure packages (spec 20, Cut 1)
+
+The architectural keystone: local multi-file **modules** with explicit exports
+and **capability discipline**. This is what makes the project principle real —
+*the stdlib and packages are written in Xeres itself, with no ambient authority*
+— so a dependency **cannot** leak a secret, do egress, or touch the database
+unless the app explicitly grants it. See the new [ARCHITECTURE.md](ARCHITECTURE.md)
+for the two-layer trust model this establishes.
+
+### Modules (spec 20)
+
+- **`import "relative/path.xrs"`** — a file can import another (relative paths in
+  Cut 1). The loader resolves the import graph, detects cycles, and merges every
+  file into one program *before* the checker runs — so the existing tier/secret
+  rules (R3/R5/R6, R15/R24/R26, …) compose across the boundary automatically. A
+  module **cannot widen the boundary**: a `secret` still can't cross it, a `server
+  fn` stays server-tier.
+- **`pub`** — declarations are module-private by default; only `pub fn` (and,
+  reserved for the next cut, `pub model` / `pub enum` / `pub ui component`) cross
+  a boundary. Call an exported function as `module.fn(...)`.
+- **R35 module-visibility** — referencing a non-`pub` declaration in another
+  module is a compile error.
+- **R34 module-capability** — *the supply-chain guarantee.* An imported module
+  that uses a `Located` capability (`db` / `session` / `endpoint`) must **declare**
+  it (`requires db` at the module head) **and** the importing app must **grant**
+  it (`import "m.xrs" grant db`). A dependency reaching for undeclared or
+  ungranted authority does not compile — a left-pad / event-stream / xz-style
+  attack becomes *inexpressible*. The entry app is the root of authority and is
+  never gated (it uses `db` directly, as before).
+- **Single output, no regression.** Modules flatten into the same single server
+  crate + single client bundle. Import-free apps take an unchanged fast path
+  (byte-identical output to before). Verified across all three backends — the
+  interpreter (`xeres serve`), the ejected Rust crate (`xeres build` + `cargo
+  build`), and the esbuild client bundle — for a two-file app.
+- New rules **R34** and **R35**; next free rule is **R36**. New fixtures:
+  `pass_import_basic`, `pass_module_grant`, `fail_import_private`,
+  `fail_module_undeclared_cap`, `fail_module_secret_cross` (+ sibling modules).
+
+**Deferred to later cuts:** a package registry, an `xeres.toml` manifest, semver /
+remote / cached packages, signing; `module__name` mangling (private-name reuse);
+re-exports / glob imports; capability attenuation; and migrating the String/List
+stdlib into self-hosted `std/*.xrs`. Cut 1 is local files only.
+
 ## 0.5.13 — 2026-06-24 — postgres DoS CVE fix · `Decimal` Cut 2 · closures + higher-order list ops
 
 A security fix plus two language-completeness features, released together. The

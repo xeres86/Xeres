@@ -1,0 +1,6 @@
+// data_layer.xrs — uses the `db` capability but FORGETS to `requires db`
+// (spec 20, R34). Imported by fail_module_undeclared_cap.xrs. A dependency's
+// authority must be declared, so this is rejected even if the app grants db.
+pub server fn wipe() -> Int {
+    return db.exec("DELETE FROM logs")
+}

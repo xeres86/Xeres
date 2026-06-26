@@ -1,0 +1,12 @@
+// pass_import_basic.xrs — a two-file app: import a pure module and call its
+// exported functions through the `module.fn(...)` qualifier (spec 20, Cut 1).
+import "money.xrs"
+
+server fn checkout(dollars: Int, tax: Int) -> Int {
+    return money.add(money.to_cents(dollars), tax)
+}
+
+ui screen Home {
+    heading "Shop"
+    text "Checkout runs on the server."
+}

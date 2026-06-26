@@ -2,14 +2,14 @@
 mod token;
 mod lexer;
 mod parser;
+mod loader;
 mod checker;
 mod codegen;
 mod interp;
 mod serve;
 mod fmt;
 
-use lexer::Lexer;
-use parser::{Parser, XeresProgram};
+use parser::XeresProgram;
 use std::fs;
 use std::path::Path;
 use std::process::{exit, Child, Command};
@@ -97,20 +97,26 @@ fn fmt_command(path: &str, args: &[String]) -> bool {
     }
 }
 
-/// Parse + check; returns the program (printing diagnostics + None on error).
+/// Load (resolve imports + merge modules) + check; returns the program (printing
+/// diagnostics + None on error). The module loader (spec 20) runs first, so a
+/// multi-file program is merged into one before the checker sees it.
 fn compile(path: &str) -> Option<XeresProgram> {
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {}: {}", path, e);
+    let mut program = match loader::load_program(path) {
+        Ok(p) => p,
+        Err(errors) => {
+            for e in &errors {
+                print_load_error(e);
+            }
+            let n = errors.len();
+            eprintln!("\nxeres: {} error{} - compilation aborted.", n, if n == 1 { "" } else { "s" });
             return None;
         }
     };
-    let mut lexer = Lexer::new(&source);
-    let mut parser = Parser::new(&mut lexer);
-    let mut program = parser.parse_program();
     let analysis = checker::analyze(&program);
     if !analysis.errors.is_empty() {
+        // Checker diagnostics carry a line but not a file; show snippets against
+        // the entry file (correct for the common single-file case).
+        let source = fs::read_to_string(path).unwrap_or_default();
         let lines: Vec<&str> = source.lines().collect();
         for e in &analysis.errors {
             print_diagnostic(path, &lines, e);
@@ -271,6 +277,25 @@ fn load_env(path: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Print a module-loader diagnostic (spec 20). Unlike checker errors these carry
+/// their own file, so the source snippet is read from the right file.
+fn print_load_error(e: &loader::LoadError) {
+    eprintln!("error: [{}] {}", e.rule, e.message);
+    eprintln!("  --> {}:{}", e.file, e.line);
+    if e.line >= 1 {
+        if let Ok(source) = fs::read_to_string(&e.file) {
+            let lines: Vec<&str> = source.lines().collect();
+            if e.line <= lines.len() {
+                let gutter = format!("{:>4}", e.line);
+                eprintln!("     |");
+                eprintln!("{} | {}", gutter, lines[e.line - 1]);
+                eprintln!("     |");
+            }
+        }
+    }
+    eprintln!();
 }
 
 fn print_diagnostic(path: &str, lines: &[&str], e: &checker::SemanticError) {
