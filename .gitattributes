@@ -1,0 +1,10 @@
+# Files embedded into the compiler binary via `include_str!` MUST stay LF.
+#
+# Rust string/raw-string literals normalize CRLF->LF at compile time, but
+# `include_str!` is byte-verbatim — so on a Windows checkout (autocrlf), a CRLF
+# runtime template would leak CRLF into all generated server/client code and
+# break codegen's string-replace machinery (the `//__XERES_*__` placeholders).
+# Pinning these to LF makes the build reproducible across platforms.
+/runtime/** text eol=lf
+/std/** text eol=lf
+*.xrs text eol=lf
