@@ -1,6 +1,6 @@
 {
   "name": "create-xeres",
-  "version": "0.5.13",
+  "version": "0.6.0",
   "description": "Scaffold a new Xeres app (type-safe web, runs on the built-in Xeres server).",
   "type": "module",
   "bin": {

@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.6.0 — unreleased — modules & capability-secure packages (spec 20, Cut 1)
+## 0.6.0 — 2026-06-26 — modules, capability-secure packages & a self-hosted stdlib (spec 20)
+
+> **Bundles 0.5.13.** The 0.5.13 changes below (the postgres DoS CVE fix, Decimal
+> Cut 2, closures) were prepared but never published as released binaries, so
+> 0.6.0 is the release that ships them to users — upgrading from 0.5.12 gets
+> everything in both entries.
 
 The architectural keystone: local multi-file **modules** with explicit exports
 and **capability discipline**. This is what makes the project principle real —
