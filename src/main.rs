@@ -2,6 +2,7 @@
 mod token;
 mod lexer;
 mod parser;
+mod diagnostics;
 mod loader;
 mod checker;
 mod codegen;
@@ -99,31 +100,18 @@ fn fmt_command(path: &str, args: &[String]) -> bool {
 
 /// Load (resolve imports + merge modules) + check; returns the program (printing
 /// diagnostics + None on error). The module loader (spec 20) runs first, so a
-/// multi-file program is merged into one before the checker sees it.
+/// multi-file program is merged into one before the checker sees it. Both
+/// stages produce the same `Diagnostic` type (spec 22 F4), so one renderer
+/// formats either; a checker diagnostic has an empty `file` and is shown
+/// against the entry path.
 fn compile(path: &str) -> Option<XeresProgram> {
     let mut program = match loader::load_program(path) {
         Ok(p) => p,
-        Err(errors) => {
-            for e in &errors {
-                print_load_error(e);
-            }
-            let n = errors.len();
-            eprintln!("\nxeres: {} error{} - compilation aborted.", n, if n == 1 { "" } else { "s" });
-            return None;
-        }
+        Err(errors) => return abort(path, &errors),
     };
     let analysis = checker::analyze(&program);
     if !analysis.errors.is_empty() {
-        // Checker diagnostics carry a line but not a file; show snippets against
-        // the entry file (correct for the common single-file case).
-        let source = fs::read_to_string(path).unwrap_or_default();
-        let lines: Vec<&str> = source.lines().collect();
-        for e in &analysis.errors {
-            print_diagnostic(path, &lines, e);
-        }
-        let n = analysis.errors.len();
-        eprintln!("\nxeres: {} error{} - compilation aborted.", n, if n == 1 { "" } else { "s" });
-        return None;
+        return abort(path, &analysis.errors);
     }
     // Typed desugaring (spec 18): rewrite Decimal `+ - * < > <= >=` into `__dec_*`
     // builtin calls now that types are known — both backends emit these directly.
@@ -279,34 +267,12 @@ fn load_env(path: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Print a module-loader diagnostic (spec 20). Unlike checker errors these carry
-/// their own file, so the source snippet is read from the right file.
-fn print_load_error(e: &loader::LoadError) {
-    eprintln!("error: [{}] {}", e.rule, e.message);
-    eprintln!("  --> {}:{}", e.file, e.line);
-    if e.line >= 1 {
-        if let Ok(source) = fs::read_to_string(&e.file) {
-            let lines: Vec<&str> = source.lines().collect();
-            if e.line <= lines.len() {
-                let gutter = format!("{:>4}", e.line);
-                eprintln!("     |");
-                eprintln!("{} | {}", gutter, lines[e.line - 1]);
-                eprintln!("     |");
-            }
-        }
-    }
-    eprintln!();
-}
-
-fn print_diagnostic(path: &str, lines: &[&str], e: &checker::SemanticError) {
-    eprintln!("error: [{}] {}", e.rule, e.message);
-    eprintln!("  --> {}:{}", path, e.line);
-    if e.line >= 1 && e.line <= lines.len() {
-        let src = lines[e.line - 1];
-        let gutter = format!("{:>4}", e.line);
-        eprintln!("     |");
-        eprintln!("{} | {}", gutter, src);
-        eprintln!("     |");
-    }
-    eprintln!();
+/// Print all diagnostics through the shared renderer and return `None` so the
+/// caller's `compile`-step short-circuit reads as one expression. Used by both
+/// the loader and the checker — they produce the same `Diagnostic` type now.
+fn abort(entry_path: &str, errors: &[diagnostics::Diagnostic]) -> Option<XeresProgram> {
+    diagnostics::report(errors, entry_path);
+    let n = errors.len();
+    eprintln!("\nxeres: {} error{} - compilation aborted.", n, if n == 1 { "" } else { "s" });
+    None
 }

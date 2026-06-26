@@ -35,6 +35,7 @@
 
 use crate::lexer::Lexer;
 use crate::parser::{Expr, Handler, Parser, Stmt, ViewNode, XeresProgram};
+use crate::diagnostics::Diagnostic;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -65,16 +66,6 @@ pub fn stdlib_modules() -> &'static [(&'static str, &'static str)] {
     STDLIB
 }
 
-/// A loader diagnostic. Multi-file programs need per-file attribution (the source
-/// snippet lives in a specific file), so unlike `checker::SemanticError` this
-/// carries the file it occurred in. Same `rule`/`message`/`line` shape otherwise.
-pub struct LoadError {
-    pub file: String,
-    pub line: usize,
-    pub rule: &'static str,
-    pub message: String,
-}
-
 /// One parsed file in the module graph.
 struct LoadedModule {
     /// Module name = the file stem (`money.xrs` ⇒ `money`). The qualifier used in
@@ -91,11 +82,11 @@ struct LoadedModule {
 /// Resolve an entry `.xrs` file and everything it imports into one merged
 /// program, or a list of diagnostics. The single-file (no-import) case returns
 /// the parsed program unchanged.
-pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<LoadError>> {
+pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
     let mut loaded: HashMap<String, LoadedModule> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut stack: Vec<String> = Vec::new();
-    let mut errors: Vec<LoadError> = Vec::new();
+    let mut errors: Vec<Diagnostic> = Vec::new();
 
     let entry_key = canon_key(Path::new(entry));
     load_recursive(&entry_key, entry, &mut loaded, &mut order, &mut stack, &mut errors);
@@ -118,7 +109,7 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<LoadError>> {
     for key in &order {
         let m = &loaded[key];
         if let Some(prev) = by_name.insert(m.name.as_str(), m.file.as_str()) {
-            errors.push(LoadError {
+            errors.push(Diagnostic {
                 file: m.file.clone(),
                 line: 1,
                 rule: "R35 module-visibility",
@@ -161,7 +152,7 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<LoadError>> {
             let required = module_requires.get(child_name).cloned().unwrap_or_default();
             for cap in &required {
                 if !grants.contains(cap) {
-                    errors.push(LoadError {
+                    errors.push(Diagnostic {
                         file: m.file.clone(),
                         line: *line,
                         rule: "R34 module-capability",
@@ -229,7 +220,7 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<LoadError>> {
             if !declared.contains(cap) {
                 let file = module_file.get(module).cloned().unwrap_or_default();
                 let line = module_use_line.get(module).copied().unwrap_or(1);
-                errors.push(LoadError {
+                errors.push(Diagnostic {
                     file,
                     line,
                     rule: "R34 module-capability",
@@ -301,13 +292,13 @@ fn load_recursive(
     loaded: &mut HashMap<String, LoadedModule>,
     order: &mut Vec<String>,
     stack: &mut Vec<String>,
-    errors: &mut Vec<LoadError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     if loaded.contains_key(key) {
         return; // diamond import — already loaded
     }
     if stack.iter().any(|k| k == key) {
-        errors.push(LoadError {
+        errors.push(Diagnostic {
             file: display.to_string(),
             line: 1,
             rule: "R35 module-visibility",
@@ -321,7 +312,7 @@ fn load_recursive(
         match stdlib_source(m) {
             Some(s) => s.to_string(),
             None => {
-                errors.push(LoadError {
+                errors.push(Diagnostic {
                     file: display.to_string(),
                     line: 1,
                     rule: "R35 module-visibility",
@@ -334,7 +325,7 @@ fn load_recursive(
         match std::fs::read_to_string(key) {
             Ok(s) => s,
             Err(e) => {
-                errors.push(LoadError {
+                errors.push(Diagnostic {
                     file: display.to_string(),
                     line: 1,
                     rule: "R35 module-visibility",
@@ -394,7 +385,7 @@ struct Caller<'a> {
     line: usize,
 }
 
-fn rewrite_stmts(stmts: &mut [Stmt], caller: Caller, ctx: &ResolveCtx, errors: &mut Vec<LoadError>) {
+fn rewrite_stmts(stmts: &mut [Stmt], caller: Caller, ctx: &ResolveCtx, errors: &mut Vec<Diagnostic>) {
     for s in stmts.iter_mut() {
         match s {
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Return(value)
@@ -428,7 +419,7 @@ fn rewrite_stmts(stmts: &mut [Stmt], caller: Caller, ctx: &ResolveCtx, errors: &
     }
 }
 
-fn rewrite_expr(expr: &mut Expr, caller: Caller, ctx: &ResolveCtx, errors: &mut Vec<LoadError>) {
+fn rewrite_expr(expr: &mut Expr, caller: Caller, ctx: &ResolveCtx, errors: &mut Vec<Diagnostic>) {
     match expr {
         // `mod.fn(args)` — a module-qualified call. If the receiver names a known
         // module, resolve it through the import/`pub` discipline (R35) and lower
@@ -445,7 +436,7 @@ fn rewrite_expr(expr: &mut Expr, caller: Caller, ctx: &ResolveCtx, errors: &mut 
                         .map(|s| s.contains(recv))
                         .unwrap_or(false);
                     if !imported {
-                        errors.push(LoadError {
+                        errors.push(Diagnostic {
                             file: caller.file.to_string(),
                             line: caller.line,
                             rule: "R35 module-visibility",
@@ -462,7 +453,7 @@ fn rewrite_expr(expr: &mut Expr, caller: Caller, ctx: &ResolveCtx, errors: &mut 
                         .map(|s| s.contains(method))
                         .unwrap_or(false);
                     if !is_pub {
-                        errors.push(LoadError {
+                        errors.push(Diagnostic {
                             file: caller.file.to_string(),
                             line: caller.line,
                             rule: "R35 module-visibility",
@@ -488,7 +479,7 @@ fn rewrite_expr(expr: &mut Expr, caller: Caller, ctx: &ResolveCtx, errors: &mut 
         Expr::Call { callee, args } => {
             if let Some(owner) = ctx.fn_module.get(callee) {
                 if owner != caller.module {
-                    errors.push(LoadError {
+                    errors.push(Diagnostic {
                         file: caller.file.to_string(),
                         line: caller.line,
                         rule: "R35 module-visibility",
@@ -541,7 +532,7 @@ fn rewrite_expr(expr: &mut Expr, caller: Caller, ctx: &ResolveCtx, errors: &mut 
     }
 }
 
-fn rewrite_view(v: &mut ViewNode, caller: Caller, ctx: &ResolveCtx, errors: &mut Vec<LoadError>) {
+fn rewrite_view(v: &mut ViewNode, caller: Caller, ctx: &ResolveCtx, errors: &mut Vec<Diagnostic>) {
     match v {
         ViewNode::Element { arg, style, event, children, .. } => {
             if let Some(a) = arg {
@@ -702,9 +693,9 @@ fn canon_key(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_string_lossy().to_string())
 }
 
-fn check_cap_name(cap: &str, file: &str, line: usize, errors: &mut Vec<LoadError>) {
+fn check_cap_name(cap: &str, file: &str, line: usize, errors: &mut Vec<Diagnostic>) {
     if !CAPABILITIES.contains(&cap) {
-        errors.push(LoadError {
+        errors.push(Diagnostic {
             file: file.to_string(),
             line,
             rule: "R34 module-capability",

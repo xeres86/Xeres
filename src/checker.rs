@@ -3,6 +3,7 @@ use crate::parser::{
     BinOp, EndpointNode, EnumNode, EnvModifier, Expr, FunctionNode, Handler, MatchArm, MatchPat,
     ModelNode, ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
 };
+use crate::diagnostics::Diagnostic;
 use std::collections::{HashMap, HashSet};
 
 const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime", "Decimal"];
@@ -10,14 +11,8 @@ const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime", "Decim
 /// Stdlib methods on a `String` receiver.
 const STRING_METHODS: &[&str] = &["trim", "upper", "lower", "length", "contains", "split", "replace"];
 
-pub struct SemanticError {
-    pub rule: &'static str,
-    pub message: String,
-    pub line: usize,
-}
-
 pub struct Analysis {
-    pub errors: Vec<SemanticError>,
+    pub errors: Vec<Diagnostic>,
     pub returns_secret: HashMap<String, bool>,
 }
 
@@ -61,12 +56,13 @@ fn check_match_patterns(
     locals: &HashMap<String, (Option<String>, bool)>,
     table: &SymbolTable,
     line: usize,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let enum_name = match resolve_type(scrutinee, locals, table) {
         Some(t) if table.enums.contains_key(&t) => t,
         Some(t) => {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R20 match",
                 message: format!("`match` expects an enum, got `{}`.", t),
                 line,
@@ -83,7 +79,8 @@ fn check_match_patterns(
             MatchPat::Wildcard => has_wildcard = true,
             MatchPat::Variant(v) => {
                 if !en.variants.iter().any(|x| x == v) {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R20 match",
                         message: format!("enum `{}` has no variant `{}`.", enum_name, v),
                         line,
@@ -101,7 +98,8 @@ fn check_match_patterns(
             .filter(|v| !covered.contains(v))
             .collect();
         if !missing.is_empty() {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R20 match",
                 message: format!(
                     "`match` on `{}` is not exhaustive — missing {} (add it, or `_`).",
@@ -451,7 +449,7 @@ fn taint_scan(
     tainted_return
 }
 
-fn check_flow(f: &FunctionNode, table: &SymbolTable, errors: &mut Vec<SemanticError>) {
+fn check_flow(f: &FunctionNode, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
     let mut locals: HashMap<String, (Option<String>, bool)> = HashMap::new();
     for p in &f.params {
         locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
@@ -464,7 +462,7 @@ fn check_flow_stmts(
     locals: &mut HashMap<String, (Option<String>, bool)>,
     f: &FunctionNode,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let in_browser = f.env != EnvModifier::Server;
     for stmt in stmts {
@@ -495,7 +493,8 @@ fn check_flow_stmts(
                 // Rust (no exceptions); server failures surface to the client
                 // as a failed RPC, which the client's `try` catches.
                 if f.env != EnvModifier::Ui {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R16 try-context",
                         message: format!(
                             "`try` in `{}` is only valid in ui code; a server failure surfaces to the caller as a failed `await`.",
@@ -515,7 +514,8 @@ fn check_flow_stmts(
                 // R14 — the condition must be Bool (when resolvable).
                 if let Some(t) = resolve_type(cond, locals, table) {
                     if t != "Bool" {
-                        errors.push(SemanticError {
+                        errors.push(Diagnostic {
+                            file: String::new(),
                             rule: "R14 if-condition",
                             message: format!("`if` condition in `{}` must be Bool, got `{}`.", f.name, t),
                             line: f.line,
@@ -540,7 +540,8 @@ fn check_flow_stmts(
                 check_await(cond, false, in_browser, &f.name, f.line, table, errors);
                 if let Some(t) = resolve_type(cond, locals, table) {
                     if t != "Bool" {
-                        errors.push(SemanticError {
+                        errors.push(Diagnostic {
+                            file: String::new(),
                             rule: "R14 if-condition",
                             message: format!("`while` condition in `{}` must be Bool, got `{}`.", f.name, t),
                             line: f.line,
@@ -563,7 +564,8 @@ fn check_flow_stmts(
                 // R33 — `transaction { … }` wraps `db` writes (server-only, R15) in
                 // one atomic unit, so it's server-only and not nestable.
                 if f.env != EnvModifier::Server {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R33 transaction",
                         message: format!(
                             "`transaction {{ … }}` in `{}` runs {}; it groups `db` writes, which are server-only — use it inside a `server fn`.",
@@ -574,7 +576,8 @@ fn check_flow_stmts(
                     });
                 }
                 if body.iter().any(|s| matches!(s, Stmt::Transaction(_))) {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R33 transaction",
                         message: format!("nested `transaction {{ … }}` in `{}` — a transaction can't contain another.", f.name),
                         line: f.line,
@@ -596,7 +599,7 @@ fn check_return_type(
     e: &Expr,
     locals: &HashMap<String, (Option<String>, bool)>,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let actual = match resolve_type(e, locals, table) {
         Some(t) => t,
@@ -605,7 +608,8 @@ fn check_return_type(
     match &f.return_type {
         Some(declared) => {
             if !type_compatible(&actual, declared) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R7 return-type",
                     message: format!(
                         "`{}` is declared to return `{}`, but this `return` yields `{}`.",
@@ -616,7 +620,8 @@ fn check_return_type(
             }
         }
         None => {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R7 return-type",
                 message: format!(
                     "`{}` returns a value of type `{}` but declares no return type; add `-> {}`.",
@@ -647,10 +652,11 @@ fn type_compatible(actual: &str, declared: &str) -> bool {
 // expressions exactly as they do to a `ui fn`, plus a scope rule (R8): every
 // identifier must be a declared prop, a `for` binding, or a known function.
 
-fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<SemanticError>) {
+fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
     for p in &s.params {
         if !is_known_type(&p.type_name, table) {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R1 unknown-type",
                 message: format!(
                     "prop `{}: {}` of screen `{}` has unknown type.",
@@ -669,14 +675,16 @@ fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<SemanticEr
     // `state name: Type = init` — client-side reactive cells, in scope below.
     for st in &s.states {
         if !is_known_type(&st.type_name, table) {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R1 unknown-type",
                 message: format!("state `{}: {}` in screen `{}` has unknown type.", st.name, st.type_name, s.name),
                 line: st.line,
             });
         } else if let Some(actual) = resolve_type(&st.init, &locals, table) {
             if !type_compatible(&actual, &st.type_name) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R11 state-init",
                     message: format!(
                         "state `{}` is `{}` but its initializer is `{}`.",
@@ -735,7 +743,7 @@ fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<SemanticEr
 /// screen/component (props of a component are themselves untrusted), so no
 /// interprocedural flow is needed, and conservative by design — like R7/R18 it
 /// only fires on provable taint.
-fn check_raw_taint(s: &ScreenNode, errors: &mut Vec<SemanticError>) {
+fn check_raw_taint(s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
     // Untrusted-in sources: this view's props + any state cell bound to an input.
     let mut tainted: HashSet<String> = s.params.iter().map(|p| p.name.clone()).collect();
     for v in &s.body {
@@ -777,7 +785,7 @@ fn collect_bound_states(v: &ViewNode, out: &mut HashSet<String>) {
 
 /// Walk a view node's expression slots looking for `raw(...)` sinks, carrying the
 /// set of untrusted idents (extended by a `for` that iterates a tainted source).
-fn raw_walk_view(v: &ViewNode, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<SemanticError>) {
+fn raw_walk_view(v: &ViewNode, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
     match v {
         ViewNode::Element { arg, style, event, children, .. } => {
             if let Some(a) = arg {
@@ -823,11 +831,12 @@ fn raw_walk_view(v: &ViewNode, tainted: &HashSet<String>, s: &ScreenNode, errors
 /// Descend an expression looking for `raw(inner)` sinks. A `raw` wrapping an
 /// untrusted value is the violation. Descent does not enter `declassify(...)`
 /// (the audited server-side downgrade laund­ers its subtree by construction).
-fn raw_walk_expr(e: &Expr, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<SemanticError>) {
+fn raw_walk_expr(e: &Expr, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
     match e {
         Expr::Raw(inner) => {
             if expr_untrusted(inner, tainted) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R30 raw-taint",
                     message: format!(
                         "`raw(...)` in {} `{}` wraps untrusted inbound data (a prop or input-bound `state`), which would inject unescaped HTML from the request surface. Render it with default escaping (drop `raw`), or build the trusted HTML in a `server fn` and `await` it into a non-bound `state` first.",
@@ -944,7 +953,7 @@ fn check_view(
     sname: &str,
     sline: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     match v {
         ViewNode::Element { tag, arg, bind, event, children, .. } => {
@@ -965,7 +974,8 @@ fn check_view(
                 let ok = states.contains(var)
                     && matches!(locals.get(var), Some((Some(t), _)) if want.contains(&t.as_str()));
                 if !ok {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R13 input-binding",
                         message: format!(
                             "`bind {}` on `{}` in screen `{}` requires a `state {}: {}` cell.",
@@ -982,7 +992,8 @@ fn check_view(
                     Some(Handler::Call(target)) => {
                         check_nav_target(target, "`link`", sname, sline, locals, table, errors)
                     }
-                    _ => errors.push(SemanticError {
+                    _ => errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R28 navigation",
                         message: format!(
                             "`link` in screen `{}` needs a target screen: `link \"Label\" -> Screen`.",
@@ -1019,7 +1030,8 @@ fn check_view(
             // R14 — an `if` condition must be Bool (when its type is resolvable).
             if let Some(t) = resolve_type(cond, locals, table) {
                 if t != "Bool" {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R14 if-condition",
                         message: format!("`if` condition in screen `{}` must be Bool, got `{}`.", sname, t),
                         line: sline,
@@ -1052,7 +1064,7 @@ fn check_component(
     locals: &HashMap<String, (Option<String>, bool)>,
     sname: &str,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     // Arg expressions are checked in the caller's (Ui) context.
     for (_, v) in args {
@@ -1062,7 +1074,8 @@ fn check_component(
     let comp = match table.components.get(name) {
         Some(c) => c,
         None => {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R17 component",
                 message: format!(
                     "`{}` is not a known component. Declare it with `ui component {}(...) {{ view {{ … }} }}`.",
@@ -1077,14 +1090,16 @@ fn check_component(
     let mut provided: HashSet<&str> = HashSet::new();
     for (field, value) in args {
         match comp.params.iter().find(|p| &p.name == field) {
-            None => errors.push(SemanticError {
+            None => errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R17 component",
                 message: format!("component `{}` has no param `{}`.", name, field),
                 line,
             }),
             Some(param) => {
                 if !provided.insert(field.as_str()) {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R17 component",
                         message: format!("param `{}` is set more than once for `{}`.", field, name),
                         line,
@@ -1092,7 +1107,8 @@ fn check_component(
                 }
                 if let Some(actual) = resolve_type(value, locals, table) {
                     if !type_compatible(&actual, &param.type_name) {
-                        errors.push(SemanticError {
+                        errors.push(Diagnostic {
+                            file: String::new(),
                             rule: "R17 component",
                             message: format!(
                                 "param `{}.{}` expects `{}`, but got `{}`.",
@@ -1110,7 +1126,8 @@ fn check_component(
         let omittable = generic_inner("Optional", &p.type_name).is_some()
             || generic_inner("List", &p.type_name).is_some();
         if !provided.contains(p.name.as_str()) && !omittable {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R17 component",
                 message: format!("missing param `{}` when invoking `{}`.", p.name, name),
                 line,
@@ -1138,11 +1155,12 @@ fn check_nav_target(
     line: usize,
     locals: &HashMap<String, (Option<String>, bool)>,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     match target {
         Expr::Ident(name) => match table.screens.get(name.as_str()) {
-            None => errors.push(SemanticError {
+            None => errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R28 navigation",
                 message: format!(
                     "{} targets `{}`, which is not a navigable screen. Declare a prop-less `ui screen {} {{ … }}`.",
@@ -1150,12 +1168,14 @@ fn check_nav_target(
                 ),
                 line,
             }),
-            Some(sc) if sc.route.is_some() => errors.push(SemanticError {
+            Some(sc) if sc.route.is_some() => errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R32 route-param",
                 message: format!("{} targets the route `{}`, which takes params — supply them: `navigate({} {{ … }})`.", site, name, name),
                 line,
             }),
-            Some(sc) if !sc.params.is_empty() => errors.push(SemanticError {
+            Some(sc) if !sc.params.is_empty() => errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R28 navigation",
                 message: format!(
                     "{} targets `{}`, which takes props — only prop-less screens are navigable. Have `{}` fetch its data in `on load` instead.",
@@ -1167,7 +1187,8 @@ fn check_nav_target(
         },
         Expr::Record { name, fields } => {
             let Some(sc) = table.screens.get(name.as_str()) else {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R32 route-param",
                     message: format!("{} targets `{}`, which is not a known screen.", site, name),
                     line,
@@ -1175,7 +1196,8 @@ fn check_nav_target(
                 return;
             };
             if sc.route.is_none() || sc.is_component {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R32 route-param",
                     message: format!("{} supplies params to `{}`, but it has no `route` pattern — only a route with params takes `{{ … }}`.", site, name),
                     line,
@@ -1186,7 +1208,8 @@ fn check_nav_target(
             for (f, v) in fields {
                 check_bindings(v, locals, sname, line, table, errors); // value must be in scope (R8)
                 if seen.contains(&f.as_str()) {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R32 route-param",
                         message: format!("param `{}` supplied twice to `{}`.", f, name),
                         line,
@@ -1194,7 +1217,8 @@ fn check_nav_target(
                 }
                 seen.push(f.as_str());
                 match sc.params.iter().find(|p| &p.name == f) {
-                    None => errors.push(SemanticError {
+                    None => errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R32 route-param",
                         message: format!("`{}` is not a param of route `{}`.", f, name),
                         line,
@@ -1202,7 +1226,8 @@ fn check_nav_target(
                     Some(p) => {
                         if let Some(actual) = resolve_type(v, locals, table) {
                             if !type_compatible(&actual, &p.type_name) {
-                                errors.push(SemanticError {
+                                errors.push(Diagnostic {
+                                    file: String::new(),
                                     rule: "R32 route-param",
                                     message: format!("param `{}` of `{}` is `{}`, got `{}`.", f, name, p.type_name, actual),
                                     line,
@@ -1214,7 +1239,8 @@ fn check_nav_target(
             }
             for p in &sc.params {
                 if !seen.contains(&p.name.as_str()) {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R32 route-param",
                         message: format!("{} to `{}` is missing param `{}`.", site, name, p.name),
                         line,
@@ -1222,7 +1248,8 @@ fn check_nav_target(
                 }
             }
         }
-        _ => errors.push(SemanticError {
+        _ => errors.push(Diagnostic {
+            file: String::new(),
             rule: "R28 navigation",
             message: format!(
                 "{} in `{}` must name a screen, e.g. `navigate(Home)` — not an arbitrary expression.",
@@ -1241,7 +1268,7 @@ fn check_handler_block(
     sname: &str,
     sline: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let mut local = locals.clone();
     for s in stmts {
@@ -1254,7 +1281,8 @@ fn check_handler_block(
             Stmt::Assign { name, value } => {
                 check_screen_expr(value, &local, sname, sline, table, errors);
                 match local.get(name) {
-                    None => errors.push(SemanticError {
+                    None => errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R8 unknown-binding",
                         message: format!(
                             "cannot assign to `{}` in screen `{}` — it is not a declared `state` cell.",
@@ -1265,7 +1293,8 @@ fn check_handler_block(
                     Some((Some(target_ty), _)) => {
                         if let Some(actual) = resolve_type(value, &local, table) {
                             if !type_compatible(&actual, target_ty) {
-                                errors.push(SemanticError {
+                                errors.push(Diagnostic {
+                                    file: String::new(),
                                     rule: "R11 state-init",
                                     message: format!(
                                         "`{}` is `{}` but is assigned `{}`.",
@@ -1291,7 +1320,8 @@ fn check_handler_block(
                 check_screen_expr(cond, &local, sname, sline, table, errors);
                 if let Some(t) = resolve_type(cond, &local, table) {
                     if t != "Bool" {
-                        errors.push(SemanticError {
+                        errors.push(Diagnostic {
+                            file: String::new(),
                             rule: "R14 if-condition",
                             message: format!("`if` condition in screen `{}` must be Bool, got `{}`.", sname, t),
                             line: sline,
@@ -1319,7 +1349,8 @@ fn check_handler_block(
                     check_handler_block(&arm.body, &local, sname, sline, table, errors);
                 }
             }
-            Stmt::Transaction(_) => errors.push(SemanticError {
+            Stmt::Transaction(_) => errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R33 transaction",
                 message: format!("`transaction {{ … }}` in screen `{}` is server-only — group `db` writes in a `server fn`, not a ui handler.", sname),
                 line: sline,
@@ -1337,7 +1368,7 @@ fn check_screen_expr(
     sname: &str,
     sline: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     check_expr(e, locals, EnvModifier::Ui, sname, sline, table, errors);
     check_bindings(e, locals, sname, sline, table, errors);
@@ -1351,7 +1382,7 @@ fn check_bindings(
     sname: &str,
     sline: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     match e {
         Expr::Ident(v) => {
@@ -1359,7 +1390,8 @@ fn check_bindings(
                 || table.fns.contains_key(v)
                 || table.states.contains_key(v);
             if !in_scope {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R8 unknown-binding",
                     message: format!(
                         "`{}` is not in scope in screen `{}`. Pass it as a prop, e.g. `ui screen {}({}: Type)`.",
@@ -1464,7 +1496,7 @@ fn check_expr(
     fn_name: &str,
     fn_line: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => {}
@@ -1478,7 +1510,8 @@ fn check_expr(
             if let Expr::Ident(name) = base.as_ref() {
                 if let Some(en) = table.enums.get(name) {
                     if !en.variants.iter().any(|v| v == field) {
-                        errors.push(SemanticError {
+                        errors.push(Diagnostic {
+                            file: String::new(),
                             rule: "R20 match",
                             message: format!("enum `{}` has no variant `{}`.", name, field),
                             line: fn_line,
@@ -1492,7 +1525,8 @@ fn check_expr(
                 if let Some(model) = table.models.get(&model_name) {
                     if let Some(prop) = model.field(field) {
                         if prop.is_secret && fn_env != EnvModifier::Server {
-                            errors.push(SemanticError {
+                            errors.push(Diagnostic {
+                                file: String::new(),
                                 rule: "R3 secret-containment",
                                 message: format!(
                                     "secret field `{}.{}` is read inside `{}`, which runs {}. Secret data may only be touched server-side.",
@@ -1511,7 +1545,8 @@ fn check_expr(
             // value (so it bypasses R8 in `check_bindings`).
             if callee == "navigate" {
                 if fn_env != EnvModifier::Ui {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R28 navigation",
                         message: format!(
                             "`navigate(...)` in `{}` runs {}; navigation is browser-only — call it from a `ui` screen handler or `on load`.",
@@ -1521,7 +1556,8 @@ fn check_expr(
                     });
                 }
                 if args.len() != 1 {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R28 navigation",
                         message: "`navigate` takes exactly one screen, e.g. `navigate(Home)`.".into(),
                         line: fn_line,
@@ -1537,14 +1573,16 @@ fn check_expr(
             // argument is the very mixing this primitive exists to prevent.
             if callee == "decimal" {
                 if args.len() != 1 {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R29 decimal",
                         message: "`decimal(...)` takes exactly one string, e.g. `decimal(\"19.99\")`.".into(),
                         line: fn_line,
                     });
                 } else if let Some(t) = resolve_type(&args[0], locals, table) {
                     if t != "String" {
-                        errors.push(SemanticError {
+                        errors.push(Diagnostic {
+                            file: String::new(),
                             rule: "R29 decimal",
                             message: format!(
                                 "`decimal(...)` takes a `String`, got `{}`. Write the amount as a string literal: `decimal(\"19.99\")`.",
@@ -1562,7 +1600,8 @@ fn check_expr(
             // never in the browser. (Reading the stored `secret` hash is already
             // R3-blocked client-side; this also stops a pointless client hash.)
             if (callee == "hash" || callee == "verify") && fn_env != EnvModifier::Server {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R19 auth-builtin",
                     message: format!(
                         "`{}(...)` is a server-only builtin; `{}` runs {}. Do password hashing/verification in a `server fn`.",
@@ -1578,7 +1617,8 @@ fn check_expr(
             };
             if let Some(n) = want {
                 if args.len() != n {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R19 auth-builtin",
                         message: format!("`{}` takes exactly {} argument(s).", callee, n),
                         line: fn_line,
@@ -1604,7 +1644,8 @@ fn check_expr(
         }
         Expr::Declassify(inner) => {
             if fn_env != EnvModifier::Server {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R6 declassify-context",
                     message: format!(
                         "`declassify(...)` used inside `{}`, which runs {}. Secret data may only be declassified server-side.",
@@ -1665,14 +1706,16 @@ fn check_expr(
                     .and_then(|t| generic_inner("Optional", t).map(str::to_string))
                     .unwrap_or_default();
                 if args.len() != 1 {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R9 record-construction",
                         message: "`or` takes exactly one default value.".into(),
                         line: fn_line,
                     });
                 } else if let Some(actual) = resolve_type(&args[0], locals, table) {
                     if !type_compatible(&actual, &inner) {
-                        errors.push(SemanticError {
+                        errors.push(Diagnostic {
+                            file: String::new(),
                             rule: "R9 record-construction",
                             message: format!("`or` default must be `{}`, got `{}`.", inner, actual),
                             line: fn_line,
@@ -1700,7 +1743,8 @@ fn check_expr(
             // R14 — the condition must be Bool (when resolvable).
             if let Some(t) = resolve_type(cond, locals, table) {
                 if t != "Bool" {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R14 if-condition",
                         message: format!("ternary condition in `{}` must be Bool, got `{}`.", fn_name, t),
                         line: fn_line,
@@ -1717,7 +1761,8 @@ fn check_expr(
                 resolve_type(otherwise, locals, table),
             ) {
                 if !type_compatible(&a, &b) && !type_compatible(&b, &a) {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R18 conditional-branch",
                         message: format!(
                             "the branches of `?:` in `{}` have incompatible types `{}` and `{}`.",
@@ -1742,7 +1787,8 @@ fn check_expr(
         // A closure reaching here is NOT a direct higher-order argument (those are
         // handled in the MethodCall arm above) — reject it (spec 19: argument-only).
         Expr::Closure { .. } => {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R21 stdlib",
                 message: format!(
                     "a closure (`x -> …`) in `{}` may only be passed directly to `map`, `filter`, or `reduce` on a list — it can't be stored, returned, or used elsewhere in this cut.",
@@ -1757,7 +1803,8 @@ fn check_expr(
             check_expr(index, locals, fn_env, fn_name, fn_line, table, errors);
             if let Some(t) = resolve_type(index, locals, table) {
                 if t != "Int" {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R21 stdlib",
                         message: format!("list index `[i]` in `{}` must be `Int`, got `{}`.", fn_name, t),
                         line: fn_line,
@@ -1767,7 +1814,8 @@ fn check_expr(
             // Guard against indexing a non-list (when the base type is known).
             if let Some(bt) = resolve_type(base, locals, table) {
                 if generic_inner("List", &bt).is_none() {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R21 stdlib",
                         message: format!("`[i]` indexing in `{}` needs a list, got `{}`.", fn_name, bt),
                         line: fn_line,
@@ -1790,10 +1838,11 @@ fn check_db_method(
     fn_env: EnvModifier,
     fn_name: &str,
     line: usize,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     if fn_env != EnvModifier::Server {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R15 db-capability",
             message: format!(
                 "`db` is a server-only capability; `{}` runs {}. The DB connection cannot reach the browser.",
@@ -1803,7 +1852,8 @@ fn check_db_method(
         });
     }
     if !matches!(method, "query_one" | "query" | "exec") {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R15 db-capability",
             message: format!("`db` has no method `{}` (use query_one, query, exec).", method),
             line,
@@ -1812,7 +1862,8 @@ fn check_db_method(
     }
     // R23: the SQL must be a literal — never built from user input.
     if !matches!(args.first(), Some(Expr::Str(_))) {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R23 sql-literal",
             message: format!(
                 "`db.{}(...)` requires a string-literal query. Pass user values as $1, $2, … parameters — never build SQL from a variable, concatenation, or interpolation.",
@@ -1833,10 +1884,11 @@ fn check_endpoint_method(
     fn_env: EnvModifier,
     fn_name: &str,
     line: usize,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     if fn_env != EnvModifier::Server {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R26 egress-allowlist",
             message: format!(
                 "an `endpoint` call runs in `{}`, which is {}. Outbound HTTP is server-only — the host and its secret cannot reach the browser.",
@@ -1846,7 +1898,8 @@ fn check_endpoint_method(
         });
     }
     if !matches!(method, "get" | "post") {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R26 egress-allowlist",
             message: format!("an `endpoint` has no verb `{}` (use get, post).", method),
             line,
@@ -1854,7 +1907,8 @@ fn check_endpoint_method(
         return;
     }
     if !matches!(args.first(), Some(Expr::Str(_))) {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R26 egress-allowlist",
             message: "an `endpoint` path must be a string literal — the host is fixed by `base`, and only a literal path may be appended.".into(),
             line,
@@ -1862,7 +1916,8 @@ fn check_endpoint_method(
     }
     let want = if method == "post" { 2 } else { 1 };
     if args.len() != want {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R26 egress-allowlist",
             message: format!("`endpoint.{}(...)` takes {} argument(s) (path{}).", method, want, if method == "post" { ", body" } else { "" }),
             line,
@@ -1883,17 +1938,19 @@ fn check_log_method(
     line: usize,
     locals: &HashMap<String, (Option<String>, bool)>,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     if fn_env != EnvModifier::Server {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R27 log",
             message: format!("`log` is a server-only capability; `{}` runs {}.", fn_name, env_label(fn_env)),
             line,
         });
     }
     if !matches!(method, "info" | "warn" | "error") {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R27 log",
             message: format!("`log` has no method `{}` (use info, warn, error).", method),
             line,
@@ -1901,7 +1958,8 @@ fn check_log_method(
         return;
     }
     if args.len() != 1 {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R27 log",
             message: format!("`log.{}(...)` takes one message argument.", method),
             line,
@@ -1911,7 +1969,8 @@ fn check_log_method(
     // log-no-secret: the message cannot derive from a secret/Located value.
     let no_taint: HashMap<String, bool> = HashMap::new();
     if is_tainted(&args[0], locals, table, &no_taint) {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R27 log",
             message: format!(
                 "a secret value is passed to `log.{}` in `{}`. Logging a credential is forbidden — use `declassify(...)` to release a value deliberately.",
@@ -1933,10 +1992,11 @@ fn check_session_member(
     fn_env: EnvModifier,
     fn_name: &str,
     line: usize,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     if fn_env != EnvModifier::Server {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R24 authn-required",
             message: format!(
                 "`session` is a server-only capability; `{}` runs {}. The actor and signing key cannot reach the browser.",
@@ -1950,7 +2010,8 @@ fn check_session_member(
         "login" => 1,
         "logout" => 0,
         _ => {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R24 authn-required",
                 message: format!("`session` has no member `{}` (use actor, login, logout).", member),
                 line,
@@ -1959,7 +2020,8 @@ fn check_session_member(
         }
     };
     if argc != want {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R24 authn-required",
             message: format!("`session.{}(...)` takes {} argument(s).", member, want),
             line,
@@ -1974,13 +2036,13 @@ fn check_session_member(
 /// that binds any parameter must include `session.actor` among those params, so
 /// a protected resource can't be fetched or mutated by a caller-supplied id
 /// alone (the common IDOR omission stops compiling).
-fn check_actor_scope(stmts: &[Stmt], fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+fn check_actor_scope(stmts: &[Stmt], fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
     for s in stmts {
         stmt_actor_scope(s, fn_name, line, errors);
     }
 }
 
-fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
     match s {
         Stmt::Let { value, .. }
         | Stmt::Assign { value, .. }
@@ -2014,14 +2076,15 @@ fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<Seman
     }
 }
 
-fn expr_actor_scope(e: &Expr, fn_name: &str, line: usize, errors: &mut Vec<SemanticError>) {
+fn expr_actor_scope(e: &Expr, fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
     if let Expr::MethodCall { receiver, method, args } = e {
         let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
         if is_db && matches!(method.as_str(), "query" | "query_one" | "exec") {
             // args[0] is the SQL literal; args[1..] are the bound parameters.
             let params = args.get(1..).unwrap_or(&[]);
             if !params.is_empty() && !params.iter().any(expr_uses_session) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R25 actor-scope",
                     message: format!(
                         "`db.{}` in `auth fn {}` binds a caller-supplied value but not `session.actor`. Add an ownership predicate bound to the actor (e.g. `… where id = $1 and owner = $2`, …, session.actor) — a protected query scoped only by a caller id is an IDOR.",
@@ -2116,11 +2179,12 @@ fn check_string_method(
     fn_name: &str,
     line: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     if let Some(rt) = resolve_type(receiver, locals, table) {
         if rt != "String" {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R21 stdlib",
                 message: format!("`.{}()` is a String method, but the receiver in `{}` is `{}`.", method, fn_name, rt),
                 line,
@@ -2133,7 +2197,8 @@ fn check_string_method(
         _ => 0,
     };
     if args.len() != want {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R21 stdlib",
             message: format!("`.{}()` takes {} argument(s).", method, want),
             line,
@@ -2169,11 +2234,12 @@ fn check_list_method(
     fn_name: &str,
     line: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let want = if method == "at" { 1 } else { 0 };
     if args.len() != want {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R21 stdlib",
             message: format!("`.{}()` on a list takes {} argument(s).", method, want),
             line,
@@ -2183,7 +2249,8 @@ fn check_list_method(
     if method == "at" {
         if let Some(t) = resolve_type(&args[0], locals, table) {
             if t != "Int" {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R21 stdlib",
                     message: format!("`.at(i)` index must be `Int`, got `{}` in `{}`.", t, fn_name),
                     line,
@@ -2223,7 +2290,7 @@ fn check_list_higher_order(
     fn_name: &str,
     fn_line: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let elem = match resolve_type(receiver, locals, table)
         .as_deref()
@@ -2232,7 +2299,7 @@ fn check_list_higher_order(
         Some(e) => e,
         None => return, // unresolved element type — leave to R1
     };
-    let mk = |message: String| SemanticError { rule: "R21 stdlib", message, line: fn_line };
+    let mk = |message: String| Diagnostic { file: String::new(), rule: "R21 stdlib", message, line: fn_line };
     match method {
         "map" | "filter" => match args {
             [Expr::Closure { params, body }] if params.len() == 1 => {
@@ -2307,12 +2374,13 @@ fn check_collection_method(
     fn_name: &str,
     line: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let coll = match receiver {
         Expr::Ident(c) if table.states.contains_key(c) => c,
         _ => {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R12 collection-method",
                 message: "methods may only be called on `synced` collections.".into(),
                 line,
@@ -2321,7 +2389,8 @@ fn check_collection_method(
         }
     };
     if fn_env == EnvModifier::Server {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R12 collection-method",
             message: format!("`{}` runs server-side; synced collections are client-side only.", fn_name),
             line,
@@ -2333,7 +2402,8 @@ fn check_collection_method(
         "add" => check_method_arg(method, coll, args, &elem, locals, line, table, errors),
         "remove" => check_method_arg(method, coll, args, "String", locals, line, table, errors),
         "get" | "all" => {}
-        other => errors.push(SemanticError {
+        other => errors.push(Diagnostic {
+            file: String::new(),
             rule: "R12 collection-method",
             message: format!("collection `{}` has no method `{}` (use add, remove, get, all).", coll, other),
             line,
@@ -2350,10 +2420,11 @@ fn check_method_arg(
     locals: &HashMap<String, (Option<String>, bool)>,
     line: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     if args.len() != 1 {
-        errors.push(SemanticError {
+        errors.push(Diagnostic {
+            file: String::new(),
             rule: "R12 collection-method",
             message: format!("`{}.{}` takes exactly one argument.", coll, method),
             line,
@@ -2362,7 +2433,8 @@ fn check_method_arg(
     }
     if let Some(actual) = resolve_type(&args[0], locals, table) {
         if !type_compatible(&actual, want) {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R12 collection-method",
                 message: format!("`{}.{}` expects `{}`, got `{}`.", coll, method, want, actual),
                 line,
@@ -2380,12 +2452,13 @@ fn check_await(
     fn_name: &str,
     line: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     match e {
         Expr::Await(inner) => {
             if !in_browser {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R4 async-call-discipline",
                     message: format!("`await` in `{}` is only valid in ui/screen code.", fn_name),
                     line,
@@ -2396,7 +2469,8 @@ fn check_await(
         Expr::Call { callee, args } => {
             let is_server = table.fns.get(callee).map(|s| s.env == EnvModifier::Server).unwrap_or(false);
             if in_browser && is_server && !awaited {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R4 async-call-discipline",
                     message: format!(
                         "`{}` is a server fn; calling it from the browser is an async RPC — use `await {}(...)`.",
@@ -2460,12 +2534,13 @@ fn check_record(
     locals: &HashMap<String, (Option<String>, bool)>,
     line: usize,
     table: &SymbolTable,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let model = match table.models.get(name) {
         Some(m) => m,
         None => {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R1 unknown-type",
                 message: format!("`{}` is not a known model.", name),
                 line,
@@ -2477,14 +2552,16 @@ fn check_record(
     let mut provided: HashSet<&str> = HashSet::new();
     for (fname, value) in fields {
         match model.field(fname) {
-            None => errors.push(SemanticError {
+            None => errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R9 record-construction",
                 message: format!("model `{}` has no field `{}`.", name, fname),
                 line,
             }),
             Some(prop) => {
                 if !provided.insert(fname.as_str()) {
-                    errors.push(SemanticError {
+                    errors.push(Diagnostic {
+                        file: String::new(),
                         rule: "R9 record-construction",
                         message: format!("field `{}` is set more than once in `{}`.", fname, name),
                         line,
@@ -2492,7 +2569,8 @@ fn check_record(
                 }
                 if let Some(actual) = resolve_type(value, locals, table) {
                     if !type_compatible(&actual, &prop.data_type) {
-                        errors.push(SemanticError {
+                        errors.push(Diagnostic {
+                            file: String::new(),
                             rule: "R9 record-construction",
                             message: format!(
                                 "field `{}.{}` expects `{}`, but got `{}`.",
@@ -2511,7 +2589,8 @@ fn check_record(
         let omittable = generic_inner("Optional", &p.data_type).is_some()
             || generic_inner("List", &p.data_type).is_some();
         if !provided.contains(p.name.as_str()) && !omittable {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R9 record-construction",
                 message: format!("missing field `{}` when constructing `{}`.", p.name, name),
                 line,
@@ -2541,7 +2620,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     };
     for ep in &program.endpoints {
         if table.endpoints.insert(ep.name.clone(), ep).is_some() {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R2 duplicate-decl",
                 message: format!("endpoint `{}` is declared more than once.", ep.name),
                 line: ep.line,
@@ -2552,7 +2632,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     // Enums: register, and reject duplicate enum names / duplicate variants (R2).
     for e in &program.enums {
         if table.enums.insert(e.name.clone(), e).is_some() || table.models.contains_key(&e.name) {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R2 duplicate-decl",
                 message: format!("type `{}` is declared more than once.", e.name),
                 line: e.line,
@@ -2561,7 +2642,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         let mut seen = HashSet::new();
         for v in &e.variants {
             if !seen.insert(v) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R2 duplicate-decl",
                     message: format!("variant `{}` is declared twice in enum `{}`.", v, e.name),
                     line: e.line,
@@ -2577,7 +2659,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     let mut screen_names: HashSet<&str> = HashSet::new();
     for s in &program.screens {
         if !screen_names.insert(s.name.as_str()) {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R2 duplicate-decl",
                 message: format!(
                     "{} `{}` is declared more than once.",
@@ -2589,7 +2672,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         }
         if s.is_component {
             if !starts_uppercase(&s.name) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R17 component",
                     message: format!(
                         "component `{}` must start with an uppercase letter — components are invoked as a Capitalized tag in views (e.g. `{}` vs a lowercase built-in element).",
@@ -2608,7 +2692,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
 
     for m in &program.models {
         if table.models.insert(m.name.clone(), m).is_some() {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R2 duplicate-decl",
                 message: format!("model `{}` is declared more than once.", m.name),
                 line: m.line,
@@ -2617,7 +2702,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         let mut seen = HashSet::new();
         for p in &m.properties {
             if !seen.insert(&p.name) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R2 duplicate-decl",
                     message: format!("field `{}` is declared twice in model `{}`.", p.name, m.name),
                     line: p.line,
@@ -2627,7 +2713,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     }
     for f in &program.functions {
         if table.fns.insert(f.name.clone(), FnSig { env: f.env, ret: f.return_type.clone() }).is_some() {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R2 duplicate-decl",
                 message: format!("function `{}` is declared more than once.", f.name),
                 line: f.line,
@@ -2638,7 +2725,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     for m in &program.models {
         for p in &m.properties {
             if !is_known_type(&p.data_type, &table) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R1 unknown-type",
                     message: format!("field `{}.{}` has unknown type `{}`.", m.name, p.name, p.data_type),
                     line: p.line,
@@ -2649,7 +2737,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     for s in &program.states {
         table.states.insert(s.name.clone(), s);
         if !is_known_type(&s.collection_type, &table) {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R1 unknown-type",
                 message: format!("synced state `{}` references unknown type `{}`.", s.name, s.collection_type),
                 line: s.line,
@@ -2658,7 +2747,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
             // R10 — a synced collection needs a stable string key to merge on.
             let has_id = model.field("id").map(|p| p.data_type == "String").unwrap_or(false);
             if !has_id {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R10 sync-key",
                     message: format!(
                         "synced collection `{}` requires model `{}` to have an `id: String` field (the merge key).",
@@ -2672,7 +2762,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     for f in &program.functions {
         for p in &f.params {
             if !is_known_type(&p.type_name, &table) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R1 unknown-type",
                     message: format!("parameter `{}: {}` of `{}` has unknown type.", p.name, p.type_name, f.name),
                     line: f.line,
@@ -2681,7 +2772,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         }
         if let Some(ret) = &f.return_type {
             if !is_known_type(ret, &table) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R1 unknown-type",
                     message: format!("return type `{}` of `{}` is unknown.", ret, f.name),
                     line: f.line,
@@ -2696,14 +2788,16 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
             continue;
         }
         if f.env != EnvModifier::Server {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R24 authn-required",
                 message: format!("`auth` is a server-only modifier, but `{}` runs {}.", f.name, env_label(f.env)),
                 line: f.line,
             });
         }
         if !stmts_use_session(&f.body) {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R24 authn-required",
                 message: format!(
                     "`auth fn {}` never consults `session`. Read `session.actor` to authenticate the caller — an `auth` fn that ignores the session is the 'forgot the auth check' bug.",
@@ -2741,7 +2835,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
             continue;
         }
         if s.is_component {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R31 auth-route",
                 message: format!("`auth` marks a protected route; it can't be used on component `{}`.", s.name),
                 line: s.line,
@@ -2749,14 +2844,16 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
             continue;
         }
         if !s.params.is_empty() {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R31 auth-route",
                 message: format!("an `auth` screen must be a prop-less route; `{}` takes props.", s.name),
                 line: s.line,
             });
         }
         if !app_uses_session {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R31 auth-route",
                 message: format!(
                     "`auth ui screen {}` needs a session, but no function establishes one (call `session.login(...)` in an `auth server fn`).",
@@ -2766,7 +2863,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
             });
         }
         if navigable_root.as_deref() == Some(s.name.as_str()) {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R31 auth-route",
                 message: format!(
                     "the default route `{}` must be public so unauthenticated users have a landing/login page — mark a different screen `auth`.",
@@ -2787,7 +2885,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     for s in &program.screens {
         let Some(pattern) = &s.route else { continue };
         if s.is_component {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R32 route-param",
                 message: format!("`route` is for screens, not component `{}`.", s.name),
                 line: s.line,
@@ -2796,7 +2895,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         }
         let pat: Vec<String> = route_params(pattern);
         if pat.is_empty() {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R32 route-param",
                 message: format!("route `{}` on `{}` has no `:param` segment — use a plain screen for a static path.", pattern, s.name),
                 line: s.line,
@@ -2804,7 +2904,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         }
         for pp in &pat {
             if !s.params.iter().any(|p| &p.name == pp) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R32 route-param",
                     message: format!("route param `:{}` on `{}` has no matching prop — add `{}: String` (or `Int`).", pp, s.name, pp),
                     line: s.line,
@@ -2813,14 +2914,16 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         }
         for p in &s.params {
             if !pat.contains(&p.name) {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R32 route-param",
                     message: format!("prop `{}` on route `{}` isn't bound by the pattern `{}` (add `:{}`).", p.name, s.name, pattern, p.name),
                     line: s.line,
                 });
             }
             if p.type_name != "String" && p.type_name != "Int" {
-                errors.push(SemanticError {
+                errors.push(Diagnostic {
+                    file: String::new(),
                     rule: "R32 route-param",
                     message: format!("route param `{}` on `{}` must be `String` or `Int`, got `{}` (it's parsed from a URL segment).", p.name, s.name, p.type_name),
                     line: s.line,
@@ -2845,7 +2948,8 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
 
     for f in &program.functions {
         if returns_secret[&f.name] && f.env != EnvModifier::Server {
-            errors.push(SemanticError {
+            errors.push(Diagnostic {
+                file: String::new(),
                 rule: "R5 secret-leak-via-return",
                 message: format!(
                     "`{}` returns secret-derived data but runs {}. Only `server` functions may return secret data; use `declassify(...)` server-side if release is intended.",
@@ -2875,7 +2979,7 @@ fn check_decimal_binary(
     rt: Option<&str>,
     fn_name: &str,
     line: usize,
-    errors: &mut Vec<SemanticError>,
+    errors: &mut Vec<Diagnostic>,
 ) {
     let l_dec = lt == Some("Decimal");
     let r_dec = rt == Some("Decimal");
@@ -2887,7 +2991,7 @@ fn check_decimal_binary(
         return;
     }
     let other = if l_dec { rt } else { lt }.unwrap_or("?");
-    let mut bad = |message: String| errors.push(SemanticError { rule: "R29 decimal", message, line });
+    let mut bad = |message: String| errors.push(Diagnostic { file: String::new(), rule: "R29 decimal", message, line });
     if lt == Some("Float") || rt == Some("Float") {
         bad(format!(
             "Decimal arithmetic in `{}` can't mix with Float — wrap the float with `decimal(...)` (e.g. `decimal(\"1.50\")`). Mixing exact money with binary float is exactly what Decimal prevents.",
