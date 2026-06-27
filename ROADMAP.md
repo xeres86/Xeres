@@ -160,7 +160,19 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
   self-hosted stdlib — `std/math.xrs` + `std/text.xrs`, written in Xeres and
   compiled into the binary (`include_str!`), imported via the embedded `std:`
   scheme (`import "std:math"`), zero ambient authority, verified across all three
-  backends. **Next cuts:** a package **registry** + `xeres.toml` **manifest** +
+  backends. **Cut 2 shipped (multi-file types):** `pub` + import discipline now
+  applies to **all** decl kinds — `pub model` / `pub enum` / `pub ui component`
+  / `pub ui screen`. The "import a Badge into the dashboard" / "import a
+  UserProfile model" feature (the C#-namespace / JS-component-file feel).
+  Cross-module type names are unqualified (JSX-style); functions keep the
+  qualified `mod.fn(...)` from Cut 1 — *functions are called, types are named*.
+  A type-visibility pass in the loader walks every type-reference site (model
+  fields, fn params/returns, screen props, state decls, record literals,
+  component invocations, enum-variant access, bare `link`/`navigate` idents);
+  4 new pass + 3 new fail fixtures + their siblings; ejected `cargo build` of
+  `pass_import_component` proves the cross-module `Badge` lands in both server
+  and client output. Closes the type-level R35 gap from the codebase review.
+  **Next cuts:** a package **registry** + `xeres.toml` **manifest** +
   **semver**/remote/cached packages + signing; `module__name` **mangling**
   (private-name reuse); a codegen **clone/borrow pass** so a `List`/`String` arg
   can be reused after a call (dogfooding found the Rust backend moves it);

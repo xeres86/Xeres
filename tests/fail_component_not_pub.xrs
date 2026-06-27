@@ -1,0 +1,12 @@
+// fail_component_not_pub.xrs — referencing a non-`pub` component from another
+// module is R35. The supply-chain guarantee for UI: a package can't expose a
+// component to importers unless its author opted in with `pub`.
+import "private_card.xrs"
+
+ui screen Home {
+    view {
+        column {
+            Badge { label: "X" }
+        }
+    }
+}

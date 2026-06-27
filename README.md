@@ -492,6 +492,46 @@ import "repo.xrs" grant db        // omit the grant ⇒ R34 compile error
 server fn admin() -> Int { return repo.purge() }
 ```
 
+**Models, enums, components, and screens** also cross module boundaries when
+marked `pub`. Cross-module *type* names are **unqualified** (like a JSX or
+Python import) — you write `Badge { ... }`, not `card.Badge { ... }`. Functions
+keep the qualified `mod.fn(...)` form from the earlier example (functions are
+*called*, types are *named*).
+
+```xeres
+// card.xrs — a reusable UI component lives in its own file.
+pub ui component Badge(label: String, color: String) {
+  view { box {
+    text label
+    style "padding: 4px 8px; border-radius: 4px; color: white;"
+  } }
+}
+
+// userprofile.xrs — a data model in its own file (the C#-namespace feel).
+pub model UserProfile {
+  id: String
+  name: String
+  age: Int
+}
+
+// dashboard.xrs — import them, use them directly.
+import "card.xrs"
+import "userprofile.xrs"
+
+server fn welcome(u: UserProfile) -> String { return "Hi, " + u.name }
+
+ui screen Dashboard {
+  view { column {
+    heading "Dashboard"
+    Badge { label: "New" color: "blue" }
+    Badge { label: "Pro" color: "green" }
+  } }
+}
+```
+
+Reference a non-`pub` model/enum/component/screen from another module and the
+compiler rejects it with a fix-it hint ("mark it `pub ui component Badge`").
+
 The loader merges every imported file into **one** program before the checker
 runs, so the tier/secret rules compose across files for free (a module can't
 widen the boundary). Everything still flattens to the same single server crate +
@@ -547,7 +587,7 @@ Every program is checked against these. A violation is a compile error.
 | **R32** route-param | `ui screen Post(id: String) route "/post/:id"` — each `:name` segment binds a `String`/`Int` prop (every prop bound, ≥1 param). The param is untrusted (R30 applies), and a param route is navigated with all params: `navigate(Post { id: x })` |
 | **R33** transaction | `transaction { … }` runs its `db` writes as one atomic unit (commit on success, roll back on any failure). Server-only (it wraps `db`) and not nestable |
 | **R34** module-capability | an imported module that uses a `Located` capability (`db`/`session`/`endpoint`) must `requires` it **and** the importing app must `grant` it (`import "m.xrs" grant db`) — undeclared or ungranted authority is a compile error (the supply-chain guarantee). The entry app is the root of authority and is never gated |
-| **R35** module-visibility | only `pub` declarations cross a module boundary; referencing a non-`pub` declaration in another module is a compile error |
+| **R35** module-visibility | only `pub` declarations cross a module boundary — applies to functions, models, enums, components, and screens. Functions use the qualified `mod.fn(...)` form; type names (model/enum/component/screen) are unqualified after `import`. A non-`pub` reference or an unimported cross-module reference is a compile error |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,

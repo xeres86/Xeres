@@ -129,6 +129,18 @@ risk.
 single merged server crate + client bundle. Verified across all three backends
 (interpreter, ejected Rust, esbuild bundle).
 
+**Shipped (spec 20, Cut 2 — multi-file types/components/screens):** the `pub`
++ import discipline now applies to **all** declaration kinds — `pub model`,
+`pub enum`, `pub ui component`, `pub ui screen` — not just functions. The
+"import a Badge into the dashboard" / "import a UserProfile model" feature. A
+type-visibility pass in the loader walks every type reference in the merged
+program (model field types, fn params/returns, screen props, state decls,
+`let` annotations, record literals, component invocations, enum-variant access,
+bare `navigate(Screen)` / `link "..." -> Screen` references). Cross-module
+*type* names are **unqualified** (JSX/Python-style import); functions keep the
+qualified `mod.fn(...)` from Cut 1 — *functions are called, types are named*.
+This also closes the type-level R35 gap flagged in the codebase review.
+
 **Shipped (spec 20, Cut 1.5 — the Layer-2 proof):** the first self-hosted stdlib
 modules, [`std/math.xrs`](std/math.xrs) and [`std/text.xrs`](std/text.xrs),
 written in Xeres and **compiled into the compiler binary** (`include_str!`).

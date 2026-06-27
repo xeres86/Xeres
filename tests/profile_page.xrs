@@ -1,0 +1,10 @@
+// profile_page.xrs — a `pub ui screen` lives in its own file (spec 20 Cut 2),
+// becoming a route the importing app can link to / navigate to.
+pub ui screen Profile {
+    view {
+        column {
+            heading "Profile"
+            text "Imported from profile_page.xrs"
+        }
+    }
+}

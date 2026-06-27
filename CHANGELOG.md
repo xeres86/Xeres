@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.0 — unreleased — modules Cut 2: cross-module types, components & screens (spec 20)
+
+The "import a Badge into the dashboard" / "import a UserProfile model" feature.
+Cut 1 shipped cross-module `pub fn`; Cut 2 extends the same `pub` + import
+discipline to **all** declaration kinds — types, components, screens — so a real
+multi-file app can break out shared models, enums, UI components, and even
+whole pages into their own files (the C#-namespace / JS-component-file feel).
+This also closes the F7 type-level R35 gap (the codebase review's biggest
+remaining soundness loose end on spec 20).
+
+### Modules Cut 2
+
+- **`pub model` / `pub enum` / `pub ui component` / `pub ui screen`** now cross
+  a module boundary. Same R35 rule as functions: only `pub` declarations are
+  visible to importing modules; a reference to a non-`pub` decl from another
+  module is a compile error. Names stay globally unique (R2 catches collisions).
+- **Cross-module type names are UNQUALIFIED** — `import "card.xrs"; ui screen
+  S { view { Badge { ... } } }` reads like a JSX/Python import. The asymmetry
+  with functions (which keep the `mod.fn(...)` qualified form from Cut 1) is
+  intentional: *functions are called, types are named*.
+- A type-visibility pass in the loader walks the merged program, checking every
+  type reference site — model field types, fn params/returns, screen props,
+  state declarations, `let` annotations, record literals (`Model { ... }` /
+  `navigate(Screen { ... })`), bare `navigate(Screen)` / `link "..." -> Screen`
+  identifiers, component invocations (`Badge { ... }`), and enum-variant access
+  (`Status.Active`). Unknown names fall through to R1 (unknown-type).
+- New fixtures: `pass_import_component` + `card.xrs`, `pass_import_model` +
+  `userprofile.xrs`, `pass_import_enum` + `status.xrs`, `pass_import_screen`
+  + `profile_page.xrs`, plus `fail_component_not_pub` / `fail_model_not_pub` /
+  `fail_enum_not_pub` with non-`pub` siblings. Verified end-to-end: the
+  component fixture ejects + `cargo build`s, and the cross-module `Badge`
+  shows up in both server and client output.
+- No new rule (R35 itself was reserved for visibility from day one); next free
+  rule remains **R36**.
+
 ## 0.6.0 — 2026-06-26 — modules, capability-secure packages & a self-hosted stdlib (spec 20)
 
 > **Bundles 0.5.13.** The 0.5.13 changes below (the postgres DoS CVE fix, Decimal

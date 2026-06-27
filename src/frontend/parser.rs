@@ -29,9 +29,8 @@ pub struct ModelNode {
     pub name: String,
     pub properties: Vec<ModelProperty>,
     pub line: usize,
-    /// `pub` (spec 20) — reserved; Cut 1 enforces module visibility for functions
-    /// only, but the modifier is parsed on every decl so it slots in next cut.
-    #[allow(dead_code)]
+    /// `pub model` — exported across a module boundary (R35, spec 20 Cut 2).
+    /// A non-`pub` model can only be referenced from its own module.
     pub is_pub: bool,
     /// Source module (file stem) this decl belongs to; set by the loader on the
     /// merged program, empty on a freshly-parsed single file.
@@ -229,8 +228,9 @@ pub struct ScreenNode {
     /// segments bind the screen's props from the URL; `None` = a plain route
     /// (path is `/` or `/<name>`). Lets a route carry props (relaxes R28).
     pub route: Option<String>,
-    /// `pub` (spec 20) — reserved; see `ModelNode::is_pub`.
-    #[allow(dead_code)]
+    /// `pub ui component` / `pub ui screen` — exported across a module
+    /// boundary (R35, spec 20 Cut 2). The "import a Badge" / "import a Profile
+    /// page" feature; cross-module screens/components must be `pub`.
     pub is_pub: bool,
     /// Source module (file stem); set by the loader when merging.
     pub module: String,
@@ -243,8 +243,7 @@ pub struct EnumNode {
     pub name: String,
     pub variants: Vec<String>,
     pub line: usize,
-    /// `pub` (spec 20) — reserved; see `ModelNode::is_pub`.
-    #[allow(dead_code)]
+    /// `pub enum` — exported across a module boundary (R35, spec 20 Cut 2).
     pub is_pub: bool,
     /// Source module (file stem); set by the loader when merging.
     pub module: String,

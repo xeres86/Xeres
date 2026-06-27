@@ -1,0 +1,7 @@
+// status.xrs — a `pub enum` in its own file (spec 20 Cut 2). Variants are
+// reachable as `Status.Active` once the file is imported.
+pub enum Status {
+    Active
+    Suspended
+    Pending
+}

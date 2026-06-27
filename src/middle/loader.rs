@@ -275,6 +275,17 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
     }
     merged.screens = screens;
 
+    // R35 type-visibility (spec 20, Cut 2): extend the `pub`/import discipline
+    // beyond functions to ALL declaration kinds — `pub model` / `pub enum` /
+    // `pub ui component` / `pub ui screen`. A reference to a non-`pub` type from
+    // another module, or to a type whose module wasn't imported, doesn't
+    // compile. Names stay globally unique (R2), so cross-module type names are
+    // UNQUALIFIED: `import "card.xrs"; ui screen S { view { Badge { ... } } }`
+    // works like a JSX/Python import. The asymmetry with functions (which stay
+    // `mod.fn(...)` qualified per Cut 1) is intentional — functions are CALLED,
+    // types are NAMED.
+    check_type_visibility(&merged, &imports_by_module, &module_file, &mut errors);
+
     if errors.is_empty() {
         errors.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
         Ok(merged)
@@ -282,6 +293,314 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
         errors.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
         Err(errors)
     }
+}
+
+// --- R35 type-visibility (spec 20, Cut 2) -----------------------------------
+
+struct TypeOrigin {
+    module: String,
+    is_pub: bool,
+    kind: &'static str, // "model" | "enum" | "component" | "screen"
+}
+
+fn check_type_visibility(
+    merged: &XeresProgram,
+    imports_by_module: &HashMap<String, HashSet<String>>,
+    module_file: &HashMap<String, String>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let mut origin: HashMap<String, TypeOrigin> = HashMap::new();
+    for m in &merged.models {
+        origin.insert(m.name.clone(), TypeOrigin { module: m.module.clone(), is_pub: m.is_pub, kind: "model" });
+    }
+    for e in &merged.enums {
+        origin.insert(e.name.clone(), TypeOrigin { module: e.module.clone(), is_pub: e.is_pub, kind: "enum" });
+    }
+    for s in &merged.screens {
+        let kind = if s.is_component { "component" } else { "screen" };
+        origin.insert(s.name.clone(), TypeOrigin { module: s.module.clone(), is_pub: s.is_pub, kind });
+    }
+    let vis = TypeVis { origin: &origin, imports_by_module };
+
+    // Models: cross-model field types.
+    for m in &merged.models {
+        let file = module_file.get(&m.module).cloned().unwrap_or_default();
+        for p in &m.properties {
+            vis.check(&p.data_type, &m.module, &file, p.line, errors);
+        }
+    }
+    // Functions: params, return, body (record literals, enum-variant access).
+    for f in &merged.functions {
+        let file = module_file.get(&f.module).cloned().unwrap_or_default();
+        let caller = Caller { module: &f.module, file: &file, line: f.line };
+        for p in &f.params {
+            vis.check(&p.type_name, &f.module, &file, f.line, errors);
+        }
+        if let Some(rt) = &f.return_type {
+            vis.check(rt, &f.module, &file, f.line, errors);
+        }
+        vis.walk_stmts(&f.body, caller, errors);
+    }
+    // Screens: prop + state types, on-load, state-init exprs, view (components,
+    // record literals, enum-variant access).
+    for s in &merged.screens {
+        let file = module_file.get(&s.module).cloned().unwrap_or_default();
+        let caller = Caller { module: &s.module, file: &file, line: s.line };
+        for p in &s.params {
+            vis.check(&p.type_name, &s.module, &file, s.line, errors);
+        }
+        for st in &s.states {
+            vis.check(&st.type_name, &s.module, &file, s.line, errors);
+            vis.walk_expr(&st.init, caller, errors);
+        }
+        vis.walk_stmts(&s.load, caller, errors);
+        for v in &s.body {
+            vis.walk_view(v, caller, errors);
+        }
+    }
+}
+
+struct TypeVis<'a> {
+    origin: &'a HashMap<String, TypeOrigin>,
+    imports_by_module: &'a HashMap<String, HashSet<String>>,
+}
+
+impl<'a> TypeVis<'a> {
+    /// Check one type-name reference. Unknown names are silently skipped — the
+    /// checker's R1 (unknown-type) is the right rule for that. `List<T>` and
+    /// `Optional<T>` wrappers are unwrapped so the inner type is checked.
+    fn check(
+        &self,
+        type_name: &str,
+        caller_module: &str,
+        caller_file: &str,
+        caller_line: usize,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        let bare = strip_generic(type_name);
+        let Some(o) = self.origin.get(bare) else { return };
+        if o.module == caller_module {
+            return;
+        }
+        let imported = self
+            .imports_by_module
+            .get(caller_module)
+            .map(|s| s.contains(&o.module))
+            .unwrap_or(false);
+        if !imported {
+            errors.push(Diagnostic {
+                file: caller_file.to_string(),
+                line: caller_line,
+                rule: "R35 module-visibility",
+                message: format!(
+                    "{} `{}` is defined in module `{}` but it isn't imported here — add `import \"{}.xrs\"`.",
+                    o.kind, bare, o.module, o.module
+                ),
+            });
+        } else if !o.is_pub {
+            // Hint with the real syntax: `pub ui component X` / `pub ui screen X`
+            // (the `ui` is part of the surface form), `pub model X`, `pub enum X`.
+            let hint_kw = match o.kind {
+                "component" => "ui component",
+                "screen" => "ui screen",
+                other => other,
+            };
+            errors.push(Diagnostic {
+                file: caller_file.to_string(),
+                line: caller_line,
+                rule: "R35 module-visibility",
+                message: format!(
+                    "{} `{}` from module `{}` is not exported — mark it `pub {} {}` to allow other modules to reference it.",
+                    o.kind, bare, o.module, hint_kw, bare
+                ),
+            });
+        }
+    }
+
+    fn walk_stmts(&self, stmts: &[Stmt], caller: Caller, errors: &mut Vec<Diagnostic>) {
+        for s in stmts {
+            match s {
+                Stmt::Let { type_ann, value, .. } => {
+                    if let Some(ann) = type_ann {
+                        self.check(ann, caller.module, caller.file, caller.line, errors);
+                    }
+                    self.walk_expr(value, caller, errors);
+                }
+                Stmt::Assign { value, .. } | Stmt::Return(value) | Stmt::Expr(value) => {
+                    self.walk_expr(value, caller, errors);
+                }
+                Stmt::Try { body, handler } => {
+                    self.walk_stmts(body, caller, errors);
+                    self.walk_stmts(handler, caller, errors);
+                }
+                Stmt::If { cond, then_body, else_body } => {
+                    self.walk_expr(cond, caller, errors);
+                    self.walk_stmts(then_body, caller, errors);
+                    self.walk_stmts(else_body, caller, errors);
+                }
+                Stmt::For { iter, body, .. } => {
+                    self.walk_expr(iter, caller, errors);
+                    self.walk_stmts(body, caller, errors);
+                }
+                Stmt::While { cond, body } => {
+                    self.walk_expr(cond, caller, errors);
+                    self.walk_stmts(body, caller, errors);
+                }
+                Stmt::Match { scrutinee, arms } => {
+                    self.walk_expr(scrutinee, caller, errors);
+                    for a in arms {
+                        self.walk_stmts(&a.body, caller, errors);
+                    }
+                }
+                Stmt::Transaction(body) => self.walk_stmts(body, caller, errors),
+                Stmt::Break | Stmt::Continue => {}
+            }
+        }
+    }
+
+    fn walk_expr(&self, e: &Expr, caller: Caller, errors: &mut Vec<Diagnostic>) {
+        match e {
+            // `Model { ... }` / `Screen { ... }` — `name` is a type reference.
+            Expr::Record { name, fields } => {
+                self.check(name, caller.module, caller.file, caller.line, errors);
+                for (_, v) in fields {
+                    self.walk_expr(v, caller, errors);
+                }
+            }
+            // `Status.Active` — enum-variant access. If the base ident is an
+            // enum name, that's a cross-module type reference to check.
+            Expr::Field { base, .. } => {
+                if let Expr::Ident(n) = base.as_ref() {
+                    if let Some(o) = self.origin.get(n) {
+                        if o.kind == "enum" {
+                            self.check(n, caller.module, caller.file, caller.line, errors);
+                        }
+                    }
+                }
+                self.walk_expr(base, caller, errors);
+            }
+            Expr::Call { callee, args } => {
+                // `navigate(Profile)` — the bare-ident form (no record literal)
+                // names a prop-less screen. Detect it so the visibility check
+                // covers prop-less navigation, not just `navigate(Profile { ... })`
+                // (which falls under the Record arm above).
+                if callee == "navigate" {
+                    if let Some(Expr::Ident(n)) = args.first() {
+                        if let Some(o) = self.origin.get(n) {
+                            if o.kind == "screen" {
+                                self.check(n, caller.module, caller.file, caller.line, errors);
+                            }
+                        }
+                    }
+                }
+                for a in args {
+                    self.walk_expr(a, caller, errors);
+                }
+            }
+            Expr::Unary { expr, .. }
+            | Expr::Declassify(expr)
+            | Expr::Raw(expr)
+            | Expr::Await(expr) => self.walk_expr(expr, caller, errors),
+            Expr::Binary { left, right, .. } => {
+                self.walk_expr(left, caller, errors);
+                self.walk_expr(right, caller, errors);
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                self.walk_expr(receiver, caller, errors);
+                for a in args {
+                    self.walk_expr(a, caller, errors);
+                }
+            }
+            Expr::ListLit(items) => {
+                for it in items {
+                    self.walk_expr(it, caller, errors);
+                }
+            }
+            Expr::Ternary { cond, then, otherwise } => {
+                self.walk_expr(cond, caller, errors);
+                self.walk_expr(then, caller, errors);
+                self.walk_expr(otherwise, caller, errors);
+            }
+            Expr::Range { start, end } => {
+                self.walk_expr(start, caller, errors);
+                self.walk_expr(end, caller, errors);
+            }
+            Expr::Closure { body, .. } => self.walk_expr(body, caller, errors),
+            Expr::Index { base, index } => {
+                self.walk_expr(base, caller, errors);
+                self.walk_expr(index, caller, errors);
+            }
+            Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
+            | Expr::NoneLit => {}
+        }
+    }
+
+    fn walk_view(&self, v: &ViewNode, caller: Caller, errors: &mut Vec<Diagnostic>) {
+        match v {
+            // `Badge { ... }` — component invocation; `name` is a type reference.
+            ViewNode::Component { name, args, .. } => {
+                self.check(name, caller.module, caller.file, caller.line, errors);
+                for (_, e) in args {
+                    self.walk_expr(e, caller, errors);
+                }
+            }
+            ViewNode::Element { arg, style, event, children, .. } => {
+                if let Some(a) = arg {
+                    self.walk_expr(a, caller, errors);
+                }
+                if let Some(st) = style {
+                    self.walk_expr(st, caller, errors);
+                }
+                match event {
+                    Some(Handler::Call(e)) => {
+                        // `link "..." -> Profile` parses as `Element { event:
+                        // Handler::Call(Expr::Ident("Profile")) }` — the bare
+                        // ident names a screen. Catch it like the navigate-ident
+                        // case so the visibility check covers link navigation.
+                        if let Expr::Ident(n) = e {
+                            if let Some(o) = self.origin.get(n) {
+                                if o.kind == "screen" {
+                                    self.check(n, caller.module, caller.file, caller.line, errors);
+                                }
+                            }
+                        }
+                        self.walk_expr(e, caller, errors);
+                    }
+                    Some(Handler::Block(stmts)) => self.walk_stmts(stmts, caller, errors),
+                    None => {}
+                }
+                for c in children {
+                    self.walk_view(c, caller, errors);
+                }
+            }
+            ViewNode::For { iter, body, .. } => {
+                self.walk_expr(iter, caller, errors);
+                for c in body {
+                    self.walk_view(c, caller, errors);
+                }
+            }
+            ViewNode::If { cond, then_body, else_body } => {
+                self.walk_expr(cond, caller, errors);
+                for c in then_body {
+                    self.walk_view(c, caller, errors);
+                }
+                for c in else_body {
+                    self.walk_view(c, caller, errors);
+                }
+            }
+        }
+    }
+}
+
+/// Strip `List<...>` / `Optional<...>` so the inner type is what gets checked.
+fn strip_generic(t: &str) -> &str {
+    if let Some(inner) = t.strip_prefix("List<").and_then(|r| r.strip_suffix(">")) {
+        return inner;
+    }
+    if let Some(inner) = t.strip_prefix("Optional<").and_then(|r| r.strip_suffix(">")) {
+        return inner;
+    }
+    t
 }
 
 /// DFS-load `key` (a canonical path) and its imports, recording load order and

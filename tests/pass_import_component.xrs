@@ -1,0 +1,14 @@
+// pass_import_component.xrs — the "import a Badge into the dashboard" feature
+// (spec 20 Cut 2). A `pub ui component` lives in its own file and is invoked by
+// its capitalized name in any importing module's view — no qualifier, like JSX.
+import "card.xrs"
+
+ui screen Dashboard {
+    view {
+        column {
+            heading "Dashboard"
+            Badge { label: "New" color: "blue" }
+            Badge { label: "Pro" color: "green" }
+        }
+    }
+}

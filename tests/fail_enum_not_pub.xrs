@@ -1,0 +1,11 @@
+// fail_enum_not_pub.xrs — referencing a non-`pub` enum from another module
+// is R35.
+import "private_status.xrs"
+
+server fn pick() -> Status {
+    return Status.Active
+}
+
+ui screen Home {
+    view { column { heading "x" } }
+}

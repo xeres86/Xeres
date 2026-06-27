@@ -1,0 +1,8 @@
+// userprofile.xrs — a `pub` data model in its own file (spec 20 Cut 2). The
+// C#-namespace feel: define the model here, import it where you need to build
+// or accept values of that type.
+pub model UserProfile {
+    id: String
+    name: String
+    age: Int
+}

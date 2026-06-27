@@ -1,0 +1,11 @@
+// card.xrs — a reusable UI component in its own file (spec 20 Cut 2). Imported
+// by pass_import_component.xrs. `pub` is what makes it crossable. Not a fixture
+// itself; the harness skips non-pass_/fail_ files.
+pub ui component Badge(label: String, color: String) {
+    view {
+        box {
+            text label
+            style "padding: 4px 8px; border-radius: 4px; color: white;"
+        }
+    }
+}

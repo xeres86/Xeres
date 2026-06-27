@@ -1,0 +1,14 @@
+// pass_import_screen.xrs — import a `pub ui screen` from another file and link
+// to it as a route. The merged program ends up with both screens; the router
+// resolves both paths (spec 20 Cut 2). The entry's Home is the public default;
+// Profile is reachable from the link.
+import "profile_page.xrs"
+
+ui screen Home {
+    view {
+        column {
+            heading "Home"
+            link "Open profile" -> Profile
+        }
+    }
+}

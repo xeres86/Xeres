@@ -1,0 +1,19 @@
+// pass_import_model.xrs — import a `pub model` from another file and use it as
+// a parameter type, return type, and record-literal name (spec 20 Cut 2).
+import "userprofile.xrs"
+
+server fn make(id: String, name: String, age: Int) -> UserProfile {
+    return UserProfile { id: id, name: name, age: age }
+}
+
+server fn greet(u: UserProfile) -> String {
+    return "Hello, " + u.name
+}
+
+ui screen Home {
+    view {
+        column {
+            heading "Profile demo"
+        }
+    }
+}

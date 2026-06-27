@@ -1,0 +1,24 @@
+// pass_import_enum.xrs — import a `pub enum` from another file and use it as a
+// parameter type, in a `match` (R20 exhaustive), and as `Status.Variant` access
+// (spec 20 Cut 2).
+import "status.xrs"
+
+server fn is_live(s: Status) -> Bool {
+    match s {
+        Active -> { return true }
+        Suspended -> { return false }
+        Pending -> { return false }
+    }
+}
+
+server fn default_status() -> Status {
+    return Status.Pending
+}
+
+ui screen Home {
+    view {
+        column {
+            heading "Status demo"
+        }
+    }
+}

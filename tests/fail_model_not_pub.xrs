@@ -1,0 +1,12 @@
+// fail_model_not_pub.xrs — referencing a non-`pub` model from another module
+// is R35. A model can hold `secret` fields, so its visibility is also a
+// security boundary — the author must opt in to exporting it.
+import "private_userprofile.xrs"
+
+server fn make(id: String, name: String) -> UserProfile {
+    return UserProfile { id: id, name: name }
+}
+
+ui screen Home {
+    view { column { heading "x" } }
+}

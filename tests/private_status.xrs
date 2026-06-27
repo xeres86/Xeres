@@ -1,0 +1,6 @@
+// private_status.xrs — `enum` WITHOUT `pub`. Imported by fail_enum_not_pub.xrs;
+// the cross-module reference is R35.
+enum Status {
+    Active
+    Inactive
+}
