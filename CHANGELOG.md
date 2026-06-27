@@ -35,6 +35,23 @@ remaining soundness loose end on spec 20).
 - No new rule (R35 itself was reserved for visibility from day one); next free
   rule remains **R36**.
 
+### Scaffold v2 — `create-xeres` 0.6.1
+
+- `npm create xeres@latest my-app` now scaffolds a **multi-file** project that
+  demonstrates Cut 2 out of the box:
+  ```
+  my-app/
+    app.xrs              # entry: imports + Home screen
+    models/note.xrs      # pub model Note { ... }      (documented stub)
+    components/welcome.xrs   # pub ui component Welcome — used by Home
+    pages/about.xrs      # pub ui screen About — linked from Home
+  ```
+- Lowercase JS-style folders (matches Next.js / SvelteKit / Vite). New users
+  see the multi-file pattern from minute one rather than discovering it in
+  the docs.
+- README rewritten with a project-layout section + the type-vs-fn import
+  asymmetry (`Badge { ... }` unqualified vs `utils.fn(...)` qualified).
+
 ## 0.6.0 — 2026-06-26 — modules, capability-secure packages & a self-hosted stdlib (spec 20)
 
 > **Bundles 0.5.13.** The 0.5.13 changes below (the postgres DoS CVE fix, Decimal
