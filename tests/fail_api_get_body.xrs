@@ -1,0 +1,6 @@
+// fail_api_get_body.xrs — a GET can't carry a request body (R36).
+model Body { x: Int }
+api A {
+  base "/a"
+  GET "/x" body b: Body -> Int { return 1 }
+}

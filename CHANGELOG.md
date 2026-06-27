@@ -1,6 +1,47 @@
 # Changelog
 
-## 0.7.0 — unreleased — modules Cut 2: cross-module types, components & screens (spec 20)
+## 0.7.0 — unreleased
+
+Two themes: the multi-file story (modules Cut 2 + a multi-file scaffold) and the
+**addressable tier boundary** (the inbound `api` primitive).
+
+### Inbound API — the addressable boundary (spec 23, Cut 1)
+
+Until now the server/client boundary was real but only the bundled SPA could call
+it (`server fn` → `/__xeres/<fn>` RPC). The new `api` block makes the boundary a
+**first-class HTTP/JSON surface** for everyone else — mobile clients, webhooks,
+server-to-server, third parties:
+
+```xeres
+api Public {
+  base "/api/v1"
+  GET "/posts" -> List<PostSummary> { return db.query("select id, title from posts") }
+  POST "/waitlist" body signup: Signup -> Confirmation {
+    let id = db.exec("insert into waitlist (id, email) values ($1, $2)", uid(), signup.email)
+    return Confirmation { ok: true }
+  }
+}
+```
+
+- **Declared routes** (`GET`/`POST`) at real paths under `base`, JSON **object**
+  bodies decoded into models, typed responses serialized as JSON. The dual of
+  `endpoint` (R26 outbound): `api` is the inbound surface, statically auditable.
+- **Same tier-safety, now public.** Responses are wire-projected — a `secret`
+  field **cannot** appear in the JSON (R5). Bodies are untrusted; SQL-injection
+  stays blocked by R23's literal-query rule. An `api` in an imported module is
+  R34-capability-gated like any module code.
+- **`Optional<T>` return ⇒ `None` is a 404**; an unknown path under a declared
+  `base` is a JSON 404 (not the SPA shell). **No CSRF** (external callers have no
+  cookie) and **no client stub** (the api is not for the bundled SPA).
+- **New rule R36 api-route** (literal path, valid method, unique routes, `body`
+  only on POST). Next free rule → **R37**.
+- Runs identically under `xeres serve` (interpreter) and the ejected Rust server
+  — verified with a live `curl` of every route (incl. secret-stripping + 404).
+- Deferred to later cuts: auth via **bearer tokens**, path params (`/posts/:id`),
+  request headers (webhook signatures), PUT/PATCH/DELETE, custom status codes,
+  OpenAPI generation.
+
+### Modules Cut 2 — cross-module types, components & screens (spec 20)
 
 The "import a Badge into the dashboard" / "import a UserProfile model" feature.
 Cut 1 shipped cross-module `pub fn`; Cut 2 extends the same `pub` + import

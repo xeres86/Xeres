@@ -1,0 +1,5 @@
+// fail_api_path_no_slash.xrs — a route path must start with `/` (R36).
+api A {
+  base "/a"
+  GET "x" -> Int { return 1 }
+}

@@ -314,6 +314,11 @@ fn dispatch(
             }
         };
     }
+    // Inbound API (spec 23): match a declared route before the SPA shell. Mirrors
+    // codegen's `api_dispatch` so `xeres serve` ≡ the ejected server.
+    if let Some((code, json)) = api_route_dispatch(program, method, path, body, actor.clone()) {
+        return (code, "application/json", json, None);
+    }
     // R31 auth-route guard: a protected route requires a valid session. `actor` is
     // `Some` iff the request carried a verified session cookie; bounce everyone
     // else to the public root (the client router does the same for in-app nav).
@@ -322,6 +327,59 @@ fn dispatch(
     }
     let (code, ctype, payload) = serve_static(path, static_dir);
     (code, ctype, payload, None)
+}
+
+/// Inbound API routing for the interpreter (spec 23). Matches method+path against
+/// declared `api` routes, decodes the JSON-object body into the body model, runs
+/// the handler through the interpreter, and wire-projects the response (secrets
+/// stripped). `Optional<T>` return ⇒ `None` is a 404. An unmatched path under a
+/// declared `base` is a JSON 404 (not the SPA shell). Mirrors codegen exactly.
+fn api_route_dispatch(
+    program: &XeresProgram,
+    method: &str,
+    path: &str,
+    body: &str,
+    actor: Option<String>,
+) -> Option<(u16, String)> {
+    for api in &program.apis {
+        for route in &api.routes {
+            let full = format!("{}{}", api.base, route.path);
+            if route.method.as_str() != method || full != path {
+                continue;
+            }
+            let interp = Interp::with_session(program, actor);
+            let body_param = route.body.as_ref().map(|b| {
+                let parsed = jparse(body);
+                (b.name.clone(), decode_arg(Some(&parsed), &b.type_name, program))
+            });
+            return Some(
+                match interp.call_api_route(&route.body_stmts, body_param, route.return_type.as_deref()) {
+                    Ok(v) => {
+                        let optional = route
+                            .return_type
+                            .as_deref()
+                            .and_then(|t| generic_inner("Optional", t))
+                            .is_some();
+                        if optional && matches!(v, Value::Null) {
+                            (404, String::new())
+                        } else {
+                            (200, interp.wire_json(&v))
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("xeres: api {} {} failed: {}", method, full, e);
+                        (500, format!("{{\"error\":{}}}", json_str(&e)))
+                    }
+                },
+            );
+        }
+    }
+    // Unmatched path under a declared base ⇒ a genuine API miss (JSON 404), not
+    // the SPA shell.
+    if program.apis.iter().any(|a| path.starts_with(&a.base)) {
+        return Some((404, String::from("{\"error\":\"not found\"}")));
+    }
+    None
 }
 
 /// Does `path` map to an `auth` (protected) route? Mirrors the client router's

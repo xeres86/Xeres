@@ -145,6 +145,20 @@ Completes the OWASP-class rule set; rules now span **R1–R27**. Shipped:
 - Light touch: `cargo audit` in CI.
 
 ## Later
+- **Inbound API (the addressable boundary)** — **Cut 1 shipped (spec 23, R36):**
+  an `api Name { base "…" GET/POST "path" [body x: Model] -> Ret { … } }` block
+  exposes the server/client boundary as a public HTTP/JSON surface (mobile,
+  webhooks, server-to-server) — the dual of `endpoint` (R26 outbound vs R36
+  inbound). Typed JSON object bodies → models, wire-projected responses (a
+  `secret` can't leak — R5), `Optional<T>` → 404, capability-gated in imported
+  modules (R34), no CSRF / no client stub. Runs identically under `xeres serve`
+  and the ejected server (curl-verified). **Next cuts:** auth via bearer tokens;
+  path params (`/posts/:id`) + query strings; request headers (webhook
+  signatures); PUT/PATCH/DELETE + custom status codes / typed error bodies; CORS;
+  and **OpenAPI/Swagger generation** (the `api` block is the natural source of
+  truth). The big remaining production-web items beyond this: **migrations**
+  (versioned SQL on boot), **form validation**, **file uploads**, **connection
+  pooling**, **background jobs**, **RBAC**.
 - **Modules & capability-secure packages** — **Cut 1 shipped (spec 20):** local
   multi-file modules with a pre-checker **loader** ([`src/loader.rs`](src/loader.rs))
   that resolves `import "…"` edges (relative paths), detects cycles, and merges

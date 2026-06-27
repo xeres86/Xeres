@@ -199,6 +199,26 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// Run an `api` route body (spec 23): bind the decoded JSON request body (if
+    /// the route declares one) and execute the handler, returning the response
+    /// Value. The caller wire-projects it (`wire_json`) so secrets are stripped,
+    /// exactly like an RPC response.
+    pub fn call_api_route(
+        &self,
+        body_stmts: &[Stmt],
+        body_param: Option<(String, Value)>,
+        return_type: Option<&str>,
+    ) -> Result<Value, String> {
+        let mut env: HashMap<String, Value> = HashMap::new();
+        if let Some((name, val)) = body_param {
+            env.insert(name, val);
+        }
+        match self.exec_block(body_stmts, &mut env, return_type)? {
+            Flow::Return(v) => Ok(v),
+            _ => Ok(Value::Null),
+        }
+    }
+
     fn exec_block(
         &self,
         stmts: &[Stmt],
@@ -1197,6 +1217,7 @@ mod tests {
             states: vec![],
             screens: vec![],
             endpoints: vec![],
+            apis: vec![],
             imports: vec![],
             requires: Default::default(),
         }
@@ -1422,6 +1443,66 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
                 analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
             );
         }
+    }
+
+    // End-to-end (spec 23): an inbound `api` runs through the interpreter — a GET
+    // route returns a model whose `secret` field is stripped from the wire JSON,
+    // and a POST route reads its decoded body and echoes a field back. Proves the
+    // same path `xeres serve` uses (api_route_dispatch -> call_api_route ->
+    // wire_json) agrees with the boundary guarantees.
+    #[test]
+    fn api_runs_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("xeres_api_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let app = dir.join("app.xrs");
+        std::fs::write(
+            &app,
+            "model User { id: String name: String secret token: String }\n\
+             model Signup { email: String }\n\
+             model Conf { ok: Bool echo: String }\n\
+             api Public {\n\
+               base \"/api\"\n\
+               GET \"/me\" -> User { return User { id: \"1\", name: \"Ada\", token: \"SECRET\" } }\n\
+               POST \"/signup\" body s: Signup -> Conf { return Conf { ok: true, echo: s.email } }\n\
+             }\n\
+             ui screen Home { view { column { heading \"x\" } } }\n",
+        )
+        .unwrap();
+
+        let mut program = crate::middle::loader::load_program(app.to_str().unwrap())
+            .unwrap_or_else(|errs| {
+                panic!("load failed: {:?}", errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>())
+            });
+        let analysis = crate::middle::checker::analyze(&program);
+        assert!(
+            analysis.errors.is_empty(),
+            "api errors: {:?}",
+            analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        crate::middle::checker::lower(&mut program);
+        let interp = Interp::with_session(&program, None);
+        let routes = &program.apis[0].routes;
+
+        // GET /me — the secret `token` must be absent from the wire JSON (R5).
+        let me = &routes[0];
+        let v = interp.call_api_route(&me.body_stmts, None, me.return_type.as_deref()).unwrap();
+        let json = interp.wire_json(&v);
+        assert!(json.contains("Ada"), "me => {}", json);
+        assert!(!json.contains("SECRET"), "secret leaked on the public api: {}", json);
+
+        // POST /signup — the decoded body is in scope and echoed back.
+        let signup = &routes[1];
+        let body = signup.body.as_ref().map(|b| {
+            (
+                b.name.clone(),
+                Value::Record("Signup".into(), vec![("email".into(), Value::Str("a@b.com".into()))]),
+            )
+        });
+        let v = interp.call_api_route(&signup.body_stmts, body, signup.return_type.as_deref()).unwrap();
+        let json = interp.wire_json(&v);
+        assert!(json.contains("a@b.com"), "signup => {}", json);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // `session.actor.or("")` — `.or` on a present Optional<String>.

@@ -1,0 +1,19 @@
+// pass_api_get.xrs — inbound API GET routes (spec 23): a model response and a
+// List<Model> response. The `secret token` is stripped from the JSON (R5 holds
+// on the public surface).
+model Health { status: String version: String }
+model Item { id: String name: String secret token: String }
+
+api Public {
+  base "/api/v1"
+
+  GET "/health" -> Health {
+    return Health { status: "ok", version: "1" }
+  }
+
+  GET "/items" -> List<Item> {
+    return [ Item { id: "1", name: "Widget", token: "SECRET" } ]
+  }
+}
+
+ui screen Home { view { column { heading "API" } } }

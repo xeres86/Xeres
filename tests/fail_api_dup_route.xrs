@@ -1,0 +1,7 @@
+// fail_api_dup_route.xrs — two routes with the same method + path (R36).
+model R { ok: Bool }
+api A {
+  base "/a"
+  GET "/x" -> R { return R { ok: true } }
+  GET "/x" -> R { return R { ok: false } }
+}

@@ -12,8 +12,8 @@
 //                stub — the dev never hand-writes a fetch.
 
 use crate::frontend::parser::{
-    BinOp, EnvModifier, Expr, FunctionNode, Handler, MatchPat, ScreenNode, Stmt, UnOp, ViewNode,
-    XeresProgram,
+    BinOp, EnvModifier, Expr, FunctionNode, Handler, MatchPat, Param, ScreenNode, Stmt, UnOp,
+    ViewNode, XeresProgram,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -478,6 +478,13 @@ fn gen_server(program: &XeresProgram) -> String {
         out.push_str(&format!("    {}\n}}\n\n", body));
     }
 
+    // Inbound API (spec 23): per-route handler fns + the `api_dispatch` router.
+    // Emitted only when the app declares an `api` block.
+    if !program.apis.is_empty() {
+        out.push_str(&gen_api(program, &models));
+        out.push('\n');
+    }
+
     // Sync endpoint. The store is generic (id -> raw row JSON, LWW by lamport),
     // so it needs no per-model code. Client rows are already secret-free
     // (the client interface omits secret fields).
@@ -538,7 +545,108 @@ fn gen_server(program: &XeresProgram) -> String {
     } else {
         server_main.replace("    //__XERES_GUARD__\n", "")
     };
+    // Inbound API dispatch (spec 23): match a declared route before the SPA shell
+    // fallback. Api responses are always JSON.
+    let server_main = if program.apis.is_empty() {
+        server_main.replace("    //__XERES_API__\n", "")
+    } else {
+        server_main.replace(
+            "    //__XERES_API__",
+            "    if let Some((__c, __j)) = api_dispatch(method, path, body) { return (__c, \"application/json\", __j); }",
+        )
+    };
     out.push_str(&server_main);
+    out
+}
+
+/// Inbound API codegen (spec 23). Emits one handler fn per route (typed like a
+/// server fn) + an `api_dispatch(method, path, body)` router that decodes the
+/// JSON-object body into the body model, runs the handler, and wire-projects the
+/// response (so `secret` fields can't appear). `Optional<T>` return ⇒ `None` is
+/// a 404. The client tier ignores `api` — this surface is for external callers.
+fn gen_api(program: &XeresProgram, models: &HashSet<&str>) -> String {
+    let mut out = String::new();
+    // Per-route handler fns.
+    for (ai, api) in program.apis.iter().enumerate() {
+        for (ri, route) in api.routes.iter().enumerate() {
+            let hname = format!("__api_{}_{}", ai, ri);
+            let params = match &route.body {
+                Some(b) => format!("{}: {}", b.name, map_rust_type(&b.type_name)),
+                None => String::new(),
+            };
+            let ret = match &route.return_type {
+                Some(t) => format!(" -> {}", map_rust_type(t)),
+                None => String::new(),
+            };
+            let synth = FunctionNode {
+                env: EnvModifier::Server,
+                is_auth: false,
+                name: hname.clone(),
+                params: route
+                    .body
+                    .iter()
+                    .map(|b| Param { name: b.name.clone(), type_name: b.type_name.clone() })
+                    .collect(),
+                return_type: route.return_type.clone(),
+                body: route.body_stmts.clone(),
+                line: route.line,
+                is_pub: false,
+                module: api.module.clone(),
+            };
+            out.push_str(&format!("pub fn {}({}){} {{\n", hname, params, ret));
+            for s in &synth.body {
+                out.push_str(&format!("    {}\n", emit_server_stmt(s, &synth, program)));
+            }
+            out.push_str("}\n\n");
+        }
+    }
+    // The router.
+    out.push_str("fn api_dispatch(method: &str, path: &str, body: &str) -> Option<(u16, String)> {\n");
+    out.push_str("    let _ = body;\n"); // silence unused when no route has a body
+    out.push_str("    let __hit = match (method, path) {\n");
+    for (ai, api) in program.apis.iter().enumerate() {
+        for (ri, route) in api.routes.iter().enumerate() {
+            let hname = format!("__api_{}_{}", ai, ri);
+            let full = format!("{}{}", api.base, route.path);
+            let method = route.method.as_str();
+            let (pre, call) = match &route.body {
+                Some(b) => {
+                    let decode = decode_json_rust("Some(&__b)", &b.type_name, program, 0);
+                    (format!("let __b = jparse(body); let __arg = {}; ", decode), format!("{}(__arg)", hname))
+                }
+                None => (String::new(), format!("{}()", hname)),
+            };
+            let respond = match &route.return_type {
+                Some(t) if generic_inner("Optional", t).is_some() => {
+                    let inner = generic_inner("Optional", t).unwrap();
+                    let ser = wire_serialize("__v", inner, models);
+                    format!("match {call} {{ Some(__v) => Some((200, {ser})), None => Some((404, String::new())) }}")
+                }
+                Some(t) => {
+                    let ser = wire_serialize("__r", t, models);
+                    format!("let __r = {call}; Some((200, {ser}))")
+                }
+                None => format!("{call}; Some((200, String::from(\"null\")))"),
+            };
+            out.push_str(&format!("        (\"{method}\", \"{full}\") => {{ {pre}{respond} }}\n"));
+        }
+    }
+    out.push_str("        _ => None,\n    };\n");
+    out.push_str("    if __hit.is_some() { return __hit; }\n");
+    // An unmatched path UNDER a declared base is a genuine API miss — return a
+    // JSON 404 rather than falling through to the SPA shell (which would serve
+    // HTML for a typo'd endpoint). Truly-unrelated paths return None (→ SPA).
+    let mut bases: Vec<&str> = program.apis.iter().map(|a| a.base.as_str()).collect();
+    bases.sort();
+    bases.dedup();
+    let guard = bases
+        .iter()
+        .map(|b| format!("path.starts_with(\"{}\")", b))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    out.push_str(&format!("    if {guard} {{\n"));
+    out.push_str("        return Some((404, String::from(\"{\\\"error\\\":\\\"not found\\\"}\")));\n");
+    out.push_str("    }\n    None\n}\n\n");
     out
 }
 

@@ -552,6 +552,43 @@ ui screen S { view { column { text text.slugify("Hello World") } } }
 *(Cut 1: relative-path imports + the embedded `std:` scheme + `pub fn` exports; a
 package registry / manifest / versioning are later cuts.)*
 
+### Inbound APIs: the addressable boundary
+
+`server fn`s are the bundled SPA's private RPC. To expose a **public** HTTP/JSON
+API — for mobile clients, webhooks, server-to-server, or third parties — declare
+an `api` block. It's the dual of `endpoint` (the outbound allowlist): a program's
+whole inbound surface is its `api` blocks, statically auditable.
+
+```xeres
+model Post { id: String title: String secret draft_notes: String }
+model Signup { email: String }
+model Confirmation { ok: Bool }
+
+api Public {
+  base "/api/v1"
+
+  GET "/posts" -> List<Post> {
+    return db.query("select id, title, draft_notes from posts order by id desc")
+  }
+
+  POST "/waitlist" body signup: Signup -> Confirmation {
+    let id = db.exec("insert into waitlist (id, email) values ($1, $2)", uid(), signup.email)
+    return Confirmation { ok: true }
+  }
+}
+```
+
+The same tier-safety holds, now public: the `GET /posts` response is
+wire-projected, so `draft_notes` (a `secret`) **physically cannot** appear in the
+JSON. Request bodies are untrusted; SQL stays parameterized (R23). An `Optional<T>`
+return makes `None` a `404`. There's **no CSRF** (external callers have no cookie)
+and **no generated client stub** (this surface is for non-SPA callers). An `api`
+in an imported module is capability-gated (R34) — a dependency can't expose a
+`db`-touching route without a grant.
+
+*(Cut 1: public `GET`/`POST` + typed JSON bodies/responses. Auth via bearer
+tokens, path params, custom status codes, and OpenAPI generation are later cuts.)*
+
 ---
 
 ## The rules (what the compiler guarantees)
@@ -588,6 +625,7 @@ Every program is checked against these. A violation is a compile error.
 | **R33** transaction | `transaction { … }` runs its `db` writes as one atomic unit (commit on success, roll back on any failure). Server-only (it wraps `db`) and not nestable |
 | **R34** module-capability | an imported module that uses a `Located` capability (`db`/`session`/`endpoint`) must `requires` it **and** the importing app must `grant` it (`import "m.xrs" grant db`) — undeclared or ungranted authority is a compile error (the supply-chain guarantee). The entry app is the root of authority and is never gated |
 | **R35** module-visibility | only `pub` declarations cross a module boundary — applies to functions, models, enums, components, and screens. Functions use the qualified `mod.fn(...)` form; type names (model/enum/component/screen) are unqualified after `import`. A non-`pub` reference or an unimported cross-module reference is a compile error |
+| **R36** api-route | an `api { … }` route's path is a string literal starting with `/`, the method is `GET`/`POST`, each method+path is unique, and a `body` (a model) appears only on a non-GET route. Responses are wire-projected (a `secret` field can never appear in the JSON); an `api` in an imported module is capability-gated (R34) |
 
 `secret` data that legitimately must be released (e.g. an auth result, not the
 hash itself) passes through a single audited keyword: **`declassify(...)`**,
@@ -606,7 +644,7 @@ escape hatch for genuinely-trusted HTML is to produce it in a `server fn` and
 ## How it compiles
 
 ```
-app.xrs ──► lexer ──► parser ──► loader ──► checker (R1–R35) ──► codegen
+app.xrs ──► lexer ──► parser ──► loader ──► checker (R1–R36) ──► codegen
                                                        ├─► out/server/         a self-contained Rust crate
                                                        │     ├─ src/main.rs      std-only HTTP server: router,
                                                        │     │                   RPC, secret-stripping, sync

@@ -1,0 +1,14 @@
+// pass_api_post.xrs — an inbound API POST route (spec 23): a JSON object body is
+// decoded into a model, the handler reads it, and returns a typed JSON response.
+model Signup { email: String }
+model Confirmation { ok: Bool echo: String }
+
+api Forms {
+  base "/api"
+
+  POST "/waitlist" body signup: Signup -> Confirmation {
+    return Confirmation { ok: true, echo: signup.email }
+  }
+}
+
+ui screen Home { view { column { heading "API" } } }

@@ -122,6 +122,18 @@ risk.
 
 ---
 
+## The boundary, made addressable (spec 23)
+
+The tier boundary started as the SPA's private RPC (`server fn` → `/__xeres/*`).
+The **`api` block** makes it a first-class, public HTTP/JSON surface — the dual of
+`endpoint`: `endpoint` is the audited *outbound* allowlist (R26), `api` is the
+audited *inbound* surface (R36). Crucially, going public doesn't weaken the
+boundary: an `api` response is **wire-projected** (a `secret` field can't appear
+in the JSON), request bodies are untrusted (SQL stays parameterized via R23), and
+an `api` in an imported module is **capability-gated** (R34). So the same
+two-layer trust model that protects the SPA protects every external caller —
+mobile apps, webhooks, integrations — with no extra ceremony.
+
 ## Status and cuts
 
 **Shipped (spec 20, Cut 1):** local multi-file modules, `pub` exports, `import` /

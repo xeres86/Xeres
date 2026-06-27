@@ -171,7 +171,7 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
     // source module as we go.
     let mut merged = XeresProgram {
         models: vec![], enums: vec![], functions: vec![], states: vec![],
-        screens: vec![], endpoints: vec![], imports: vec![], requires: HashSet::new(),
+        screens: vec![], endpoints: vec![], apis: vec![], imports: vec![], requires: HashSet::new(),
     };
     let mut merge_order: Vec<String> = vec![entry_key.clone()];
     merge_order.extend(order.iter().filter(|k| **k != entry_key).cloned());
@@ -185,12 +185,14 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
         for d in &mut prog.states { d.module = module.clone(); }
         for d in &mut prog.screens { d.module = module.clone(); }
         for d in &mut prog.endpoints { d.module = module.clone(); }
+        for d in &mut prog.apis { d.module = module.clone(); }
         merged.models.append(&mut prog.models);
         merged.enums.append(&mut prog.enums);
         merged.functions.append(&mut prog.functions);
         merged.states.append(&mut prog.states);
         merged.screens.append(&mut prog.screens);
         merged.endpoints.append(&mut prog.endpoints);
+        merged.apis.append(&mut prog.apis);
     }
 
     // R34 (declare side): an imported (non-entry) module that USES a capability
@@ -205,6 +207,18 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
         if !used.is_empty() {
             module_use_line.entry(f.module.clone()).or_insert(f.line);
             module_uses.entry(f.module.clone()).or_default().extend(used);
+        }
+    }
+    // API route bodies (spec 23) are server-tier code too — a route in an
+    // imported module that touches `db`/`session`/`endpoint` is R34-gated like
+    // any function.
+    for api in &merged.apis {
+        for route in &api.routes {
+            let used = caps_used_in_stmts(&route.body_stmts, &endpoint_names);
+            if !used.is_empty() {
+                module_use_line.entry(api.module.clone()).or_insert(route.line);
+                module_uses.entry(api.module.clone()).or_default().extend(used);
+            }
         }
     }
     for ep in &merged.endpoints {
@@ -356,6 +370,20 @@ fn check_type_visibility(
         vis.walk_stmts(&s.load, caller, errors);
         for v in &s.body {
             vis.walk_view(v, caller, errors);
+        }
+    }
+    // API routes (spec 23): body-param type, return type, and handler body.
+    for api in &merged.apis {
+        let file = module_file.get(&api.module).cloned().unwrap_or_default();
+        for route in &api.routes {
+            let caller = Caller { module: &api.module, file: &file, line: route.line };
+            if let Some(b) = &route.body {
+                vis.check(&b.type_name, &api.module, &file, route.line, errors);
+            }
+            if let Some(rt) = &route.return_type {
+                vis.check(rt, &api.module, &file, route.line, errors);
+            }
+            vis.walk_stmts(&route.body_stmts, caller, errors);
         }
     }
 }

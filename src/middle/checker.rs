@@ -1,7 +1,7 @@
 // src/checker.rs
 use crate::frontend::parser::{
-    BinOp, EndpointNode, EnumNode, EnvModifier, Expr, FunctionNode, Handler, MatchArm, MatchPat,
-    ModelNode, ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
+    BinOp, EndpointNode, EnumNode, EnvModifier, Expr, FunctionNode, Handler, HttpMethod, MatchArm,
+    MatchPat, ModelNode, Param, ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
 };
 use crate::middle::diagnostics::Diagnostic;
 use std::collections::{HashMap, HashSet};
@@ -455,6 +455,101 @@ fn check_flow(f: &FunctionNode, table: &SymbolTable, errors: &mut Vec<Diagnostic
         locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
     }
     check_flow_stmts(&f.body, &mut locals, f, table, errors);
+}
+
+/// Inbound API routes (spec 23). R36 structural discipline + check each route
+/// body as a server-tier function, so the existing body rules (R5/R7/R15/R23/...)
+/// all fire. Routes are server-side; codegen wire-projects the response (a
+/// `secret` field can never appear in the JSON), and a `body` model is the
+/// untrusted inbound payload (SQL-injection is still blocked by R23's literal-
+/// query rule, so body values can only flow through `$1` parameters).
+fn check_apis(program: &XeresProgram, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
+    let mut seen: HashSet<(&'static str, String)> = HashSet::new();
+    let mut api_names: HashSet<&str> = HashSet::new();
+    for api in &program.apis {
+        // R2 — api block names are unique (they group routes; a clash is a typo).
+        if !api_names.insert(api.name.as_str()) {
+            errors.push(Diagnostic {
+                file: String::new(),
+                line: api.line,
+                rule: "R2 duplicate-decl",
+                message: format!("api `{}` is declared more than once.", api.name),
+            });
+        }
+        for route in &api.routes {
+            let full = format!("{}{}", api.base, route.path);
+            let label = format!("{} {}", route.method.as_str(), full);
+            // R36: the path literal must start with `/`.
+            if !route.path.starts_with('/') {
+                errors.push(Diagnostic {
+                    file: String::new(),
+                    line: route.line,
+                    rule: "R36 api-route",
+                    message: format!("route path `{}` in api `{}` must start with `/`.", route.path, api.name),
+                });
+            }
+            // R36: each method+path is unique across the whole program.
+            if !seen.insert((route.method.as_str(), full.clone())) {
+                errors.push(Diagnostic {
+                    file: String::new(),
+                    line: route.line,
+                    rule: "R36 api-route",
+                    message: format!("duplicate route `{}` — each method + path must be unique.", label),
+                });
+            }
+            // R36: a GET carries no request body.
+            if route.method == HttpMethod::Get && route.body.is_some() {
+                errors.push(Diagnostic {
+                    file: String::new(),
+                    line: route.line,
+                    rule: "R36 api-route",
+                    message: format!("`GET {}` can't take a `body` — a request body belongs on a POST.", full),
+                });
+            }
+            // R36: a body must name a model (it's decoded from a JSON object).
+            if let Some(b) = &route.body {
+                if !table.models.contains_key(&b.type_name) {
+                    errors.push(Diagnostic {
+                        file: String::new(),
+                        line: route.line,
+                        rule: "R36 api-route",
+                        message: format!(
+                            "route body `{}: {}` of `{}` must be a model — request bodies are decoded from a JSON object.",
+                            b.name, b.type_name, label
+                        ),
+                    });
+                }
+            }
+            // R1: an explicit return type must be known.
+            if let Some(rt) = &route.return_type {
+                if !is_known_type(rt, table) {
+                    errors.push(Diagnostic {
+                        file: String::new(),
+                        line: route.line,
+                        rule: "R1 unknown-type",
+                        message: format!("return type `{}` of route `{}` is unknown.", rt, label),
+                    });
+                }
+            }
+            // Check the body as a synthetic server-tier fn (reuses every body rule).
+            let params = match &route.body {
+                Some(b) => vec![Param { name: b.name.clone(), type_name: b.type_name.clone() }],
+                None => vec![],
+            };
+            let synthetic = FunctionNode {
+                env: EnvModifier::Server,
+                is_auth: false,
+                name: label,
+                params,
+                return_type: route.return_type.clone(),
+                body: route.body_stmts.clone(),
+                line: route.line,
+                is_pub: false,
+                module: api.module.clone(),
+            };
+            check_flow(&synthetic, table, errors);
+        }
+    }
 }
 
 fn check_flow_stmts(
@@ -2815,6 +2910,10 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         check_flow(f, &table, &mut errors);
     }
 
+    // Inbound API routes (spec 23): R36 structural discipline + check each route
+    // body as a server-tier function (so R5/R15/R23/R30/... all fire).
+    check_apis(program, &table, &mut errors);
+
     for s in &program.screens {
         check_screen(s, &table, &mut errors);
     }
@@ -3078,7 +3177,7 @@ pub fn lower(program: &mut XeresProgram) {
     // NOT mutate (models/enums/states/endpoints). `fns` is owned (`FnSig`) and
     // `resolve_type` never reads `screens`/`components`, so we can still take
     // `&mut` to functions/screens below with no borrow conflict.
-    let XeresProgram { models, enums, functions, states, endpoints, screens, .. } = program;
+    let XeresProgram { models, enums, functions, states, endpoints, screens, apis, .. } = program;
     let table = SymbolTable {
         models: models.iter().map(|m| (m.name.clone(), &*m)).collect(),
         enums: enums.iter().map(|e| (e.name.clone(), &*e)).collect(),
@@ -3115,6 +3214,18 @@ pub fn lower(program: &mut XeresProgram) {
         // `on load` runs as a browser handler with props + state cells in scope.
         let mut load_locals = locals.clone();
         lower_stmts(&mut s.load, &mut load_locals, &table);
+    }
+
+    // API route bodies (spec 23) — same Decimal desugaring as a server fn body,
+    // with the `body` model param in scope.
+    for api in apis.iter_mut() {
+        for route in api.routes.iter_mut() {
+            let mut locals: HashMap<String, (Option<String>, bool)> = HashMap::new();
+            if let Some(b) = &route.body {
+                locals.insert(b.name.clone(), (Some(b.type_name.clone()), false));
+            }
+            lower_stmts(&mut route.body_stmts, &mut locals, &table);
+        }
     }
 }
 

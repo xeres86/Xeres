@@ -58,7 +58,7 @@ pub enum UnOp { Neg, Not }
 #[derive(Debug, Clone, Copy)]
 pub enum BinOp { Add, Sub, Mul, Div, Eq, NotEq, Lt, Gt, LtEq, GtEq, And, Or }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
     Float(f64),
@@ -92,7 +92,7 @@ pub enum Expr {
     Index { base: Box<Expr>, index: Box<Expr> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Stmt {
     /// `let name = expr`, or `let name: Type = expr`. The annotation lets a
     /// server-side `db.query_one(...)` bind its row onto a model (it's the only
@@ -119,13 +119,13 @@ pub enum Stmt {
     Transaction(Vec<Stmt>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: MatchPat,
     pub body: Vec<Stmt>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MatchPat {
     /// a bare enum variant name (the enum is known from the scrutinee)
     Variant(String),
@@ -269,6 +269,61 @@ pub struct EndpointNode {
     pub module: String,
 }
 
+/// The HTTP method of an `api` route (spec 23). Cut 1: GET + POST.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HttpMethod {
+    Get,
+    Post,
+}
+
+impl HttpMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+        }
+    }
+}
+
+/// One route inside an `api` block (spec 23):
+/// `METHOD "literal/path" [body name: Model] -> ReturnType { stmts }`.
+#[derive(Debug)]
+pub struct ApiRoute {
+    pub method: HttpMethod,
+    /// Path literal, appended to the block's `base`. Literal-only (R36), so the
+    /// program's whole inbound surface is statically auditable.
+    pub path: String,
+    /// `body name: Model` — the JSON-object request body, decoded into a model
+    /// and bound as `name`. Only on a method that carries one (POST). Untrusted
+    /// inbound (R30).
+    pub body: Option<Param>,
+    /// The response shape, serialized to JSON (wire-projected, so `secret`
+    /// fields are stripped — R5). `Optional<T>` ⇒ `None` is a 404.
+    pub return_type: Option<String>,
+    pub body_stmts: Vec<Stmt>,
+    pub line: usize,
+}
+
+/// `api Name { base "/api/v1" <routes> }` (spec 23) — the inbound HTTP/JSON
+/// surface. The dual of `endpoint` (R26 outbound allowlist): a program's whole
+/// external API is the set of `api` blocks, statically auditable. Server-only;
+/// route bodies run server-tier and obey every rule (R5/R15/R23/R30/R34).
+#[derive(Debug)]
+pub struct ApiNode {
+    pub name: String,
+    pub base: String,
+    pub routes: Vec<ApiRoute>,
+    pub line: usize,
+    /// `pub` (spec 23) — reserved. An `api` is a server-side surface active
+    /// regardless of `pub` (it isn't referenced by name across modules), so the
+    /// flag is parsed for forward-compat but not yet meaningful.
+    #[allow(dead_code)]
+    pub is_pub: bool,
+    /// Source module (file stem); set by the loader when merging. A non-entry
+    /// module's route bodies are capability-gated like any module code (R34).
+    pub module: String,
+}
+
 /// `import "relative/path.xrs"` (spec 20) — a dependency edge to another file,
 /// with the Located capabilities the importer `grant`s to it. Relative paths
 /// only in Cut 1 (resolved against the importing file's directory).
@@ -289,6 +344,8 @@ pub struct XeresProgram {
     pub states: Vec<SyncedStateNode>,
     pub screens: Vec<ScreenNode>,
     pub endpoints: Vec<EndpointNode>,
+    /// `api Name { … }` blocks (spec 23) — the inbound HTTP/JSON surface.
+    pub apis: Vec<ApiNode>,
     /// `import "…"` edges declared in this file (spec 20). Empty ⇒ the
     /// single-file fast path (the loader returns the program unchanged).
     pub imports: Vec<ImportDecl>,
@@ -363,7 +420,7 @@ impl<'a> Parser<'a> {
     pub fn parse_program(&mut self) -> XeresProgram {
         let mut program = XeresProgram {
             models: vec![], enums: vec![], functions: vec![], states: vec![], screens: vec![],
-            endpoints: vec![], imports: vec![], requires: HashSet::new(),
+            endpoints: vec![], apis: vec![], imports: vec![], requires: HashSet::new(),
         };
 
         while self.current_token != Token::EOF {
@@ -398,6 +455,13 @@ impl<'a> Parser<'a> {
             if self.cur_is_kw("endpoint") {
                 if let Some(ep) = self.parse_endpoint(is_pub) {
                     program.endpoints.push(ep);
+                }
+                continue;
+            }
+            // `api` is a contextual keyword (top-level only, spec 23).
+            if self.cur_is_kw("api") {
+                if let Some(a) = self.parse_api(is_pub) {
+                    program.apis.push(a);
                 }
                 continue;
             }
@@ -595,6 +659,103 @@ impl<'a> Parser<'a> {
             self.next_token();
         }
         Some(EndpointNode { name, base, secrets, line, is_pub, module: String::new() })
+    }
+
+    /// `api Name { base "/api/v1" METHOD "path" [body x: T] -> Ret { … } … }`
+    /// (spec 23). Mirrors `parse_endpoint` for the block head; each route reuses
+    /// the function body/params machinery.
+    fn parse_api(&mut self, is_pub: bool) -> Option<ApiNode> {
+        let line = self.cur_line;
+        self.next_token(); // consume 'api'
+        let name = match &self.current_token {
+            Token::Identifier(n) => n.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume name
+        if self.current_token != Token::LBrace {
+            return None;
+        }
+        self.next_token(); // consume '{'
+        let mut base = String::new();
+        let mut routes = Vec::new();
+        while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+            if self.cur_is_kw("base") {
+                self.next_token(); // consume 'base'
+                match &self.current_token {
+                    Token::Str(s) => {
+                        base = s.clone();
+                        self.next_token();
+                    }
+                    _ => return None,
+                }
+            } else if let Some(route) = self.parse_api_route() {
+                routes.push(route);
+            } else {
+                self.next_token(); // skip anything unexpected (prevents an infinite loop)
+            }
+        }
+        if self.current_token == Token::RBrace {
+            self.next_token();
+        }
+        Some(ApiNode { name, base, routes, line, is_pub, module: String::new() })
+    }
+
+    /// One route: `METHOD "path" [body name: Type] -> Ret { stmts }`. Returns
+    /// `None` when the current token isn't a recognized method keyword (the
+    /// caller then skips it). The method is contextual (`GET`/`POST` idents).
+    fn parse_api_route(&mut self) -> Option<ApiRoute> {
+        let line = self.cur_line;
+        let method = match &self.current_token {
+            Token::Identifier(m) if m == "GET" => HttpMethod::Get,
+            Token::Identifier(m) if m == "POST" => HttpMethod::Post,
+            _ => return None,
+        };
+        self.next_token(); // consume the method
+        let path = match &self.current_token {
+            Token::Str(s) => s.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume the path literal
+
+        // optional `body name: Type`
+        let body = if self.cur_is_kw("body") {
+            self.next_token(); // consume 'body'
+            let pname = match &self.current_token {
+                Token::Identifier(n) => n.clone(),
+                _ => return None,
+            };
+            self.next_token(); // consume name
+            if self.current_token != Token::Colon {
+                return None;
+            }
+            self.next_token(); // consume ':'
+            let ptype = self.parse_type()?;
+            Some(Param { name: pname, type_name: ptype })
+        } else {
+            None
+        };
+
+        // optional `-> Ret`
+        let mut return_type = None;
+        if self.current_token == Token::Arrow {
+            self.next_token(); // consume '->'
+            return_type = self.parse_type();
+        }
+
+        // body: { stmt* } — same as a function body.
+        let mut body_stmts = Vec::new();
+        if self.current_token == Token::LBrace {
+            self.next_token(); // consume '{'
+            while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+                if let Some(stmt) = self.parse_statement() {
+                    body_stmts.push(stmt);
+                } else {
+                    self.next_token();
+                }
+            }
+            if self.current_token == Token::RBrace { self.next_token(); }
+        }
+        Some(ApiRoute { method, path, body, return_type, body_stmts, line })
     }
 
     fn parse_function(&mut self, is_pub: bool) -> Option<FunctionNode> {

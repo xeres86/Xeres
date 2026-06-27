@@ -32,6 +32,7 @@ fn dispatch(method: &str, path: &str, body: &str) -> (u16, &'static str, String)
             None => (404, "application/json", String::from("{\"error\":\"no such rpc\"}")),
         };
     }
+    //__XERES_API__
     //__XERES_GUARD__
     serve_static(path)
 }
