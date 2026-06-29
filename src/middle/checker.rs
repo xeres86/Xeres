@@ -164,6 +164,9 @@ fn resolve_type(
             // inner rewrite, and keeps `resolve_type` correct post-lowering.
             "__dec_add" | "__dec_sub" | "__dec_mul" => Some("Decimal".into()),
             "__dec_lt" | "__dec_gt" | "__dec_le" | "__dec_ge" => Some("Bool".into()),
+            // Lowered string concatenation (spec 24): `String + <scalar>` desugars
+            // to this. Always a String (the result of display-concatenation).
+            "__str_concat" => Some("String".into()),
             // math: result type follows the (numeric) argument
             "abs" | "min" | "max" => args
                 .first()
@@ -181,6 +184,15 @@ fn resolve_type(
             }
             let lt = resolve_type(left, locals, table);
             let rt = resolve_type(right, locals, table);
+            // String display-concatenation (spec 24): `String + <anything>` (or
+            // `<anything> + String`) yields a String — checked before the numeric
+            // arms so `"lat=" + 51.5` is a String, not a Float. Lowered to
+            // `__str_concat` in `lower`.
+            if matches!(*op, BinOp::Add)
+                && (lt.as_deref() == Some("String") || rt.as_deref() == Some("String"))
+            {
+                return Some("String".into());
+            }
             match (lt.as_deref(), rt.as_deref()) {
                 (Some("Int"), Some("Int")) => Some("Int".into()),
                 // Exact money (R29 / spec 18): Decimal arithmetic stays Decimal,
@@ -3321,6 +3333,16 @@ fn lower_expr(
                 let l = std::mem::replace(left.as_mut(), Expr::NoneLit);
                 let r = std::mem::replace(right.as_mut(), Expr::NoneLit);
                 *expr = Expr::Call { callee: callee.to_string(), args: vec![l, r] };
+            } else if matches!(op, BinOp::Add)
+                && (lt.as_deref() == Some("String") || rt.as_deref() == Some("String"))
+            {
+                // String display-concatenation (spec 24): `String + <scalar>` →
+                // `__str_concat(a, b)` that every backend emits (Rust `format!`,
+                // TS `+`, interp Display-concat). Chains: the result is a String,
+                // so `"a" + b + c` folds left-to-right.
+                let l = std::mem::replace(left.as_mut(), Expr::NoneLit);
+                let r = std::mem::replace(right.as_mut(), Expr::NoneLit);
+                *expr = Expr::Call { callee: "__str_concat".to_string(), args: vec![l, r] };
             }
         }
         Expr::Field { base, .. } => lower_expr(base, locals, table),

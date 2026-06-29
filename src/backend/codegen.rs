@@ -1637,6 +1637,12 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
                 let needle = args.get(1).map(|x| emit_h_expr(x, screen, sv)).unwrap_or_default();
                 return format!("{}.some((__e) => JSON.stringify(__e) === JSON.stringify({}))", list, needle);
             }
+            // Lowered `String + <scalar>` (spec 24) → JS `+` seeded with `""`.
+            if callee == "__str_concat" {
+                let a = args.first().map(|x| emit_h_expr(x, screen, sv)).unwrap_or_default();
+                let b = args.get(1).map(|x| emit_h_expr(x, screen, sv)).unwrap_or_default();
+                return format!("(\"\" + ({}) + ({}))", a, b);
+            }
             // `navigate(Screen)` — the argument is a screen *name* (R28), lowered
             // to the router's `__navigate("Screen")` (switch screen + URL). A
             // `navigate(Screen { id: x })` is a typed-route-param nav (R32) →
@@ -1954,6 +1960,18 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     format!("{}.some((__e) => JSON.stringify(__e) === JSON.stringify({}))", list, needle)
                 } else {
                     format!("{}.contains(&({}))", list, needle)
+                };
+            }
+            // Lowered `String + <scalar>` (spec 24): Rust uses `format!` (Display
+            // coerces each operand: String/i64/f64/bool); TS uses `+` seeded with
+            // `""` so numbers stringify rather than add.
+            if callee == "__str_concat" {
+                let a = args.first().map(|x| emit_expr(x, ts)).unwrap_or_default();
+                let b = args.get(1).map(|x| emit_expr(x, ts)).unwrap_or_default();
+                return if ts {
+                    format!("(\"\" + ({}) + ({}))", a, b)
+                } else {
+                    format!("format!(\"{{}}{{}}\", {}, {})", a, b)
                 };
             }
             // `navigate(Screen)` — browser-only (R28), so only the TS tier emits

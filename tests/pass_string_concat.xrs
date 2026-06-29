@@ -1,0 +1,15 @@
+// pass_string_concat.xrs — String + scalar display-concatenation (spec 24):
+// String + Int / Float / Bool, in both a server fn and a ui handler.
+server fn line(name: String, qty: Int, price: Float) -> String {
+  return name + " x" + qty + " @ $" + price
+}
+
+ui screen Home {
+  state msg: String = ""
+  view {
+    column {
+      button "go" -> { msg = "count: " + 5 + " ok: " + true }
+      text msg
+    }
+  }
+}

@@ -202,6 +202,22 @@ impl<'a> Interp<'a> {
                 _ => Err(format!("unknown decimal op `{}`", op)),
             };
         }
+        if fn_name == "__str_concat" {
+            // Lowered `String + <scalar>` (spec 24): display-concat both operands.
+            // Float formatting matches Rust's `format!("{}", f)` / the wire codec.
+            let show = |v: Option<&Value>| -> String {
+                match v {
+                    Some(Value::Str(s)) => s.clone(),
+                    Some(Value::Int(n)) => n.to_string(),
+                    Some(Value::Float(f)) => {
+                        if f.fract() == 0.0 { (*f as i64).to_string() } else { f.to_string() }
+                    }
+                    Some(Value::Bool(b)) => b.to_string(),
+                    _ => String::new(),
+                }
+            };
+            return Ok(Value::Str(format!("{}{}", show(args.first()), show(args.get(1)))));
+        }
         if fn_name == "__list_contains" {
             // Lowered `List.contains(x)` (spec 19): structural element equality
             // (so it agrees with the browser's JSON match and the server's
@@ -1561,6 +1577,24 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
         assert!(json.contains("a@b.com"), "signup => {}", json);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Spec 24: `String + <scalar>` display-concatenation runs through the lowered
+    // `__str_concat` (the same builtin the Rust `format!` and TS `+` emitters use).
+    #[test]
+    fn string_concat_runs() {
+        let src = "server fn line(name: String, qty: Int, price: Float) -> String { return name + \" x\" + qty + \" @ $\" + price }\n";
+        let mut lexer = crate::frontend::lexer::Lexer::new(src);
+        let mut parser = crate::frontend::parser::Parser::new(&mut lexer);
+        let mut program = parser.parse_program();
+        let analysis = crate::middle::checker::analyze(&program);
+        assert!(analysis.errors.is_empty(), "errors: {:?}", analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>());
+        crate::middle::checker::lower(&mut program);
+        let interp = Interp::with_session(&program, None);
+        let r = interp
+            .call("line", vec![Value::Str("Widget".into()), Value::Int(3), Value::Float(9.5)])
+            .unwrap();
+        assert!(matches!(&r, Value::Str(s) if s == "Widget x3 @ $9.5"), "line => {:?}", r);
     }
 
     // Spec 24: a typed `endpoint.get(...)` response — the shared JSON decoder maps
