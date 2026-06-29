@@ -2001,11 +2001,17 @@ fn check_endpoint_method(
         });
         return;
     }
-    if !matches!(args.first(), Some(Expr::Str(_))) {
+    // R26 (relaxed, spec 24): the path may be dynamic — but it must BEGIN with a
+    // literal `/…` segment so the host stays fixed by `base`. That literal `/`
+    // pins everything after it to the path/query of the trusted host: it can't
+    // become `base@evil.com` (the userinfo-host-injection SSRF trick) or swap the
+    // host. A dynamic query/suffix is then appended with `+`
+    // (e.g. `weather.get("/v1/search?name=" + city)`).
+    if !args.first().map(endpoint_path_ok).unwrap_or(false) {
         errors.push(Diagnostic {
             file: String::new(),
             rule: "R26 egress-allowlist",
-            message: "an `endpoint` path must be a string literal — the host is fixed by `base`, and only a literal path may be appended.".into(),
+            message: "an `endpoint` path must begin with a literal `/…` segment, so the host stays fixed by `base`. Append a dynamic query with `+`, e.g. `weather.get(\"/v1/search?name=\" + city)`.".into(),
             line,
         });
     }
@@ -2017,6 +2023,18 @@ fn check_endpoint_method(
             message: format!("`endpoint.{}(...)` takes {} argument(s) (path{}).", method, want, if method == "post" { ", body" } else { "" }),
             line,
         });
+    }
+}
+
+/// An `endpoint` path expression is acceptable iff its leftmost leaf is a string
+/// literal beginning with `/` (R26, spec 24). That anchors the URL to `base`'s
+/// host: `"/p"`, or `"/p?x=" + a + b` are fine; a bare variable, or a literal not
+/// starting with `/`, is not (it could rewrite the host).
+fn endpoint_path_ok(e: &Expr) -> bool {
+    match e {
+        Expr::Str(s) => s.starts_with('/'),
+        Expr::Binary { op: BinOp::Add, left, .. } => endpoint_path_ok(left),
+        _ => false,
     }
 }
 

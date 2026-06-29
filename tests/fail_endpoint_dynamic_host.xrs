@@ -1,0 +1,7 @@
+// fail_endpoint_dynamic_host.xrs — a fully dynamic path is rejected (R26): without
+// a literal `/…` prefix the host could be rewritten (e.g. `base@evil.com`).
+endpoint Geo { base "https://geo.example.com" }
+
+server fn lookup(city: String) -> String {
+  return Geo.get(city)
+}

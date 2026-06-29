@@ -1,0 +1,9 @@
+// pass_endpoint_dynamic.xrs — a dynamic endpoint query (spec 24): the path begins
+// with a literal `/…` (host stays pinned by `base`), with a dynamic suffix.
+endpoint Geo { base "https://geo.example.com" }
+
+server fn lookup(city: String) -> String {
+  return Geo.get("/v1/search?name=" + city)
+}
+
+ui screen Home { view { column { heading "geo" } } }
