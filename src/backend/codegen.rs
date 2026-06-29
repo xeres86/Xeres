@@ -2313,6 +2313,26 @@ fn emit_server_stmt(s: &Stmt, f: &FunctionNode, program: &XeresProgram) -> Strin
             }
         }
     }
+    // `return endpoint.get(...)` / `let x: T = endpoint.get(...)` — decode the
+    // JSON response into a model shape (spec 24). A `String` return stays raw.
+    if let Stmt::Return(Expr::MethodCall { receiver, method, args }) = s {
+        if let Expr::Ident(n) = receiver.as_ref() {
+            if is_endpoint_name(n) && method == "get" {
+                if let Some(expr) = f.return_type.as_deref().and_then(|ret| endpoint_map_expr(n, args, ret, program)) {
+                    return format!("return {};", expr);
+                }
+            }
+        }
+    }
+    if let Stmt::Let { name, type_ann: Some(ty), value: Expr::MethodCall { receiver, method, args } } = s {
+        if let Expr::Ident(n) = receiver.as_ref() {
+            if is_endpoint_name(n) && method == "get" {
+                if let Some(expr) = endpoint_map_expr(n, args, ty, program) {
+                    return format!("let mut {} = {};", name, expr);
+                }
+            }
+        }
+    }
     // `transaction { … }` — emit the body via `emit_server_stmt` so db.query_*
     // return-mapping still applies inside it, wrapped in BEGIN/COMMIT/ROLLBACK
     // (the body's db calls reuse the transaction's connection via the TX
@@ -2362,6 +2382,24 @@ fn db_map_expr(method: &str, args: &[Expr], ty: &str, program: &XeresProgram) ->
         ));
     }
     None
+}
+
+/// Rust expression that runs `endpoint.get(path)` and decodes its JSON response
+/// into a model shape `ty` (model / `List<Model>` / `Optional<Model>`), reusing
+/// the recursive JSON decoder (spec 24). Returns `None` for a non-model `ty` (a
+/// `String` return stays the raw body). Mirrors `db_map_expr`.
+fn endpoint_map_expr(n: &str, args: &[Expr], ty: &str, program: &XeresProgram) -> Option<String> {
+    let bare = generic_inner("List", ty).or_else(|| generic_inner("Optional", ty)).unwrap_or(ty);
+    if !program.models.iter().any(|m| m.name == bare) {
+        return None;
+    }
+    let path = args.first().map(|a| emit_expr(a, false)).unwrap_or_else(|| "String::new()".into());
+    let base = format!("__EP_{}_BASE", n.to_uppercase());
+    let bearer = format!("__ep_{}_bearer()", n.to_lowercase());
+    let decode = decode_json_rust("Some(&__body)", ty, program, 0);
+    Some(format!(
+        "{{ let __body = jparse(&http_get({base}, &({path}), &{bearer})); {decode} }}"
+    ))
 }
 
 /// `name: __r.get("name"), ...` — map a postgres Row's columns onto a model.

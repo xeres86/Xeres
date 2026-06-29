@@ -5,6 +5,7 @@
 mod frontend;
 mod middle;
 mod backend;
+mod json;
 mod interp;
 mod serve;
 mod fmt;

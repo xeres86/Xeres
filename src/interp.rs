@@ -94,6 +94,40 @@ impl<'a> Interp<'a> {
     /// HTTP (R26). The base comes from the declaration; a declared secret is
     /// loaded from `<NAME>_<FIELD>` and sent as a bearer token. The host can
     /// never be changed by the caller — only the path is appended.
+    fn is_endpoint(&self, n: &str) -> bool {
+        self.program.endpoints.iter().any(|e| e.name == n)
+    }
+
+    /// If `ty` is a model shape (a model, `List<Model>`, or `Optional<Model>`),
+    /// return it — the signal that an `endpoint.get(...)` response should be JSON-
+    /// decoded into it (spec 24). A `String` (or any non-model) return falls
+    /// through to the raw body.
+    fn endpoint_typed_target<'t>(&self, ty: Option<&'t str>) -> Option<&'t str> {
+        let t = ty?;
+        let bare = crate::json::generic_inner("List", t)
+            .or_else(|| crate::json::generic_inner("Optional", t))
+            .unwrap_or(t);
+        if self.program.models.iter().any(|m| m.name == bare) {
+            Some(t)
+        } else {
+            None
+        }
+    }
+
+    /// Call `name.get(path)` and decode its JSON response into `ty` (spec 24).
+    fn endpoint_typed_get(
+        &self,
+        name: &str,
+        args: &[Expr],
+        ty: &str,
+        env: &HashMap<String, Value>,
+    ) -> Result<Value, String> {
+        let raw = self.endpoint_method(name, "get", args, env)?;
+        let body = if let Value::Str(s) = raw { s } else { String::new() };
+        let parsed = crate::json::jparse(&body);
+        Ok(crate::json::decode(Some(&parsed), ty, self.program))
+    }
+
     fn endpoint_method(
         &self,
         name: &str,
@@ -236,6 +270,19 @@ impl<'a> Interp<'a> {
                         {
                             self.db_query(method, args, env, type_ann.as_deref())?
                         }
+                        // `let f: Forecast = weather.get("/...")` — decode the JSON
+                        // response into the annotated model (spec 24).
+                        Expr::MethodCall { receiver, method, args }
+                            if method == "get"
+                                && matches!(receiver.as_ref(), Expr::Ident(n) if self.is_endpoint(n))
+                                && self.endpoint_typed_target(type_ann.as_deref()).is_some() =>
+                        {
+                            let name = match receiver.as_ref() {
+                                Expr::Ident(n) => n.clone(),
+                                _ => unreachable!(),
+                            };
+                            self.endpoint_typed_get(&name, args, type_ann.as_deref().unwrap(), env)?
+                        }
                         _ => self.eval(value, env)?,
                     };
                     env.insert(name.clone(), v);
@@ -253,6 +300,17 @@ impl<'a> Interp<'a> {
                     if let Expr::MethodCall { receiver, method, args } = e {
                         if is_db(receiver) && (method == "query_one" || method == "query") {
                             return Ok(Flow::Return(self.db_query(method, args, env, ret_model)?));
+                        }
+                        // `return weather.get("/...")` mapped onto the fn's return
+                        // model — decode the JSON response (spec 24).
+                        if method == "get" {
+                            if let Expr::Ident(n) = receiver.as_ref() {
+                                if self.is_endpoint(n) {
+                                    if let Some(t) = self.endpoint_typed_target(ret_model) {
+                                        return Ok(Flow::Return(self.endpoint_typed_get(n, args, t, env)?));
+                                    }
+                                }
+                            }
                         }
                     }
                     return Ok(Flow::Return(self.eval(e, env)?));
@@ -1503,6 +1561,33 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
         assert!(json.contains("a@b.com"), "signup => {}", json);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Spec 24: a typed `endpoint.get(...)` response — the shared JSON decoder maps
+    // a real Open-Meteo payload onto a nested model (the runtime half of
+    // `let f: Forecast = weather.get(...)`; the codegen half is `decode_json_rust`).
+    #[test]
+    fn endpoint_typed_response_decodes() {
+        let src = "model Current { temperature_2m: Float relative_humidity_2m: Int wind_speed_10m: Float }\n\
+                   model Forecast { current: Current }\n";
+        let mut lexer = crate::frontend::lexer::Lexer::new(src);
+        let mut parser = crate::frontend::parser::Parser::new(&mut lexer);
+        let program = parser.parse_program();
+
+        let json = "{\"current\":{\"temperature_2m\":12.3,\"relative_humidity_2m\":80,\"wind_speed_10m\":5.2},\"x\":1}";
+        let parsed = crate::json::jparse(json);
+        let v = crate::json::decode(Some(&parsed), "Forecast", &program);
+
+        fn field<'a>(v: &'a Value, k: &str) -> &'a Value {
+            match v {
+                Value::Record(_, fs) => fs.iter().find(|(n, _)| n == k).map(|(_, vv)| vv).unwrap(),
+                _ => panic!("expected record, got {:?}", v),
+            }
+        }
+        let cur = field(&v, "current");
+        assert!(matches!(field(cur, "temperature_2m"), Value::Float(f) if (*f - 12.3).abs() < 1e-9));
+        assert!(matches!(field(cur, "relative_humidity_2m"), Value::Int(80)));
+        assert!(matches!(field(cur, "wind_speed_10m"), Value::Float(f) if (*f - 5.2).abs() < 1e-9));
     }
 
     // `session.actor.or("")` — `.or` on a present Optional<String>.

@@ -1,0 +1,14 @@
+// pass_endpoint_typed.xrs — a typed endpoint response (spec 24): the JSON body
+// from `endpoint.get(...)` is decoded into a model (here a nested one), so a
+// server fn can read fields directly instead of a raw String.
+endpoint Weather { base "https://api.open-meteo.com" }
+
+model Current { temperature_2m: Float relative_humidity_2m: Int }
+model Forecast { current: Current }
+
+server fn temp() -> Float {
+  let f: Forecast = Weather.get("/v1/forecast?latitude=0&longitude=0&current=temperature_2m,relative_humidity_2m")
+  return f.current.temperature_2m
+}
+
+ui screen Home { view { column { heading "weather" } } }
