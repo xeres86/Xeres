@@ -1,9 +1,11 @@
 # Changelog
 
-## 0.7.0 — unreleased
+## 0.7.0 — 2026-06-30 — multi-file, the addressable boundary & typed external data
 
-Two themes: the multi-file story (modules Cut 2 + a multi-file scaffold) and the
-**addressable tier boundary** (the inbound `api` primitive).
+Three themes: the multi-file story (modules Cut 2 + a multi-file scaffold), the
+**addressable tier boundary** (the inbound `api` primitive), and **typed
+external data** (typed `endpoint` responses + safe dynamic query paths + display
+string-concat — spec 24, the "live weather app" wave).
 
 ### Inbound API — the addressable boundary (spec 23, Cut 1)
 
@@ -40,6 +42,46 @@ api Public {
 - Deferred to later cuts: auth via **bearer tokens**, path params (`/posts/:id`),
   request headers (webhook signatures), PUT/PATCH/DELETE, custom status codes,
   OpenAPI generation.
+
+### Typed external data — typed endpoints, safe dynamic paths & string-concat (spec 24)
+
+The outbound complement to `api`: consuming third-party JSON in a fully typed,
+SSRF-safe way. Three features that together make a real "search a city → call a
+public weather API → render typed cards" app expressible (see
+[`examples/weather.xrs`](examples/weather.xrs)):
+
+```xeres
+endpoint Geocode { base "https://geocoding-api.open-meteo.com" }
+
+server fn lookup(city: String) -> WeatherCard {
+  let geo: GeoResponse = Geocode.get("/v1/search?count=1&name=" + city.replace(" ", "+"))
+  let fc: Forecast = Weather.get("/v1/forecast?...&latitude=" + g.latitude + "&longitude=" + g.longitude)
+  return WeatherCard { city: g.name, temp: fc.current.temperature_2m, ... }
+}
+```
+
+- **Typed endpoint responses** — `endpoint.get(path) -> Model` decodes the JSON
+  response straight into a declared `model` (mirrors `db.query_one`-onto-model).
+  The shared JSON parser was hoisted out of `serve.rs` into a new `src/json.rs`
+  so both runtimes — the interpreter and the ejected Rust server — decode through
+  **one** implementation (also chips at the serve/interp duplication the codebase
+  review flagged).
+- **Safe dynamic query paths (R26 relaxed)** — a path may now be built at runtime
+  (`"/v1/search?name=" + city`) **provided it begins with a literal `/…` segment**.
+  That keeps the host pinned by `base` and blocks the `base + "@evil.com"`
+  userinfo-host-injection trick — anti-SSRF by construction. Static `base` +
+  literal-prefixed path = the egress allowlist still holds.
+- **`String + scalar` display-concat** — `"lat=" + 51.5` now lowers to a
+  `__str_concat` builtin (like the Decimal lowering) so building a URL or a label
+  from an `Int`/`Float`/`Decimal`/`Bool` works on every backend. Also fixes a
+  pre-existing latent bug: server-side `String + String` previously emitted Rust
+  that didn't compile (`E0308`), never caught because concat had only run in TS
+  views.
+- Verified live end-to-end against Open-Meteo (London/Tokyo/NYC/Cape Town) under
+  both `xeres serve` and the ejected Rust server, plus the not-found path.
+- New demos: [`examples/weather.xrs`](examples/weather.xrs) (typed live API) and
+  [`crm_demo.xrs`](crm_demo.xrs) (client router + `on load` page fetch, existing
+  primitives only).
 
 ### Modules Cut 2 — cross-module types, components & screens (spec 20)
 
