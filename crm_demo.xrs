@@ -1,0 +1,191 @@
+// CRM demo — a "what can Xeres do today" dashboard, built with ONLY existing
+// primitives (no language changes). Showcases the bits acme.xrs doesn't:
+//   • the client ROUTER — sidebar buttons call navigate(Screen) to switch pages
+//   • `on load` PAGE LOADING — Crm fetches its KPIs from a server fn on mount
+// plus the proven kit: reusable components, KPI cards with progress bars, a
+// box-based bar chart, a table, conditional styling, and form inputs (input +
+// number bind). Real line/area charts are intentionally absent — those would
+// need a new SVG primitive.
+//
+//   xeres serve crm_demo.xrs   ->  http://127.0.0.1:8080
+
+model Kpis {
+  orders: String
+  revenue: String
+  growth: String
+  growthPct: Int
+}
+
+model Bar {
+  height: Int
+  label: String
+}
+
+model Lead {
+  name: String
+  company: String
+  amount: String
+  status: String
+}
+
+// the "page load" — runs server-side under `xeres serve`, fetched on mount.
+server fn load_kpis() -> Kpis {
+  return Kpis { orders: "1,896" revenue: "$3M" growth: "46%" growthPct: 46 }
+}
+
+// ---- reusable components ---------------------------------------------------
+
+ui component Sidebar(active: String) {
+  view {
+    column style "width:240px; background:#fff; border-right:1px solid #e9ecef; min-height:100vh;" {
+      row style "background:#f5365c; color:#fff; padding:20px 24px; align-items:center;" {
+        subheading "Architect" style "margin:0; font-size:20px; font-weight:700; color:#fff;"
+      }
+      column style "padding:16px 12px; gap:4px;" {
+        text "MENU" style "padding:8px 12px; font-size:11px; letter-spacing:1px; color:#aab2c0; font-weight:600;"
+        button "Dashboard" style "padding:12px 14px; border:0; border-radius:8px; text-align:left; width:100%; cursor:pointer; font-size:14px; "
+        + (active == "crm" ? "background:#fff0f3; color:#f5365c; font-weight:600;" : "background:transparent; color:#525f7f;")
+        -> { navigate(Crm) }
+        button "Analytics" style "padding:12px 14px; border:0; border-radius:8px; text-align:left; width:100%; cursor:pointer; font-size:14px; "
+        + (active == "analytics" ? "background:#fff0f3; color:#f5365c; font-weight:600;" : "background:transparent; color:#525f7f;")
+        -> { navigate(Analytics) }
+        button "Settings" style "padding:12px 14px; border:0; border-radius:8px; text-align:left; width:100%; cursor:pointer; font-size:14px; "
+        + (active == "settings" ? "background:#fff0f3; color:#f5365c; font-weight:600;" : "background:transparent; color:#525f7f;")
+        -> { navigate(Settings) }
+      }
+    }
+  }
+}
+
+ui component KpiCard(title: String, value: String, label: String, pct: Int) {
+  view {
+    column style "flex:1; min-width:200px; background:#fff; border:1px solid #e9ecef; border-radius:12px; padding:20px; gap:4px;" {
+      text title style "font-size:13px; color:#8898aa; text-transform:uppercase; letter-spacing:0.5px;"
+      heading value style "font-size:28px; font-weight:700; margin:4px 0; color:#32325d;"
+      text label style "font-size:12px; color:#aab2c0;"
+      box style "height:6px; background:#eef0f3; border-radius:3px; margin-top:10px;" {
+        box style "height:6px; border-radius:3px; background:#f5365c; width:" + pct + "%"
+      }
+    }
+  }
+}
+
+ui component ChartBar(height: Int, label: String) {
+  view {
+    column style "flex:1; height:100%; align-items:center; justify-content:flex-end; gap:8px;" {
+      box style "width:60%; background:#f5365c; border-radius:4px 4px 0 0; opacity:0.85; height:" + height + "%"
+      text label style "font-size:11px; color:#8898aa;"
+    }
+  }
+}
+
+ui component LeadRow(name: String, company: String, amount: String, status: String) {
+  view {
+    row style "padding:14px 0; border-bottom:1px solid #f1f3f5; align-items:center; justify-content:space-between;" {
+      column style "gap:2px;" {
+        text name style "font-size:14px; font-weight:500; color:#32325d;"
+        text company style "font-size:12px; color:#8898aa;"
+      }
+      text status style "font-size:12px; font-weight:600; padding:3px 10px; border-radius:12px; "
+      + (status == "Won" ? "background:#d4edda; color:#155724;"
+        : (status == "Pending" ? "background:#fff3cd; color:#856404;"
+          : "background:#f8d7da; color:#721c24;"))
+      text amount style "font-size:14px; font-weight:600; color:#32325d;"
+    }
+  }
+}
+
+// ---- pages (prop-less screens = router targets) ----------------------------
+
+ui screen Crm {
+  state kpis: Kpis = Kpis { orders: "" revenue: "" growth: "" growthPct: 0 }
+  state loaded: Bool = false
+  state bars: List<Bar> = [
+    Bar { height: 45 label: "M" } Bar { height: 72 label: "T" } Bar { height: 55 label: "W" }
+    Bar { height: 90 label: "T" } Bar { height: 65 label: "F" } Bar { height: 85 label: "S" }
+    Bar { height: 60 label: "S" }
+  ]
+  on load {
+    kpis = await load_kpis()
+    loaded = true
+  }
+  view {
+    row style "min-height:100vh; background:#f7f8fc; font-family:Inter,-apple-system,'Segoe UI',sans-serif; color:#32325d;" {
+      Sidebar { active: "crm" }
+      column style "flex:1; padding:28px;" {
+        heading "CRM Dashboard" style "margin:0 0 4px 0; font-size:22px; color:#32325d;"
+        text "Welcome back, Alina — here's your week." style "color:#8898aa; margin-bottom:24px;"
+
+        if loaded {
+          row style "gap:20px; margin-bottom:24px; flex-wrap:wrap;" {
+            KpiCard { title: "Total Orders" value: kpis.orders label: "Last year expenses" pct: 100 }
+            KpiCard { title: "Revenue" value: kpis.revenue label: "Revenue streams" pct: 80 }
+            KpiCard { title: "Followers" value: kpis.growth label: "People interested" pct: kpis.growthPct }
+          }
+        } else {
+          row style "padding:48px; justify-content:center;" {
+            text "Loading dashboard…" style "color:#aab2c0; font-size:15px;"
+          }
+        }
+
+        column style "background:#fff; border:1px solid #e9ecef; border-radius:12px; padding:24px;" {
+          title "Weekly Sales" style "margin:0 0 16px 0; font-size:16px; font-weight:600;"
+          row style "align-items:flex-end; justify-content:space-between; gap:10px; height:180px;" {
+            for b in bars {
+              ChartBar { height: b.height label: b.label }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+ui screen Analytics {
+  state leads: List<Lead> = [
+    Lead { name: "Olivia Martin" company: "Acme Inc" amount: "$1,999" status: "Won" }
+    Lead { name: "Jackson Lee" company: "Globex" amount: "$390" status: "Pending" }
+    Lead { name: "Isabella Nguyen" company: "Initech" amount: "$2,990" status: "Won" }
+    Lead { name: "William Kim" company: "Umbrella" amount: "$990" status: "Lost" }
+  ]
+  view {
+    row style "min-height:100vh; background:#f7f8fc; font-family:Inter,-apple-system,'Segoe UI',sans-serif; color:#32325d;" {
+      Sidebar { active: "analytics" }
+      column style "flex:1; padding:28px;" {
+        heading "Analytics" style "margin:0 0 24px 0; font-size:22px;"
+        column style "background:#fff; border:1px solid #e9ecef; border-radius:12px; padding:24px;" {
+          title "Recent Leads" style "margin:0 0 8px 0; font-size:16px; font-weight:600;"
+          for l in leads {
+            LeadRow { name: l.name company: l.company amount: l.amount status: l.status }
+          }
+        }
+      }
+    }
+  }
+}
+
+ui screen Settings {
+  state displayName: String = "Alina Mcloud"
+  state seats: Int = 5
+  state saved: Bool = false
+  view {
+    row style "min-height:100vh; background:#f7f8fc; font-family:Inter,-apple-system,'Segoe UI',sans-serif; color:#32325d;" {
+      Sidebar { active: "settings" }
+      column style "flex:1; padding:28px;" {
+        heading "Settings" style "margin:0 0 24px 0; font-size:22px;"
+        column style "background:#fff; border:1px solid #e9ecef; border-radius:12px; padding:24px; max-width:440px; gap:14px;" {
+          text "Display name" style "font-size:13px; color:#8898aa;"
+          input bind displayName style "padding:10px 12px; border:1px solid #dfe2ea; border-radius:8px; font-size:14px;"
+          text "Team seats" style "font-size:13px; color:#8898aa;"
+          number bind seats style "padding:10px 12px; border:1px solid #dfe2ea; border-radius:8px; font-size:14px; width:120px;"
+          button "Save changes" style "background:#f5365c; color:#fff; border:0; padding:12px; border-radius:8px; font-size:14px; cursor:pointer; margin-top:8px;" -> { saved = true }
+          if saved {
+            box style "color:#2dce89; font-weight:600; margin-top:4px;" {
+              text "Saved " + displayName + " with " + seats + " seats"
+            }
+          }
+        }
+      }
+    }
+  }
+}
