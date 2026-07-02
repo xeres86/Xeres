@@ -293,6 +293,11 @@ impl<'a> Interp<'a> {
                                 && matches!(receiver.as_ref(), Expr::Ident(n) if self.is_endpoint(n))
                                 && self.endpoint_typed_target(type_ann.as_deref()).is_some() =>
                         {
+                            // Invariant panics (spec 28): the guard above already
+                            // matched `receiver` as `Expr::Ident` and proved
+                            // `type_ann` is `Some` — this is compile-time AST
+                            // shape, not request data, so both are unreachable
+                            // for any program that matched this arm.
                             let name = match receiver.as_ref() {
                                 Expr::Ident(n) => n.clone(),
                                 _ => unreachable!(),
@@ -879,6 +884,17 @@ fn dec_parse(s: &str) -> Option<(i128, u32)> {
         None => (false, s.strip_prefix('+').unwrap_or(s)),
     };
     let (int_part, frac_part) = s.split_once('.').unwrap_or((s, ""));
+    // Cap the fractional scale (spec 28): `dec_rescale` computes
+    // `10i128.pow(scale difference)`, which panics once that exponent nears
+    // i128's ~38-digit range. A huge leading-zero fractional part
+    // ("0.000…0001") parses to a tiny i128 *magnitude* but an unbounded
+    // *scale* — and a Decimal can arrive from untrusted input (an `api`/RPC
+    // body's Decimal-typed field), so this must be a graceful "invalid
+    // Decimal" rather than a crash. 30 fractional digits is far beyond any
+    // real money/quantity use and leaves `10^30` safely under i128::MAX.
+    if frac_part.len() > 30 {
+        return None;
+    }
     let digits = format!("{}{}", int_part, frac_part);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -1148,6 +1164,11 @@ fn session_sign(id: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::digest::KeyInit;
     use sha2::Sha256;
+    // Invariant, not request-path (spec 28): HMAC's `new_from_slice` only
+    // errors on a key length its block size can't hash, and RFC 2104 HMAC
+    // (this crate) accepts a key of ANY length — the input isn't derived
+    // from `id` (untrusted) but from `session_secret()`, an env var / process
+    // constant with no length restriction on this call site.
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&session_secret())
         .expect("HMAC accepts a key of any length");
     mac.update(id.as_bytes());
@@ -1292,6 +1313,8 @@ mod tests {
             screens: vec![],
             endpoints: vec![],
             apis: vec![],
+            themes: vec![],
+            styles: vec![],
             imports: vec![],
             requires: Default::default(),
         }
@@ -1316,6 +1339,18 @@ mod tests {
         assert_eq!(dec_cmp("10.00", "9.99").unwrap(), Ordering::Greater);
         assert_eq!(dec_cmp("1.5", "1.50").unwrap(), Ordering::Equal);
         assert_eq!(dec_cmp("0.30", "0.3").unwrap(), Ordering::Equal);
+    }
+
+    // spec 28: a Decimal can arrive from untrusted input (an `api`/RPC body's
+    // Decimal-typed field), so an absurd-but-parseable one must be a graceful
+    // error, not a panic. A huge leading-zero fractional part parses to a tiny
+    // i128 magnitude but an unbounded scale — `dec_rescale`'s `10i128.pow(...)`
+    // would overflow-panic combining it with a differently-scaled Decimal.
+    #[test]
+    fn decimal_with_a_huge_fractional_scale_is_rejected_not_panicking() {
+        let huge = format!("0.{}1", "0".repeat(1000));
+        assert_eq!(dec_add(&huge, "5").unwrap_err(), "invalid Decimal");
+        assert_eq!(dec_cmp(&huge, "5").unwrap_err(), "invalid Decimal");
     }
 
     // End-to-end (spec 18): real source → analyze → lower → interp `call`. Proves
@@ -1595,6 +1630,71 @@ server fn has(tags: List<String>) -> Bool { return tags.contains(\"b\") }\n";
             .call("line", vec![Value::Str("Widget".into()), Value::Int(3), Value::Float(9.5)])
             .unwrap();
         assert!(matches!(&r, Value::Str(s) if s == "Widget x3 @ $9.5"), "line => {:?}", r);
+    }
+
+    // Spec 29 — the central tier-safety claim, asserted mechanically: a `secret`
+    // model field must never appear in serialized wire JSON on EITHER surface a
+    // client can reach (`/__xeres/<fn>` RPC, an inbound `api` route), regardless
+    // of where the value came from (a literal, `db`, or a decoded external
+    // response — `wire_json` strips by field marker, not by data provenance).
+    // The companion compile-time half (a `server fn` may NOT return a bare
+    // secret-derived scalar undeclassified — no field marker survives that) is
+    // `tests/fail_secret_scalar_leak.xrs`.
+    #[test]
+    fn secret_never_crosses_the_wire() {
+        let dir = std::env::temp_dir().join(format!("xeres_wire_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let app = dir.join("app.xrs");
+        std::fs::write(
+            &app,
+            "model User { id: String name: String secret password_hash: String }\n\
+             server fn whoami(u: User) -> User { return u }\n\
+             api Public {\n\
+               base \"/api\"\n\
+               GET \"/me\" -> User { return User { id: \"1\", name: \"Ada\", password_hash: \"P@ssw0rd!\" } }\n\
+             }\n\
+             ui screen Home { view { column { heading \"x\" } } }\n",
+        )
+        .unwrap();
+
+        let mut program = crate::middle::loader::load_program(app.to_str().unwrap())
+            .unwrap_or_else(|errs| {
+                panic!("load failed: {:?}", errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>())
+            });
+        let analysis = crate::middle::checker::analyze(&program);
+        assert!(
+            analysis.errors.is_empty(),
+            "unexpected errors: {:?}",
+            analysis.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        crate::middle::checker::lower(&mut program);
+        let interp = Interp::with_session(&program, None);
+        let secret = "P@ssw0rd!";
+
+        // Surface 1: RPC (`/__xeres/whoami`) — a server fn echoing a Model
+        // straight through (no declassify, none needed: Model returns are
+        // stripped by field, not by taint analysis).
+        let u = Value::Record(
+            "User".into(),
+            vec![
+                ("id".into(), Value::Str("1".into())),
+                ("name".into(), Value::Str("Ada".into())),
+                ("password_hash".into(), Value::Str(secret.into())),
+            ],
+        );
+        let rpc_result = interp.call("whoami", vec![u]).unwrap();
+        let rpc_json = interp.wire_json(&rpc_result);
+        assert!(rpc_json.contains("Ada"), "rpc => {}", rpc_json);
+        assert!(!rpc_json.contains(secret), "secret leaked via RPC: {}", rpc_json);
+
+        // Surface 2: an inbound `api` route returning the same model shape.
+        let route = &program.apis[0].routes[0];
+        let api_result = interp.call_api_route(&route.body_stmts, None, route.return_type.as_deref()).unwrap();
+        let api_json = interp.wire_json(&api_result);
+        assert!(api_json.contains("Ada"), "api => {}", api_json);
+        assert!(!api_json.contains(secret), "secret leaked via api route: {}", api_json);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Spec 24: a typed `endpoint.get(...)` response — the shared JSON decoder maps

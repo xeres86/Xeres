@@ -33,6 +33,13 @@ struct SymbolTable<'a> {
     screens: HashMap<String, &'a ScreenNode>,
     /// Declared egress `endpoint`s, keyed by name (R26).
     endpoints: HashMap<String, &'a EndpointNode>,
+    /// Declared `theme` token names (spec 26), light + dark merged into one
+    /// namespace — `token(x)` resolves by name regardless of which theme block
+    /// declared it (R37).
+    tokens: HashSet<String>,
+    /// Declared top-level `style Name` names (spec 26), for the element
+    /// `style Name` reference (R37).
+    styles: HashSet<String>,
 }
 
 /// Inner type of a one-level generic, e.g. `("List", "List<User>") -> "User"`.
@@ -46,6 +53,18 @@ fn generic_inner<'a>(base: &str, ty: &'a str) -> Option<&'a str> {
 /// letter, the same convention that distinguishes types from value identifiers.
 fn starts_uppercase(name: &str) -> bool {
     name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+}
+
+/// Does `ty` (after stripping one `List<...>`/`Optional<...>` wrapper) name a
+/// model? (spec 29) A model-shaped return is protected by wire-projection's
+/// automatic field-level `secret` stripping (`wire_json` in interp.rs / the
+/// stripped client `interface` in codegen.rs); a bare scalar isn't — pulling a
+/// `secret` field's value into a `String`/`Int`/… loses the type-level marker,
+/// so nothing is left to strip at serialization. Used by R5's server-side
+/// scalar-leak check.
+fn is_model_shaped(ty: &str, table: &SymbolTable) -> bool {
+    let inner = generic_inner("List", ty).or_else(|| generic_inner("Optional", ty)).unwrap_or(ty);
+    table.models.contains_key(inner)
 }
 
 /// R20 — a `match` scrutinee must be an enum; every arm names a real variant;
@@ -459,6 +478,71 @@ fn taint_scan(
         }
     }
     tainted_return
+}
+
+/// R37 unknown-token — scan a literal CSS string for `token(name)` calls and
+/// reject any name that isn't a declared `theme` token. Purely textual (CSS
+/// itself isn't parsed): `token(` … `)` is found by simple substring search, the
+/// same trick `codegen`'s `resolve_tokens` uses to rewrite them to `var(--x)`.
+fn check_token_refs(css: &str, line: usize, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
+    for name in scan_token_calls(css) {
+        if !table.tokens.contains(&name) {
+            errors.push(Diagnostic {
+                file: String::new(),
+                rule: "R37 unknown-token",
+                message: format!(
+                    "`token({})` references an undeclared theme token — declare it in a `theme {{ … }}` block.",
+                    name
+                ),
+                line,
+            });
+        }
+    }
+}
+
+/// Extract every `token(name)` call's `name` from a raw CSS string.
+fn scan_token_calls(css: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = css;
+    while let Some(pos) = rest.find("token(") {
+        let after = &rest[pos + "token(".len()..];
+        match after.find(')') {
+            Some(end) => {
+                let name = after[..end].trim();
+                if !name.is_empty() {
+                    out.push(name.to_string());
+                }
+                rest = &after[end + 1..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// R37 unknown-token — an element's `style` slot: a literal CSS string may
+/// reference `token(name)` (checked textually); a Capitalized identifier is a
+/// named-style reference (`style Card`), which must name a declared `style`
+/// decl. Anything else (a dynamic/lowercase expression) isn't checked here —
+/// token substitution only applies to compile-time-known CSS text.
+fn check_style_ref(style_expr: &Expr, line: usize, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
+    match style_expr {
+        Expr::Str(css) => check_token_refs(css, line, table, errors),
+        Expr::Ident(name) if starts_uppercase(name) => {
+            if !table.styles.contains(name.as_str()) {
+                errors.push(Diagnostic {
+                    file: String::new(),
+                    rule: "R37 unknown-token",
+                    message: format!(
+                        "`style {}` references an undeclared named style — declare `style {} {{ \"...\" }}` at the top level.",
+                        name, name
+                    ),
+                    line,
+                });
+            }
+        }
+        _ => {}
+    }
 }
 
 fn check_flow(f: &FunctionNode, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
@@ -1063,9 +1147,13 @@ fn check_view(
     errors: &mut Vec<Diagnostic>,
 ) {
     match v {
-        ViewNode::Element { tag, arg, bind, event, children, .. } => {
+        ViewNode::Element { tag, arg, style, bind, event, children } => {
             if let Some(a) = arg {
                 check_screen_expr(a, locals, sname, sline, table, errors);
+            }
+            // R37 unknown-token (spec 26) — `style "…token(x)…"` / `style Name`.
+            if let Some(style_expr) = style {
+                check_style_ref(style_expr, sline, table, errors);
             }
             // R13 — `bind x` requires a matching `state` cell. `checkbox` binds a
             // `Bool`; `number` binds an `Int` or `Float` (the input yields a JS
@@ -2742,7 +2830,53 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
         components: HashMap::new(),
         screens: HashMap::new(),
         endpoints: HashMap::new(),
+        tokens: HashSet::new(),
+        styles: HashSet::new(),
     };
+
+    // Theme tokens (spec 26): light + dark share one name namespace for
+    // `token(x)` resolution, but duplicates are checked PER theme (a name
+    // legitimately repeats across light/dark — that's how a dark variant
+    // overrides a token's value, not a duplicate declaration).
+    let mut light_token_names: HashSet<&str> = HashSet::new();
+    let mut dark_token_names: HashSet<&str> = HashSet::new();
+    for t in &program.themes {
+        let seen = if t.is_dark { &mut dark_token_names } else { &mut light_token_names };
+        for tok in &t.tokens {
+            if !seen.insert(tok.name.as_str()) {
+                errors.push(Diagnostic {
+                    file: String::new(),
+                    rule: "R2 duplicate-decl",
+                    message: format!(
+                        "theme token `{}` is declared more than once in the {} theme.",
+                        tok.name,
+                        if t.is_dark { "dark" } else { "default" }
+                    ),
+                    line: tok.line,
+                });
+            }
+            table.tokens.insert(tok.name.clone());
+        }
+    }
+    // Named styles (spec 26): register + reject a duplicate name (R2), same
+    // convention as every other top-level decl.
+    let mut style_names: HashSet<&str> = HashSet::new();
+    for s in &program.styles {
+        if !style_names.insert(s.name.as_str()) {
+            errors.push(Diagnostic {
+                file: String::new(),
+                rule: "R2 duplicate-decl",
+                message: format!("style `{}` is declared more than once.", s.name),
+                line: s.line,
+            });
+        }
+        table.styles.insert(s.name.clone());
+    }
+    // R37 unknown-token — a named style's own CSS body may reference `token(x)`.
+    for s in &program.styles {
+        check_token_refs(&s.css, s.line, &table, &mut errors);
+    }
+
     for ep in &program.endpoints {
         if table.endpoints.insert(ep.name.clone(), ep).is_some() {
             errors.push(Diagnostic {
@@ -3076,13 +3210,37 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
     }
 
     for f in &program.functions {
-        if returns_secret[&f.name] && f.env != EnvModifier::Server {
+        if !returns_secret[&f.name] {
+            continue;
+        }
+        if f.env != EnvModifier::Server {
             errors.push(Diagnostic {
                 file: String::new(),
                 rule: "R5 secret-leak-via-return",
                 message: format!(
                     "`{}` returns secret-derived data but runs {}. Only `server` functions may return secret data; use `declassify(...)` server-side if release is intended.",
                     f.name, env_label(f.env)
+                ),
+                line: f.line,
+            });
+        } else if !f.return_type.as_deref().is_some_and(|t| is_model_shaped(t, &table)) {
+            // R5, server side (spec 29 sweep finding): a `server fn` was
+            // exempted above on the assumption that wire-projection strips
+            // `secret` fields automatically — true for a Model return, but a
+            // bare scalar (String/Int/…) built from a secret field carries no
+            // such marker once extracted, so it crosses to ANY RPC caller as
+            // plain text (proven live: a `server fn` returning `user.
+            // password_hash` as a bare `String` compiled clean and the raw
+            // value appeared in the `/__xeres/<fn>` JSON response). Require
+            // the same `declassify(...)` this rule's own message always
+            // recommended, now actually enforced server-side too.
+            errors.push(Diagnostic {
+                file: String::new(),
+                rule: "R5 secret-leak-via-return",
+                message: format!(
+                    "server fn `{}` returns a bare `{}` built from a secret field, with no `declassify(...)`. A Model return gets its `secret` fields stripped automatically on the wire; a scalar return doesn't, so this value would reach any RPC caller as plain text. Wrap it in `declassify(...)` to confirm the release is deliberate.",
+                    f.name,
+                    f.return_type.as_deref().unwrap_or("value")
                 ),
                 line: f.line,
             });
@@ -3219,6 +3377,8 @@ pub fn lower(program: &mut XeresProgram) {
         components: HashMap::new(),
         screens: HashMap::new(),
         endpoints: endpoints.iter().map(|e| (e.name.clone(), &*e)).collect(),
+        tokens: HashSet::new(),
+        styles: HashSet::new(),
     };
 
     for f in functions.iter_mut() {

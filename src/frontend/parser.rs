@@ -336,6 +336,49 @@ pub struct ImportDecl {
     pub line: usize,
 }
 
+/// One `category name "value"` line inside a `theme { … }` block (spec 26),
+/// e.g. `color primary "#2563eb"` or `space lg "24px"`. The category shapes the
+/// generated CSS variable name (`token_var_name`): `color` tokens stay bare
+/// (`--primary`), every other category is prefixed (`--space-lg`) so unrelated
+/// categories can reuse a short name (`lg`) without colliding.
+#[derive(Debug)]
+pub struct ThemeToken {
+    pub category: String,
+    pub name: String,
+    pub value: String,
+    pub line: usize,
+}
+
+/// `theme { … }` (default/light) or `theme dark { … }` (spec 26) — a block of
+/// design tokens compiled to CSS variables. `token(name)` anywhere in a `style`
+/// string resolves to `var(--<varname>)` (R37 unknown-token proves it exists).
+#[derive(Debug)]
+pub struct ThemeNode {
+    pub is_dark: bool,
+    pub tokens: Vec<ThemeToken>,
+    /// Reserved for a future "empty theme block" diagnostic.
+    #[allow(dead_code)]
+    pub line: usize,
+}
+
+/// `style Name { "css declarations" }` (spec 26) — a reusable named style,
+/// compiled to a generated `.x-<name>` class. An element's `style Name`
+/// modifier references one by name (R37 unknown-token); it's sugar over the
+/// same generated stylesheet the `theme` tokens land in.
+#[derive(Debug)]
+pub struct StyleNode {
+    pub name: String,
+    pub css: String,
+    pub line: usize,
+    /// `pub` (spec 26) — reserved; see `ModelNode::is_pub`. Styles/themes merge
+    /// globally across modules (they're app-wide CSS, not a typed boundary), so
+    /// this isn't enforced yet.
+    #[allow(dead_code)]
+    pub is_pub: bool,
+    /// Source module (file stem); set by the loader when merging.
+    pub module: String,
+}
+
 #[derive(Debug)]
 pub struct XeresProgram {
     pub models: Vec<ModelNode>,
@@ -346,6 +389,10 @@ pub struct XeresProgram {
     pub endpoints: Vec<EndpointNode>,
     /// `api Name { … }` blocks (spec 23) — the inbound HTTP/JSON surface.
     pub apis: Vec<ApiNode>,
+    /// `theme { … }` / `theme dark { … }` blocks (spec 26) — design tokens.
+    pub themes: Vec<ThemeNode>,
+    /// `style Name { … }` top-level named styles (spec 26).
+    pub styles: Vec<StyleNode>,
     /// `import "…"` edges declared in this file (spec 20). Empty ⇒ the
     /// single-file fast path (the loader returns the program unchanged).
     pub imports: Vec<ImportDecl>,
@@ -420,7 +467,8 @@ impl<'a> Parser<'a> {
     pub fn parse_program(&mut self) -> XeresProgram {
         let mut program = XeresProgram {
             models: vec![], enums: vec![], functions: vec![], states: vec![], screens: vec![],
-            endpoints: vec![], apis: vec![], imports: vec![], requires: HashSet::new(),
+            endpoints: vec![], apis: vec![], themes: vec![], styles: vec![], imports: vec![],
+            requires: HashSet::new(),
         };
 
         while self.current_token != Token::EOF {
@@ -462,6 +510,22 @@ impl<'a> Parser<'a> {
             if self.cur_is_kw("api") {
                 if let Some(a) = self.parse_api(is_pub) {
                     program.apis.push(a);
+                }
+                continue;
+            }
+            // `theme { … }` / `theme dark { … }` (spec 26, top-level only).
+            if self.cur_is_kw("theme") {
+                if let Some(t) = self.parse_theme() {
+                    program.themes.push(t);
+                }
+                continue;
+            }
+            // `style Name { … }` — a top-level named style (spec 26). Distinct
+            // from the element `style` modifier, which is only recognized inside
+            // `parse_element` (a view body), never at top level.
+            if self.cur_is_kw("style") {
+                if let Some(s) = self.parse_style_decl(is_pub) {
+                    program.styles.push(s);
                 }
                 continue;
             }
@@ -756,6 +820,77 @@ impl<'a> Parser<'a> {
             if self.current_token == Token::RBrace { self.next_token(); }
         }
         Some(ApiRoute { method, path, body, return_type, body_stmts, line })
+    }
+
+    /// `theme { color primary "#2563eb"  space lg "24px" }` or
+    /// `theme dark { … }` (spec 26) — a block of `category name "value"` lines.
+    fn parse_theme(&mut self) -> Option<ThemeNode> {
+        let line = self.cur_line;
+        self.next_token(); // consume 'theme'
+        let is_dark = if self.cur_is_kw("dark") {
+            self.next_token(); // consume 'dark'
+            true
+        } else {
+            false
+        };
+        if self.current_token != Token::LBrace {
+            return None;
+        }
+        self.next_token(); // consume '{'
+        let mut tokens = Vec::new();
+        while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+            let tline = self.cur_line;
+            let category = match &self.current_token {
+                Token::Identifier(c) => c.clone(),
+                _ => { self.next_token(); continue; }
+            };
+            self.next_token(); // consume category
+            let name = match &self.current_token {
+                Token::Identifier(n) => n.clone(),
+                _ => break,
+            };
+            self.next_token(); // consume name
+            let value = match &self.current_token {
+                Token::Str(v) => v.clone(),
+                _ => break,
+            };
+            self.next_token(); // consume value
+            tokens.push(ThemeToken { category, name, value, line: tline });
+        }
+        if self.current_token == Token::RBrace {
+            self.next_token();
+        }
+        Some(ThemeNode { is_dark, tokens, line })
+    }
+
+    /// `style Name { "css declarations" }` (spec 26) — a top-level named style.
+    fn parse_style_decl(&mut self, is_pub: bool) -> Option<StyleNode> {
+        let line = self.cur_line;
+        self.next_token(); // consume 'style'
+        let name = match &self.current_token {
+            Token::Identifier(n) => n.clone(),
+            _ => return None,
+        };
+        self.next_token(); // consume name
+        if self.current_token != Token::LBrace {
+            return None;
+        }
+        self.next_token(); // consume '{'
+        let css = match &self.current_token {
+            Token::Str(s) => {
+                let v = s.clone();
+                self.next_token(); // consume the css string
+                v
+            }
+            _ => String::new(),
+        };
+        while self.current_token != Token::RBrace && self.current_token != Token::EOF {
+            self.next_token(); // skip anything unexpected
+        }
+        if self.current_token == Token::RBrace {
+            self.next_token();
+        }
+        Some(StyleNode { name, css, line, is_pub, module: String::new() })
     }
 
     fn parse_function(&mut self, is_pub: bool) -> Option<FunctionNode> {

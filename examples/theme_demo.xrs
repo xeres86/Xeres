@@ -1,0 +1,39 @@
+// Global CSS demo (spec 26): design tokens, a named style, and a dark-mode
+// toggle — `xeres dev examples/theme_demo.xrs`.
+theme {
+  color bg "#f8fafc"
+  color text "#0f172a"
+  color primary "#2563eb"
+  color card "#ffffff"
+  space lg "24px"
+}
+
+theme dark {
+  color bg "#0f172a"
+  color text "#e2e8f0"
+  color primary "#7c3aed"
+  color card "#1e293b"
+}
+
+style Card {
+  "background:token(card); color:token(text); padding:token(lg);
+   border-radius:12px; box-shadow:0 1px 3px rgba(0,0,0,.15)"
+}
+
+ui screen Home {
+  view {
+    column style "min-height:100vh; padding:40px; gap:24px; background:token(bg); color:token(text)" {
+      row style "justify-content:space-between; align-items:center" {
+        heading "Theme demo"
+        button "Toggle dark mode" -> { toggle_theme() }
+      }
+      column style Card {
+        text "This card uses a named style plus theme tokens."
+        text "Colors come from token(primary), token(bg), token(text) — no hardcoded hex here."
+      }
+      row style "color:token(primary); font-weight:600" {
+        text "Accent-colored text via token(primary)."
+      }
+    }
+  }
+}

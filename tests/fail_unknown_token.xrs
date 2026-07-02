@@ -1,0 +1,12 @@
+// EXPECT: FAIL [R37 unknown-token] — token(nope) references an undeclared theme token.
+theme {
+  color primary "#2563eb"
+}
+
+ui screen Home {
+  view {
+    column style "color:token(nope)" {
+      heading "Dashboard"
+    }
+  }
+}

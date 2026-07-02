@@ -171,7 +171,8 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
     // source module as we go.
     let mut merged = XeresProgram {
         models: vec![], enums: vec![], functions: vec![], states: vec![],
-        screens: vec![], endpoints: vec![], apis: vec![], imports: vec![], requires: HashSet::new(),
+        screens: vec![], endpoints: vec![], apis: vec![], themes: vec![], styles: vec![],
+        imports: vec![], requires: HashSet::new(),
     };
     let mut merge_order: Vec<String> = vec![entry_key.clone()];
     merge_order.extend(order.iter().filter(|k| **k != entry_key).cloned());
@@ -186,6 +187,7 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
         for d in &mut prog.screens { d.module = module.clone(); }
         for d in &mut prog.endpoints { d.module = module.clone(); }
         for d in &mut prog.apis { d.module = module.clone(); }
+        for d in &mut prog.styles { d.module = module.clone(); }
         merged.models.append(&mut prog.models);
         merged.enums.append(&mut prog.enums);
         merged.functions.append(&mut prog.functions);
@@ -193,6 +195,10 @@ pub fn load_program(entry: &str) -> Result<XeresProgram, Vec<Diagnostic>> {
         merged.screens.append(&mut prog.screens);
         merged.endpoints.append(&mut prog.endpoints);
         merged.apis.append(&mut prog.apis);
+        // Themes/styles (spec 26) merge globally across modules — they're
+        // app-wide CSS, not a typed boundary, so no R35 visibility gating.
+        merged.themes.append(&mut prog.themes);
+        merged.styles.append(&mut prog.styles);
     }
 
     // R34 (declare side): an imported (non-entry) module that USES a capability

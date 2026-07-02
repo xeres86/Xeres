@@ -126,7 +126,7 @@ fn compile(path: &str) -> Option<XeresProgram> {
 fn build(path: &str) -> bool {
     let Some(program) = compile(path) else { return false };
     let analysis = checker::analyze(&program);
-    let (server_rs, client_ts, index_html, cargo_toml) =
+    let (server_rs, client_ts, index_html, cargo_toml, app_css) =
         codegen::generate(&program, &analysis.returns_secret);
 
     let server_dir = Path::new("out").join("server");
@@ -138,6 +138,16 @@ fn build(path: &str) -> bool {
     let _ = fs::write(src_dir.join("main.rs"), &server_rs);
     let _ = fs::write(static_dir.join("client.ts"), &client_ts);
     let _ = fs::write(static_dir.join("index.html"), &index_html);
+    // Global CSS (spec 26) — only written when the app declares a `theme` or a
+    // named `style` (`app_css` is empty otherwise, matching `index.html`'s
+    // omitted `<link>`); removed otherwise so a stale sheet from a PRIOR build
+    // of this same `out/` dir doesn't linger unreferenced.
+    let css_path = static_dir.join("app.css");
+    if !app_css.is_empty() {
+        let _ = fs::write(&css_path, &app_css);
+    } else {
+        let _ = fs::remove_file(&css_path);
+    }
 
     let (screens, components) = screen_component_counts(&program);
     let enums = if program.enums.is_empty() {
@@ -183,12 +193,20 @@ fn parse_tls(args: &[String]) -> Option<serve::TlsConfig> {
 fn serve_once(path: &str, tls: Option<serve::TlsConfig>) {
     let Some(program) = compile(path) else { return };
     let analysis = checker::analyze(&program);
-    let (_server, client_ts, index_html, _cargo) =
+    let (_server, client_ts, index_html, _cargo, app_css) =
         codegen::generate(&program, &analysis.returns_secret);
 
     let _ = fs::create_dir_all(STATIC_DIR);
     let _ = fs::write(format!("{}/client.ts", STATIC_DIR), &client_ts);
     let _ = fs::write(format!("{}/index.html", STATIC_DIR), &index_html);
+    // Global CSS (spec 26): write/remove `app.css` so a `xeres dev` restart
+    // after deleting the last `theme`/`style` doesn't leave a stale sheet.
+    let css_path = format!("{}/app.css", STATIC_DIR);
+    if !app_css.is_empty() {
+        let _ = fs::write(&css_path, &app_css);
+    } else {
+        let _ = fs::remove_file(&css_path);
+    }
 
     if !bundle() {
         eprintln!("xeres: client bundle failed (is npx/esbuild available?)");

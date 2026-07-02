@@ -1,5 +1,114 @@
 # Changelog
 
+## 0.7.1 — 2026-07-02 — global CSS, the security pass & serve-path hardening
+
+Three themes: a new **compile-time styling layer** (spec 26), the owed
+**security pass** (spec 29 — which turned up and closed a real secret-on-wire
+hole), and **panic-hardening** the `xeres serve` request path (spec 28).
+
+> ⚠️ **Behavior change (R5).** A `server fn` that returns a **bare scalar** built
+> from a `secret` field now requires `declassify(...)` — see the security-pass
+> section. This rejects code that previously compiled (and leaked); the fix is a
+> one-word `declassify(...)`, exactly what R5's error message always recommended.
+
+### Global CSS — design tokens, named styles, dark mode (spec 26, R37)
+
+A compile-time styling layer, still zero browser framework runtime:
+
+```xeres
+theme {
+  color primary "#2563eb"
+  space lg "24px"
+}
+theme dark { color primary "#7c3aed" }
+
+style Card { "padding:token(lg); background:token(primary)" }
+
+ui screen Home {
+  view {
+    column style Card { button "Toggle" -> { toggle_theme() } }
+  }
+}
+```
+
+- **`theme { … }` / `theme dark { … }`** — design tokens, compiled to CSS
+  variables (`:root`, plus a `@media (prefers-color-scheme: dark)` block and a
+  `[data-theme="dark"]` block for a manual toggle). `token(name)` inside any
+  `style` string resolves to `var(--name)` at compile time.
+- **`style Name { "…" }`** — a top-level named style, compiled to a generated
+  `.x-name` class; an element's `style Name` modifier emits `class=` instead of
+  inline CSS (sugar over the same generated sheet — inline `style "…"` keeps
+  working unchanged, side by side).
+- **`toggle_theme()`** — a browser-only builtin that flips `data-theme` on
+  `<html>` and persists the choice to `localStorage`; tiny inline JS, no
+  framework, only emitted when a `theme dark` block exists.
+- Everything compiles to one generated `static/app.css`, linked from
+  `index.html` only when the app actually declares a `theme`/`style` — a plain
+  app's output is untouched (no `<link>`, no file).
+- **New rule R37 unknown-token** — `token(x)` / `style Name` must reference a
+  declared token/style, the same discipline as an unknown type. Next free rule
+  → **R38**.
+- Codegen-only feature: the interpreter has no `style` handling at all (`xeres
+  serve` already serves codegen's client bundle), so this touches
+  parser/checker/codegen — not `interp.rs`.
+
+### The security pass — cargo-audit CI, an R1–R37 sweep, a secret-on-wire hole (spec 29)
+
+The three artifacts owed since the original security pass, plus a genuine
+finding from doing the sweep seriously instead of re-reading old comments:
+
+- **`cargo audit` in CI** — a new `security` job (`.github/workflows/ci.yml`)
+  fails the build on a RUSTSEC vulnerability in the dependency tree. Currently
+  clean (2 known, triaged, non-blocking maintenance-status warnings — see
+  `SECURITY.md`).
+- **A written, verified R1–R37 coverage matrix** — `SECURITY.md`. Every rule's
+  enforcement site and fail/pass fixture pair, checked against the compiler's
+  actual output while writing it (not just trusted from old comments).
+- **R5, closed for real:** a `server fn` could return a bare secret-derived
+  **scalar** (`server fn get_hash(u: User) -> String { return u.password_hash
+  }`) with **zero compiler errors** — R5 only ever restricted *non*-server
+  functions, on the assumption wire-projection strips secrets automatically.
+  True for a Model return (field-level stripping); **not** true for a scalar,
+  which carries no field marker once extracted. Confirmed live: `xeres serve`
+  + a valid-CSRF `curl` to `/__xeres/get_hash` returned the raw secret value.
+  R5 now also rejects this; `declassify(...)` is the deliberate opt-out. New
+  fixtures: `fail_secret_scalar_leak.xrs`, `pass_secret_scalar_declassified.xrs`,
+  `fail_secret_return_via_call.xrs` (the call-graph composition path, distinct
+  from a direct field read).
+- **The secret-on-wire property, asserted mechanically:**
+  `interp::tests::secret_never_crosses_the_wire` builds an app and calls it
+  through both client-reachable wire surfaces (RPC, `api` route), asserting the
+  secret value never appears in the serialized JSON on either — then
+  mutation-tested (temporarily broke the stripping filter, confirmed the test
+  goes red with the leaked value in the failure message) to prove it isn't a
+  tautology.
+
+### Panic-hardening the serve request path (spec 28)
+
+A review flagged 49 `unwrap`/`panic!` sites in `interp.rs` as a robustness gap.
+Triaging them found the count was mostly test code (only 3 real runtime sites,
+all legitimate invariants — now documented in place) — but turned up two
+*actual* crash bugs the grep count missed, since neither is a `.unwrap()`/
+`panic!()` call:
+
+- **`content_length()` (serve.rs)** — parsed `Content-Length` via a fixed
+  byte-offset slice (`line[..15]`) guarded only by a length check; a request
+  with a multi-byte UTF-8 character positioned so byte 15 falls mid-character
+  panics the connection thread on ANY header line. Fixed with the `.get(..15)`
+  pattern already used by `cookie_value`/`header_value` in the same file.
+- **`dec_parse()` (interp.rs)** — a Decimal string with a huge leading-zero
+  fractional part parses to a tiny i128 magnitude but an unbounded scale;
+  combining it with a differently-scaled Decimal overflow-panics `dec_rescale`'s
+  `10i128.pow(scale diff)`. Reachable from a single crafted `api`/RPC body.
+  Fixed by capping the fractional scale (30 digits) and rejecting the rest as
+  `"invalid Decimal"` — the graceful path every invalid Decimal already takes.
+- **Sync store lock (serve.rs)** — `sync_store().lock().unwrap()` propagated
+  poisoning forever after any one panic (a CRDT merge store, safe to keep
+  merging into); now recovers via `.unwrap_or_else(|e| e.into_inner())`.
+
+All three are regression-tested and confirmed live against a running
+`xeres serve` with crafted raw requests.
+
 ## 0.7.0 — 2026-06-30 — multi-file, the addressable boundary & typed external data
 
 Three themes: the multi-file story (modules Cut 2 + a multi-file scaffold), the

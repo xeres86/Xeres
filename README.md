@@ -6,7 +6,7 @@ single type system. The server/client boundary is enforced by the **compiler**,
 not by convention: secrets and server capabilities *physically cannot* reach the
 browser. Local-first by default. Zero framework runtime in the browser.
 
-> Status: **v0.7.0**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
+> Status: **v0.7.1**. See [CHANGELOG.md](CHANGELOG.md) for what's in it and
 > [ROADMAP.md](ROADMAP.md) for what's next.
 
 ---
@@ -273,6 +273,61 @@ ui screen Dashboard {
 
 See [`examples/dashboard.xrs`](examples/dashboard.xrs) for the full version
 (`xeres dev examples/dashboard.xrs`).
+
+### Global CSS: tokens, named styles, dark mode
+
+Past a demo, per-element inline CSS gets repetitive. A top-level `theme` block
+declares design tokens (compiled to CSS variables); a top-level `style Name`
+block declares a reusable style (compiled to a generated class); `theme dark`
+adds a dark-mode variant. All three compile to one static `static/app.css` —
+still **zero framework runtime** in the browser.
+
+```xeres
+theme {
+  color bg "#f8fafc"
+  color text "#0f172a"
+  color primary "#2563eb"
+  space lg "24px"
+}
+
+theme dark {
+  color bg "#0f172a"
+  color text "#e2e8f0"
+  color primary "#7c3aed"
+}
+
+style Card {
+  "background:token(bg); color:token(text); padding:token(lg); border-radius:12px"
+}
+
+ui screen Home {
+  view {
+    column style "background:token(bg); color:token(text); min-height:100vh" {
+      button "Toggle dark mode" -> { toggle_theme() }
+      column style Card { text "Tokens + a named style, no hardcoded hex." }
+    }
+  }
+}
+```
+
+- `token(name)` inside any `style` string resolves to `var(--name)` at compile
+  time (a `color` token stays bare — `--primary`; every other category is
+  prefixed by it, e.g. `space lg` → `--space-lg`, so unrelated categories can
+  reuse a short name). An unknown token or style name is a compile error
+  (**R37**), same discipline as an unknown type.
+- `style Name` on an element (instead of `style "css"`) emits `class="x-name"`
+  from the generated stylesheet rather than an inline `style=` attribute —
+  sugar over the same CSS, so a `row`/`column`'s layout class still applies
+  alongside it.
+- `theme dark { … }` emits both a `@media (prefers-color-scheme: dark)` block
+  (automatic, OS-level) and a `[data-theme="dark"]` block (manual). The
+  `toggle_theme()` builtin flips `data-theme` on `<html>` and persists the
+  choice to `localStorage`.
+- An app with no `theme`/`style` gets no `<link>` and no `app.css` — this is
+  opt-in, not a tax on a plain app.
+
+See [`examples/theme_demo.xrs`](examples/theme_demo.xrs)
+(`xeres dev examples/theme_demo.xrs`).
 
 ### Reusable components
 

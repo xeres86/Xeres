@@ -31,15 +31,20 @@ fn is_endpoint_name(n: &str) -> bool {
 pub fn generate(
     program: &XeresProgram,
     _returns_secret: &HashMap<String, bool>,
-) -> (String, String, String, String) {
+) -> (String, String, String, String, String) {
     ENDPOINTS.with(|e| {
         *e.borrow_mut() = program.endpoints.iter().map(|x| x.name.clone()).collect();
     });
+    // Global CSS (spec 26): tokens + named styles + dark block, one static
+    // sheet. Empty when the app declares neither — the "zero framework/DX
+    // stays lean by default" case (no `<link>`, no `static/app.css`).
+    let css = gen_stylesheet(program);
     (
         gen_server(program),
         gen_client(program),
-        gen_index(program),
+        gen_index(program, !css.is_empty()),
         gen_cargo(program),
+        css,
     )
 }
 
@@ -794,6 +799,12 @@ fn gen_client(program: &XeresProgram) -> String {
         out.push_str(DECIMAL_RUNTIME);
         out.push('\n');
     }
+    // Dark-mode toggle (spec 26): only emitted when the app declares a `theme
+    // dark { … }` block — a plain/light-only app pays zero runtime cost.
+    if program.themes.iter().any(|t| t.is_dark) {
+        out.push_str(THEME_RUNTIME);
+        out.push('\n');
+    }
 
     // Enums — a string union (the variant names). String-backed end to end.
     for e in &program.enums {
@@ -894,8 +905,13 @@ fn gen_client(program: &XeresProgram) -> String {
         .filter(|s| s.is_component)
         .map(|s| (s.name.clone(), s.params.iter().map(|p| p.name.clone()).collect()))
         .collect();
+    // Global CSS (spec 26): token name -> css var name, and every declared
+    // named style, so an element's `style` slot can tell a literal CSS string
+    // apart from a `style Name` class reference.
+    let tokens = build_token_map(program);
+    let named_styles: HashSet<String> = program.styles.iter().map(|s| s.name.clone()).collect();
     for sc in &program.screens {
-        out.push_str(&gen_screen(sc, &synced, &components));
+        out.push_str(&gen_screen(sc, &synced, &components, &tokens, &named_styles));
     }
 
     // Local-first sync: the runtime + one reactive collection per `synced state`.
@@ -1113,6 +1129,8 @@ fn gen_screen(
     sc: &crate::frontend::parser::ScreenNode,
     synced: &HashSet<String>,
     components: &HashMap<String, Vec<String>>,
+    tokens: &HashMap<String, String>,
+    named_styles: &HashSet<String>,
 ) -> String {
     let mut out = String::new();
     let state_vars: HashSet<String> = sc.states.iter().map(|s| s.name.clone()).collect();
@@ -1132,6 +1150,8 @@ fn gen_screen(
         state_vars,
         synced: synced.clone(),
         components: components.clone(),
+        tokens: tokens.clone(),
+        named_styles: named_styles.clone(),
         handlers: String::new(),
         hcount: 0,
         loop_ctx: None,
@@ -1226,6 +1246,12 @@ struct ScreenEmit {
     /// Component name -> its param names in declaration order (named args at a
     /// call site are reordered to this positional order).
     components: HashMap<String, Vec<String>>,
+    /// Theme token name -> css var name (spec 26); resolves `token(x)` in a
+    /// literal `style "…"` string.
+    tokens: HashMap<String, String>,
+    /// Declared `style Name` names (spec 26); an element `style Name` whose
+    /// name is in this set renders as `class="x-name"` instead of inline CSS.
+    named_styles: HashSet<String>,
     handlers: String,
     hcount: usize,
     /// When inside `for var in <iterable>`, how to re-bind items in handlers.
@@ -1258,7 +1284,7 @@ impl ScreenEmit {
                 // specially (href from the route map + data-link), not via the
                 // generic element path.
                 if tag == "link" {
-                    return link_node(arg, style, event);
+                    return link_node(arg, style, event, &self.tokens, &self.named_styles);
                 }
                 let html = map_tag(tag);
                 let void = is_void(html);
@@ -1274,14 +1300,28 @@ impl ScreenEmit {
                     _ => None,
                 };
                 match style {
+                    // `style Name` (spec 26) — a declared named style compiles
+                    // to a class, not an inline `style=`; a row/col still gets
+                    // its layout class alongside it (the named style is sugar
+                    // over the generated sheet, not a replacement for layout).
+                    Some(Expr::Ident(name)) if self.named_styles.contains(name) => {
+                        let mut classes = Vec::new();
+                        match tag.as_str() {
+                            "row" => classes.push("x-row".to_string()),
+                            "column" => classes.push("x-col".to_string()),
+                            _ => {}
+                        }
+                        classes.push(format!("x-{}", name.to_lowercase()));
+                        s.push_str(&format!(" class=\"{}\"", classes.join(" ")));
+                    }
                     Some(style_expr) => {
                         s.push_str(" style=\"");
                         if let Some(base) = base_layout {
                             s.push_str(base);
                         }
                         match style_expr {
-                            // a literal CSS string is inlined (whitespace tidied)
-                            Expr::Str(css) => s.push_str(&inline_css(css)),
+                            // a literal CSS string is inlined (tokens resolved, whitespace tidied)
+                            Expr::Str(css) => s.push_str(&inline_css(&resolve_tokens(css, &self.tokens))),
                             // a dynamic style expression is interpolated
                             e => {
                                 s.push_str("${");
@@ -1658,6 +1698,11 @@ fn emit_h_expr(e: &Expr, screen: &str, sv: &HashSet<String>) -> String {
                 }
                 return format!("__navigate({})", nav_target_js(args));
             }
+            // `toggle_theme()` (spec 26) — browser-only builtin, flips
+            // `data-theme` on `<html>` + persists to `localStorage`.
+            if callee == "toggle_theme" {
+                return "__toggleTheme()".to_string();
+            }
             let a: Vec<String> = args.iter().map(|x| emit_h_expr(x, screen, sv)).collect();
             let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
             match callee.as_str() {
@@ -1806,14 +1851,17 @@ const MOUNT_RUNTIME: &str = include_str!("../../runtime/mount_runtime.ts");
 /// Generate the host page. A screen whose root carries an explicit `style`
 /// "owns the canvas": it renders full-bleed on a neutral page (no centered
 /// card, logo, or purple gradient). Unstyled apps keep the branded shell.
-fn gen_index(program: &XeresProgram) -> String {
+/// `has_css` (spec 26) links the generated `static/app.css` stylesheet when the
+/// app declares a `theme` or a named `style` — omitted otherwise, so a plain
+/// app's `index.html` is byte-identical to before spec 26.
+fn gen_index(program: &XeresProgram, has_css: bool) -> String {
     let mut out = String::new();
     let first = program.screens.iter().find(|s| !s.is_component && s.params.is_empty());
     let bleed = first.map(screen_is_bleed).unwrap_or(false);
 
     if bleed {
         // Full-bleed: just the mount point on a neutral page.
-        out.push_str(INDEX_HEAD_BLEED);
+        out.push_str(&inject_css_link(INDEX_HEAD_BLEED, has_css));
         out.push_str("<div id=\"app\"></div>");
         out.push_str(
             // Absolute path so a deep link to a nested route (e.g. `/post/123`)
@@ -1825,7 +1873,7 @@ fn gen_index(program: &XeresProgram) -> String {
         return out;
     }
 
-    out.push_str(INDEX_HEAD);
+    out.push_str(&inject_css_link(INDEX_HEAD, has_css));
     if first.is_some() {
         out.push_str("<div id=\"app\"></div>");
     } else {
@@ -1853,6 +1901,15 @@ fn screen_is_bleed(sc: &crate::frontend::parser::ScreenNode) -> bool {
         .any(|n| matches!(n, ViewNode::Element { style: Some(_), .. }))
 }
 
+/// Insert the `app.css` `<link>` right before `</head>` (spec 26). A no-op
+/// when the app has no theme/style — so an unstyled app's head is untouched.
+fn inject_css_link(head: &str, has_css: bool) -> String {
+    if !has_css {
+        return head.to_string();
+    }
+    head.replacen("</head>", "<link rel=\"stylesheet\" href=\"/app.css\">\n</head>", 1)
+}
+
 const INDEX_HEAD: &str = include_str!("../../runtime/index_head.html");
 
 // Full-bleed host page for screens that style their own root. No centered card,
@@ -1860,6 +1917,127 @@ const INDEX_HEAD: &str = include_str!("../../runtime/index_head.html");
 // Nested unstyled `row`/`column` still get sensible flex defaults; `button` and
 // `input` get neutral (theme-agnostic) styling that inline `style` can override.
 const INDEX_HEAD_BLEED: &str = include_str!("../../runtime/index_head_bleed.html");
+
+// ------------------------------------------------------------------ app.css (spec 26)
+
+/// The CSS variable name a token expands to: `color` tokens stay bare
+/// (`--primary`), every other category is prefixed by its category
+/// (`--space-lg`) — see `ThemeToken`'s doc comment for why.
+fn token_var_name(category: &str, name: &str) -> String {
+    if category == "color" {
+        name.to_string()
+    } else {
+        format!("{}-{}", category, name)
+    }
+}
+
+/// name -> the css var name it expands to, across every `theme`/`theme dark`
+/// block (one merged namespace, mirroring the checker's `table.tokens`).
+fn build_token_map(program: &XeresProgram) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for t in &program.themes {
+        for tok in &t.tokens {
+            map.insert(tok.name.clone(), token_var_name(&tok.category, &tok.name));
+        }
+    }
+    map
+}
+
+/// Collapse a CSS source string's whitespace to single spaces (shared by the
+/// HTML-attribute path and the stylesheet path; only the former also escapes
+/// `"`, since a generated CSS file isn't an HTML attribute value).
+fn tidy_css(css: &str) -> String {
+    css.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Rewrite every `token(name)` in a literal CSS string to `var(--<varname>)`
+/// (spec 26). Purely textual — checker's R37 already proved every reference
+/// resolves, so an unresolvable name here (dead code / unreachable in a valid
+/// program) is left as-is rather than panicking.
+fn resolve_tokens(css: &str, tokens: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut rest = css;
+    while let Some(pos) = rest.find("token(") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + "token(".len()..];
+        match after.find(')') {
+            Some(end) => {
+                let name = after[..end].trim();
+                match tokens.get(name) {
+                    Some(var) => out.push_str(&format!("var(--{})", var)),
+                    None => out.push_str(&after[..end + 1]), // unresolved: leave literal
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str("token(");
+                rest = after;
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Tidy a literal `style "..."` string into a single-line CSS attribute value:
+/// collapse the (often multi-line, indented) source whitespace to single spaces
+/// and escape `"` so it can't terminate the HTML attribute.
+fn inline_css(css: &str) -> String {
+    tidy_css(css).replace('"', "&quot;")
+}
+
+/// The generated `static/app.css` (spec 26): tokens → `:root` (+ a dark block),
+/// named styles → `.x-<name>` classes. Empty when the app declares neither —
+/// callers treat an empty string as "no stylesheet" (no file, no `<link>`).
+fn gen_stylesheet(program: &XeresProgram) -> String {
+    if program.themes.is_empty() && program.styles.is_empty() {
+        return String::new();
+    }
+    let tokens = build_token_map(program);
+    let mut out = String::new();
+
+    let light_vars: Vec<String> = program
+        .themes
+        .iter()
+        .filter(|t| !t.is_dark)
+        .flat_map(|t| &t.tokens)
+        .map(|t| format!("  --{}: {};", token_var_name(&t.category, &t.name), t.value))
+        .collect();
+    if !light_vars.is_empty() {
+        out.push_str(":root {\n");
+        out.push_str(&light_vars.join("\n"));
+        out.push_str("\n}\n\n");
+    }
+
+    let dark_vars: Vec<String> = program
+        .themes
+        .iter()
+        .filter(|t| t.is_dark)
+        .flat_map(|t| &t.tokens)
+        .map(|t| format!("  --{}: {};", token_var_name(&t.category, &t.name), t.value))
+        .collect();
+    if !dark_vars.is_empty() {
+        // Automatic (OS `prefers-color-scheme`) AND manual (`toggle_theme()`,
+        // via `data-theme`) — both apply the same variables (spec 26).
+        out.push_str("@media (prefers-color-scheme: dark) {\n  :root {\n");
+        for v in &dark_vars {
+            out.push_str("  ");
+            out.push_str(v);
+            out.push('\n');
+        }
+        out.push_str("  }\n}\n\n");
+        out.push_str("[data-theme=\"dark\"] {\n");
+        out.push_str(&dark_vars.join("\n"));
+        out.push_str("\n}\n\n");
+    }
+
+    for s in &program.styles {
+        let css = tidy_css(&resolve_tokens(&s.css, &tokens));
+        out.push_str(&format!(".x-{} {{ {} }}\n", s.name.to_lowercase(), css));
+    }
+    out
+}
 
 const UID_FN: &str = include_str!("../../runtime/uid_fn.ts");
 
@@ -1877,6 +2055,11 @@ async function __rpc<T>(name: string, args: unknown[]): Promise<T> {
   return res.json() as Promise<T>;
 }
 ";
+
+// Dark-mode toggle (spec 26): persist a manual `toggle_theme()` choice to
+// `localStorage` and restore it (via `data-theme`) on the next load, on top of
+// the CSS-only `prefers-color-scheme` default.
+const THEME_RUNTIME: &str = include_str!("../../runtime/theme_runtime.ts");
 
 // Exact Decimal money math (spec 18), browser tier. Zero-dep and exact: a scaled
 // BigInt, never the binary `number`. A Decimal is a string end-to-end (parse ->
@@ -1987,6 +2170,10 @@ fn emit_expr(e: &Expr, ts: bool) -> String {
                     return format!("__navigateTo({:?}, {{ {} }})", name, ps);
                 }
                 return format!("__navigate({})", nav_target_js(args));
+            }
+            // `toggle_theme()` (spec 26) — browser-only builtin (like `navigate`).
+            if callee == "toggle_theme" {
+                return "__toggleTheme()".to_string();
             }
             let a: Vec<String> = args.iter().map(|x| emit_expr(x, ts)).collect();
             let arg = |i: usize| a.get(i).cloned().unwrap_or_default();
@@ -2572,13 +2759,6 @@ fn map_ts_type(name: &str) -> String {
     }
 }
 
-/// Tidy a literal `style "..."` string into a single-line CSS attribute value:
-/// collapse the (often multi-line, indented) source whitespace to single spaces
-/// and escape `"` so it can't terminate the HTML attribute.
-fn inline_css(css: &str) -> String {
-    css.split_whitespace().collect::<Vec<_>>().join(" ").replace('"', "&quot;")
-}
-
 /// The JS string literal for a `navigate(Screen)` argument — the screen name
 /// (an `Ident`, per R28). Used by both expression emitters.
 fn nav_target_js(args: &[Expr]) -> String {
@@ -2592,24 +2772,37 @@ fn nav_target_js(args: &[Expr]) -> String {
 /// route map (`__path`, module scope) and whose `data-link` drives the SPA
 /// click handler in `mount()` (preventDefault + pushState, no full reload). The
 /// label goes through the same R22 escape path as any other element arg.
-fn link_node(arg: &Option<Expr>, style: &Option<Expr>, event: &Option<Handler>) -> String {
+fn link_node(
+    arg: &Option<Expr>,
+    style: &Option<Expr>,
+    event: &Option<Handler>,
+    tokens: &HashMap<String, String>,
+    named_styles: &HashSet<String>,
+) -> String {
     let target = match event {
         Some(Handler::Call(Expr::Ident(name))) => name.clone(),
         _ => String::new(), // checker R28 already rejected a target-less link
     };
     let mut s = String::from("`<a");
     s.push_str(&format!(" href=\"${{__path[{:?}]}}\" data-link={:?}", target, target));
-    if let Some(style_expr) = style {
-        s.push_str(" style=\"");
-        match style_expr {
-            Expr::Str(css) => s.push_str(&inline_css(css)),
-            e => {
-                s.push_str("${");
-                s.push_str(&emit_expr(e, true));
-                s.push('}');
-            }
+    match style {
+        // `style Name` (spec 26) — same class-not-inline treatment as `node()`.
+        Some(Expr::Ident(name)) if named_styles.contains(name) => {
+            s.push_str(&format!(" class=\"x-{}\"", name.to_lowercase()));
         }
-        s.push('"');
+        Some(style_expr) => {
+            s.push_str(" style=\"");
+            match style_expr {
+                Expr::Str(css) => s.push_str(&inline_css(&resolve_tokens(css, tokens))),
+                e => {
+                    s.push_str("${");
+                    s.push_str(&emit_expr(e, true));
+                    s.push('}');
+                }
+            }
+            s.push('"');
+        }
+        None => {}
     }
     s.push('>');
     match arg {

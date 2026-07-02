@@ -1,0 +1,8 @@
+// EXPECT: FAIL [R37 unknown-token] — `style Nope` references an undeclared named style.
+ui screen Home {
+  view {
+    column style Nope {
+      heading "Dashboard"
+    }
+  }
+}

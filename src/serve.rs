@@ -200,9 +200,15 @@ fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Parse `Content-Length` from a request head (0 if absent/invalid).
+///
+/// Uses `.get(..15)` rather than `line[..15]` (spec 28): a byte-length check
+/// alone (`line.len() > 15`) doesn't prove byte offset 15 is a *char*
+/// boundary — a header line with a multi-byte UTF-8 character before that
+/// offset would panic the direct-index form on arbitrary client input.
+/// `.get()` returns `None` instead, same as `cookie_value`/`header_value`.
 fn content_length(head: &str) -> usize {
     for line in head.lines() {
-        if line.len() > 15 && line[..15].eq_ignore_ascii_case("content-length:") {
+        if line.get(..15).map_or(false, |p| p.eq_ignore_ascii_case("content-length:")) {
             return line[15..].trim().parse().unwrap_or(0);
         }
     }
@@ -497,7 +503,12 @@ fn sync_store() -> &'static Mutex<HashMap<String, CollState>> {
 
 fn sync_dispatch(coll: &str, body: &str) -> String {
     let req = jparse(body);
-    let mut guard = sync_store().lock().unwrap();
+    // Recover the guard even if a prior request's panic poisoned the lock
+    // (spec 28): the store is a CRDT merge structure (field-level LWW, each
+    // op independently stamped), so a possibly-partial prior write is still
+    // safe to keep merging into. Propagating the poison here would turn one
+    // bad request into a permanent 500 for every sync request after it.
+    let mut guard = sync_store().lock().unwrap_or_else(|e| e.into_inner());
     let cs = guard
         .entry(coll.to_string())
         .or_insert_with(|| CollState { rows: HashMap::new(), lamport: 0 });
@@ -667,5 +678,44 @@ mod sync_tests {
         let resp = push(c, &[set_op("r1", "title", "\"z\"", 3, "a")]);
         assert!(!is_deleted(&resp, "r1"));
         assert_eq!(field_val(&resp, "r1", "title").as_deref(), Some("\"z\""));
+    }
+}
+
+/// spec 28: regressions for request-path panics found while hardening the
+/// serve path against malformed/adversarial input.
+#[cfg(test)]
+mod panic_hardening_tests {
+    use super::{content_length, sync_dispatch, sync_store};
+
+    #[test]
+    fn content_length_survives_a_multibyte_header_line() {
+        // A header line long enough to pass the old `line.len() > 15` guard,
+        // but with a multi-byte UTF-8 character positioned so byte offset 15
+        // isn't a char boundary — the old `line[..15]` direct index panicked
+        // on this; `.get(..15)` must not.
+        let head = "X-Client-Name: caf\u{e9}-r\u{e9}sum\u{e9}-header-value\r\nContent-Length: 7\r\n\r\n";
+        assert_eq!(content_length(head), 7);
+    }
+
+    #[test]
+    fn content_length_defaults_to_zero_on_garbage() {
+        let head = "not-even-a-real-header-line\r\n\r\n";
+        assert_eq!(content_length(head), 0);
+    }
+
+    #[test]
+    fn sync_dispatch_recovers_from_a_poisoned_lock() {
+        // Simulate an earlier request's panic while holding the store lock —
+        // `sync_store().lock().unwrap()` used to propagate the poison forever
+        // (every request after it would panic too); `unwrap_or_else(|e|
+        // e.into_inner())` must recover and keep serving.
+        let coll = "test_poison_recovery";
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = sync_store().lock().unwrap();
+            panic!("simulated panic while holding the sync lock");
+        });
+        // The store is poisoned now; a normal request must still succeed.
+        let resp = sync_dispatch(coll, "{\"ops\":[]}");
+        assert!(resp.contains("\"ops\""));
     }
 }

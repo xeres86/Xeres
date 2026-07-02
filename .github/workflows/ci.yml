@@ -17,3 +17,18 @@ jobs:
         run: cargo build --verbose --features full
       - name: Fixture suite
         run: cargo test --verbose
+
+  # spec 29: fail the build on a RUSTSEC advisory in the dependency tree.
+  # Advisory-gating, not version-pinning — plain `cargo audit` (no `--deny
+  # warnings`) already fails on a real *vulnerability*; "unmaintained"/notice-
+  # level warnings print but don't block (see SECURITY.md for the currently
+  # known, triaged ones). Runs against the committed Cargo.lock.
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit
