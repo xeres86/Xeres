@@ -4,6 +4,10 @@
 
 use crate::interp::{json_str, Interp, Value};
 use crate::json::{decode, generic_inner, jparse, J};
+// The always-on security headers (CSP/HSTS/nosniff) live in `crate::protocol` —
+// the single source of truth shared with the emitted server (F1), so a policy
+// change lands in one place and both runtimes get it.
+use crate::protocol::SECURITY_HEADERS;
 use crate::frontend::parser::{EnvModifier, XeresProgram};
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -219,16 +223,6 @@ fn content_length(head: &str) -> usize {
 fn is_idle(e: &std::io::Error) -> bool {
     matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
-
-/// Default S1/S2: the always-on security headers. Strict CSP forbids inline
-/// script (backstops R22); inline style is allowed for the language's `<style>`/
-/// `style=""`. HSTS is always set (honored once TLS is terminated in front);
-/// `Access-Control-Allow-Origin` is intentionally absent — the app is same-origin.
-const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\n\
-    Referrer-Policy: no-referrer\r\n\
-    X-Frame-Options: DENY\r\n\
-    Strict-Transport-Security: max-age=63072000; includeSubDomains\r\n\
-    Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n";
 
 /// Write a response with the security headers + any `Set-Cookie` lines.
 fn write_response<S: Write>(

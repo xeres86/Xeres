@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — one source of truth for the security headers (spec 32)
+
+The always-on security headers (CSP/HSTS/`X-Frame-Options`/nosniff) were copied
+**verbatim** in both server implementations — the live interpreter host
+(`src/serve.rs`) and the emitted std-only Rust server
+(`runtime/server_main.rs`). A CSP change had to land in two files and only one
+was under test; they would eventually drift (review finding F1).
+
+Now the header block lives once, in `src/protocol.rs`. `serve.rs` uses the
+constant directly; `codegen` emits the **same** constant into the generated
+server (via a `//__XERES_SECURITY_HEADERS__` placeholder, the `src/json.rs`
+pattern), so the two can't diverge by construction. The emitted server is
+**byte-for-byte unchanged** (verified against pre-change baselines for
+session / plain / api apps), and a mutation-tested anti-drift unit test
+(`codegen::protocol_tests`) fails if anyone re-hardcodes a divergent copy.
+Scoped to the security-critical header block; `reason()` /
+`write_response` are left as-is (see the spec for why).
+
 ## Unreleased — performance harness (spec 30)
 
 "Fast" is now a tracked number, not a vibe. A Node-stdlib harness (`bench/`)

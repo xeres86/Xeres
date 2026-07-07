@@ -6,6 +6,7 @@ mod frontend;
 mod middle;
 mod backend;
 mod json;
+mod protocol;
 mod interp;
 mod serve;
 mod fmt;

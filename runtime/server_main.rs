@@ -64,9 +64,7 @@ fn rand_token() -> String {
     format!("{:016x}{:016x}", mk(), mk())
 }
 
-// Default S1/S2 security headers, always emitted. HSTS is honored once TLS is
-// terminated in front; no Access-Control-Allow-Origin (the app is same-origin).
-const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\n";
+//__XERES_SECURITY_HEADERS__
 
 // First occurrence of `needle` in `hay` (finds the \r\n\r\n header terminator).
 fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {

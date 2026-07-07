@@ -560,6 +560,11 @@ fn gen_server(program: &XeresProgram) -> String {
             "    if let Some((__c, __j)) = api_dispatch(method, path, body) { return (__c, \"application/json\", __j); }",
         )
     };
+    // Security headers (F1): emit the shared `crate::protocol` constant so the
+    // generated server's CSP/HSTS policy is byte-for-byte the interpreter host's
+    // — one source, two consumers, can't drift.
+    let server_main =
+        server_main.replace("//__XERES_SECURITY_HEADERS__", &crate::protocol::emitted_security_headers_decl());
     out.push_str(&server_main);
     out
 }
@@ -2847,5 +2852,44 @@ fn map_tag(tag: &str) -> &str {
         "radio" => "div",       // a <div> wrapping the generated radio-input group
         "link" => "a",          // client-router anchor (href + data-link, see node())
         other => other,         // text, input, textarea, select, option …
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use crate::frontend::parser::Parser;
+    use crate::frontend::lexer::Lexer;
+    use std::collections::HashMap;
+
+    // F1 anti-drift guard (spec 32): the emitted server and the live interpreter
+    // host must serve the SAME security-header policy. Both now derive it from
+    // `crate::protocol::SECURITY_HEADERS`, so this can't drift by construction —
+    // the test locks that in (and fails if someone re-hardcodes a divergent copy
+    // into the emitted server template).
+    #[test]
+    fn emitted_server_embeds_the_shared_security_headers() {
+        let src = "ui screen Home { view { column { heading \"hi\" } } }";
+        let mut lexer = Lexer::new(src);
+        let mut parser = Parser::new(&mut lexer);
+        let program = parser.parse_program();
+        let (server, ..) = super::generate(&program, &HashMap::new());
+
+        // The generated server must contain exactly the shared CSP/HSTS block —
+        // the same bytes `serve.rs` sends — and no leftover placeholder.
+        let expected = format!("const SECURITY_HEADERS: &str = {:?};", crate::protocol::SECURITY_HEADERS);
+        assert!(
+            server.contains(&expected),
+            "emitted server does not embed the shared protocol::SECURITY_HEADERS constant"
+        );
+        assert!(
+            !server.contains("//__XERES_SECURITY_HEADERS__"),
+            "the security-headers placeholder was left unfilled in the emitted server"
+        );
+        // The full CSP directive string must survive verbatim (the security bit).
+        assert!(
+            crate::protocol::SECURITY_HEADERS.contains("frame-ancestors 'none'")
+                && server.contains("frame-ancestors 'none'"),
+            "the CSP frame-ancestors directive drifted between the constant and the emitted server"
+        );
     }
 }
