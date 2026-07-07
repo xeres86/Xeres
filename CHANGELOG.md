@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — performance harness (spec 30)
+
+"Fast" is now a tracked number, not a vibe. A Node-stdlib harness (`bench/`)
+measures four metrics over the example apps and gates regressions against a
+committed baseline:
+
+- **Compiler throughput** — `xeres build` wall-time (best of 5) + lines/sec.
+- **Client bundle size** — gzipped `client.js` (the zero-framework proof:
+  1.5–3.7 kb across the examples).
+- **Server cold start + resident memory** — spawn → first `200`; ~10.6 MB RSS
+  flat under load.
+- **Request throughput** — keep-alive load on an RPC (`/__xeres/ping`) and an
+  `api` route (`GET /api/bench/ping`): **10k+ req/s** each, p50 ~2.5 ms.
+
+`bench/baseline.json` holds the deterministic metrics (compile-time + bundle);
+`bench/run.mjs` diffs against it and flags a regression (advisory — >10 % bundle
+/ >40 % compile, never fails the build). Server numbers are machine-specific, so
+they're reported, not gated. A manual/nightly `perf.yml` CI job runs it. New
+README "Performance" section.
+
+Also: **`xeres serve` now honors a `PORT` env var** (was hardcoded 8080) — lets
+the harness pick a free port and lets `xeres dev` run several apps side by side.
+
 ## 0.7.1 — 2026-07-02 — global CSS, the security pass & serve-path hardening
 
 Three themes: a new **compile-time styling layer** (spec 26), the owed

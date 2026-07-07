@@ -220,7 +220,10 @@ fn serve_once(path: &str, tls: Option<serve::TlsConfig>) {
         screens,
         components
     );
-    serve::serve(&program, STATIC_DIR, PORT, tls);
+    // Port defaults to 8080; a `PORT` env var overrides it (lets `xeres dev`
+    // run several apps side by side, and lets the perf harness pick a free port).
+    let port = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(PORT);
+    serve::serve(&program, STATIC_DIR, port, tls);
 }
 
 /// `xeres dev` — watch the source; (re)spawn `xeres serve` on change. No cargo.

@@ -16,6 +16,10 @@ package-lock.json
 _*/
 *.log
 
+# Perf harness (spec 30): timestamped run outputs are local; only the checked-in
+# bench/baseline.json is tracked (the regression gate).
+bench/results-*.json
+
 # Secrets / local config — never commit connection strings
 .env
 .env.*

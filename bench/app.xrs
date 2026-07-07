@@ -1,0 +1,29 @@
+// Throughput workload for the perf harness (spec 30). Two client-reachable wire
+// surfaces at minimal handler cost, so req/s measures the connection + dispatch
+// path, not the handler:
+//   RPC   ping()            -> /__xeres/ping   (the bundled-SPA call path)
+//   api   GET /api/bench/ping -> Pong           (the public HTTP/JSON surface)
+//
+//   xeres serve bench/app.xrs   ->  http://127.0.0.1:8080
+
+model Pong { msg: String }
+
+server fn ping() -> String {
+  return "pong"
+}
+
+api Bench {
+  base "/api/bench"
+
+  GET "/ping" -> Pong {
+    return Pong { msg: "pong" }
+  }
+}
+
+ui screen App {
+  view {
+    column {
+      heading "Xeres perf bench"
+    }
+  }
+}

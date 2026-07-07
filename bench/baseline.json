@@ -1,0 +1,55 @@
+{
+  "generated": "2026-07-07T15:38:34.106Z",
+  "platform": "win32-x64",
+  "examples": {
+    "examples/counter.xrs": {
+      "loc": 14,
+      "compile_ms": 43.1,
+      "lines_per_sec": 325,
+      "bundle_raw": 4523,
+      "bundle_gz": 1557
+    },
+    "examples/todo.xrs": {
+      "loc": 25,
+      "compile_ms": 47.12,
+      "lines_per_sec": 531,
+      "bundle_raw": 11112,
+      "bundle_gz": 3752
+    },
+    "examples/router.xrs": {
+      "loc": 60,
+      "compile_ms": 47.11,
+      "lines_per_sec": 1273,
+      "bundle_raw": 6824,
+      "bundle_gz": 2224
+    },
+    "examples/dashboard.xrs": {
+      "loc": 140,
+      "compile_ms": 54,
+      "lines_per_sec": 2592,
+      "bundle_raw": 6398,
+      "bundle_gz": 2140
+    },
+    "examples/acme.xrs": {
+      "loc": 187,
+      "compile_ms": 49.79,
+      "lines_per_sec": 3756,
+      "bundle_raw": 10882,
+      "bundle_gz": 3365
+    },
+    "examples/weather.xrs": {
+      "loc": 121,
+      "compile_ms": 48.29,
+      "lines_per_sec": 2506,
+      "bundle_raw": 7621,
+      "bundle_gz": 2631
+    },
+    "examples/theme_demo.xrs": {
+      "loc": 36,
+      "compile_ms": 44.64,
+      "lines_per_sec": 806,
+      "bundle_raw": 4978,
+      "bundle_gz": 1814
+    }
+  }
+}

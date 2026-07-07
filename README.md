@@ -699,7 +699,7 @@ escape hatch for genuinely-trusted HTML is to produce it in a `server fn` and
 ## How it compiles
 
 ```
-app.xrs ──► lexer ──► parser ──► loader ──► checker (R1–R36) ──► codegen
+app.xrs ──► lexer ──► parser ──► loader ──► checker (R1–R37) ──► codegen
                                                        ├─► out/server/         a self-contained Rust crate
                                                        │     ├─ src/main.rs      std-only HTTP server: router,
                                                        │     │                   RPC, secret-stripping, sync
@@ -720,6 +720,46 @@ app.xrs ──► lexer ──► parser ──► loader ──► checker (R1�
   stubs (`await`), two-way input binding, and the synced-collection store.
 
 You never edit `out/` — it's regenerated from `.xrs` on every build.
+
+---
+
+## Performance
+
+"Fast" is a tracked number, not a vibe. The harness (`bench/run.mjs`) measures
+four metrics over the example apps and gates regressions against a committed
+`bench/baseline.json`.
+
+**Client bundle — the zero-framework proof** (gzipped `client.js`, no runtime
+dependency): the whole reactive client — render-on-change mount, typed RPC
+stubs, two-way binding — ships in single-digit kilobytes.
+
+| App | Bundle (gzip) |
+|---|---|
+| counter | ~1.5 kb |
+| theme_demo | ~1.8 kb |
+| dashboard | ~2.1 kb |
+| weather (endpoints) | ~2.6 kb |
+| acme (big view) | ~3.3 kb |
+
+**Server** (ejected/interpreted share the same `std`-only HTTP core; measured on
+the reference dev machine, keep-alive client, `bench/app.xrs`):
+
+- **~10 MB resident** under load, flat — no GC balloon (≈5× leaner than an
+  equivalent Node server idle, ~15× under load; see the full scorecard in
+  `_specs/21-performance.md`).
+- **10k+ req/s** on both a trivial RPC (`/__xeres/ping`) and an `api` route
+  (`GET /api/bench/ping`), p50 ~2.5 ms — throughput is connection-bound, not
+  handler-bound.
+- Cold start is dominated by the one-time esbuild client bundle; the ejected
+  native binary (the deploy target) binds in tens of ms.
+
+Reproduce:
+
+```
+cargo build --release
+node bench/run.mjs            # compile-time + bundle-size, diffed vs baseline
+node bench/run.mjs --server   # + live cold-start / throughput / resident memory
+```
 
 ---
 
