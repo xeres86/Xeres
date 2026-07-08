@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — split the two compiler monoliths (spec 31)
+
+Pure internal streamlining (review finding F3): the two largest source files
+became cohesive directory modules, with **no behavior change**.
+
+- `backend/codegen.rs` (2895 lines) → `codegen/{mod, server, client, index}.rs`
+  — the entry + shared emitters + capability detection stay in the core; the
+  three output tiers (Rust server, browser bundle, host page) are extracted.
+  Generated output verified **byte-identical** across all five artifacts for
+  twelve example apps.
+- `checker.rs` (3646 lines) → `checker/{mod, rules, lower}.rs` — the symbol
+  table, type resolution, and `analyze` orchestrator stay in the core; every
+  R-numbered rule check moves to `rules`, the typed-lowering pass to `lower`.
+
+Verified by the fixture suite (identical pass/fail behavior) + unit tests, and a
+byte-identical re-diff of codegen output. Zero build warnings.
+
 ## Unreleased — one source of truth for the security headers (spec 32)
 
 The always-on security headers (CSP/HSTS/`X-Frame-Options`/nosniff) were copied
