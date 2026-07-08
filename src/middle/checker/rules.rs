@@ -1,75 +1,12 @@
-// src/checker.rs
-use crate::frontend::parser::{
-    BinOp, EndpointNode, EnumNode, EnvModifier, Expr, FunctionNode, Handler, HttpMethod, MatchArm,
-    MatchPat, ModelNode, Param, ScreenNode, Stmt, SyncedStateNode, ViewNode, XeresProgram,
-};
+// Semantic rules — every R-numbered check (tier/secret/capability/view/etc.).
+use super::*;
+use crate::frontend::parser::*;
 use crate::middle::diagnostics::Diagnostic;
 use std::collections::{HashMap, HashSet};
 
-const BUILTINS: &[&str] = &["String", "Int", "Float", "Bool", "DateTime", "Decimal"];
-
-/// Stdlib methods on a `String` receiver.
-const STRING_METHODS: &[&str] = &["trim", "upper", "lower", "length", "contains", "split", "replace"];
-
-pub struct Analysis {
-    pub errors: Vec<Diagnostic>,
-    pub returns_secret: HashMap<String, bool>,
-}
-
-struct FnSig {
-    env: EnvModifier,
-    ret: Option<String>,
-}
-
-struct SymbolTable<'a> {
-    models: HashMap<String, &'a ModelNode>,
-    enums: HashMap<String, &'a EnumNode>,
-    fns: HashMap<String, FnSig>,
-    states: HashMap<String, &'a SyncedStateNode>,
-    /// Reusable `ui component`s, keyed by name (for invocation checking).
-    components: HashMap<String, &'a ScreenNode>,
-    /// `ui screen`s (not components), keyed by name — the navigation targets
-    /// for `navigate(...)` / `link` (R28). Prop-less ones are mountable routes.
-    screens: HashMap<String, &'a ScreenNode>,
-    /// Declared egress `endpoint`s, keyed by name (R26).
-    endpoints: HashMap<String, &'a EndpointNode>,
-    /// Declared `theme` token names (spec 26), light + dark merged into one
-    /// namespace — `token(x)` resolves by name regardless of which theme block
-    /// declared it (R37).
-    tokens: HashSet<String>,
-    /// Declared top-level `style Name` names (spec 26), for the element
-    /// `style Name` reference (R37).
-    styles: HashSet<String>,
-}
-
-/// Inner type of a one-level generic, e.g. `("List", "List<User>") -> "User"`.
-fn generic_inner<'a>(base: &str, ty: &'a str) -> Option<&'a str> {
-    ty.strip_prefix(base)
-        .and_then(|r| r.strip_prefix('<'))
-        .and_then(|r| r.strip_suffix('>'))
-}
-
-/// A component name (and thus its invocation tag) must begin with an uppercase
-/// letter, the same convention that distinguishes types from value identifiers.
-fn starts_uppercase(name: &str) -> bool {
-    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-}
-
-/// Does `ty` (after stripping one `List<...>`/`Optional<...>` wrapper) name a
-/// model? (spec 29) A model-shaped return is protected by wire-projection's
-/// automatic field-level `secret` stripping (`wire_json` in interp.rs / the
-/// stripped client `interface` in codegen.rs); a bare scalar isn't — pulling a
-/// `secret` field's value into a `String`/`Int`/… loses the type-level marker,
-/// so nothing is left to strip at serialization. Used by R5's server-side
-/// scalar-leak check.
-fn is_model_shaped(ty: &str, table: &SymbolTable) -> bool {
-    let inner = generic_inner("List", ty).or_else(|| generic_inner("Optional", ty)).unwrap_or(ty);
-    table.models.contains_key(inner)
-}
-
 /// R20 — a `match` scrutinee must be an enum; every arm names a real variant;
 /// and the arms are exhaustive (cover all variants, or include `_`).
-fn check_match_patterns(
+pub(super) fn check_match_patterns(
     scrutinee: &Expr,
     arms: &[MatchArm],
     locals: &HashMap<String, (Option<String>, bool)>,
@@ -131,211 +68,7 @@ fn check_match_patterns(
     }
 }
 
-fn is_known_type(name: &str, table: &SymbolTable) -> bool {
-    if let Some(inner) = generic_inner("List", name).or_else(|| generic_inner("Optional", name)) {
-        return is_known_type(inner, table);
-    }
-    BUILTINS.contains(&name) || table.models.contains_key(name) || table.enums.contains_key(name)
-}
-
-fn is_bool_op(op: BinOp) -> bool {
-    matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::And | BinOp::Or)
-}
-
-fn resolve_type(
-    expr: &Expr,
-    locals: &HashMap<String, (Option<String>, bool)>,
-    table: &SymbolTable,
-) -> Option<String> {
-    match expr {
-        Expr::Int(_) => Some("Int".into()),
-        Expr::Float(_) => Some("Float".into()),
-        Expr::Str(_) => Some("String".into()),
-        Expr::Bool(_) => Some("Bool".into()),
-        Expr::Ident(v) => locals.get(v).and_then(|(t, _)| t.clone()),
-        Expr::Field { base, field } => {
-            // `session.actor` — the authenticated actor id, or none.
-            if matches!(base.as_ref(), Expr::Ident(n) if n == "session") && field == "actor" {
-                return Some("Optional<String>".into());
-            }
-            // enum variant access: `Status.Active` is a value of type `Status`.
-            if let Expr::Ident(name) = base.as_ref() {
-                if table.enums.contains_key(name) {
-                    return Some(name.clone());
-                }
-            }
-            let base_ty = resolve_type(base, locals, table)?;
-            let model = table.models.get(&base_ty)?;
-            model.field(field).map(|p| p.data_type.clone())
-        }
-        Expr::Call { callee, args } => match callee.as_str() {
-            // builtins: uid() unique id, hash() password hash, verify() check,
-            // now() current timestamp.
-            "uid" | "hash" => Some("String".into()),
-            "verify" => Some("Bool".into()),
-            "now" => Some("DateTime".into()),
-            // decimal("19.99") — a string-backed exact money value, kept
-            // distinct from Float so the two can't silently mix (R29).
-            "decimal" => Some("Decimal".into()),
-            // Lowered Decimal ops (spec 18). The typed-desugaring pass below
-            // rewrites Decimal `+ - * < > <= >=` into these calls; typing them
-            // here lets nested arithmetic like `(a + b) * c` compose after the
-            // inner rewrite, and keeps `resolve_type` correct post-lowering.
-            "__dec_add" | "__dec_sub" | "__dec_mul" => Some("Decimal".into()),
-            "__dec_lt" | "__dec_gt" | "__dec_le" | "__dec_ge" => Some("Bool".into()),
-            // Lowered string concatenation (spec 24): `String + <scalar>` desugars
-            // to this. Always a String (the result of display-concatenation).
-            "__str_concat" => Some("String".into()),
-            // math: result type follows the (numeric) argument
-            "abs" | "min" | "max" => args
-                .first()
-                .and_then(|a| resolve_type(a, locals, table))
-                .or_else(|| Some("Int".into())),
-            _ => table.fns.get(callee).and_then(|s| s.ret.clone()),
-        },
-        Expr::Unary { op, expr } => match op {
-            crate::frontend::parser::UnOp::Not => Some("Bool".into()),
-            crate::frontend::parser::UnOp::Neg => resolve_type(expr, locals, table),
-        },
-        Expr::Binary { op, left, right } => {
-            if is_bool_op(*op) {
-                return Some("Bool".into());
-            }
-            let lt = resolve_type(left, locals, table);
-            let rt = resolve_type(right, locals, table);
-            // String display-concatenation (spec 24): `String + <anything>` (or
-            // `<anything> + String`) yields a String — checked before the numeric
-            // arms so `"lat=" + 51.5` is a String, not a Float. Lowered to
-            // `__str_concat` in `lower`.
-            if matches!(*op, BinOp::Add)
-                && (lt.as_deref() == Some("String") || rt.as_deref() == Some("String"))
-            {
-                return Some("String".into());
-            }
-            match (lt.as_deref(), rt.as_deref()) {
-                (Some("Int"), Some("Int")) => Some("Int".into()),
-                // Exact money (R29 / spec 18): Decimal arithmetic stays Decimal,
-                // and `Decimal * Int` / `Int * Decimal` scales exactly. Mixing
-                // with Float, `Decimal {+,-} Int`, and `/` are rejected as R29 in
-                // `check_decimal_binary` (so they never reach lowering/codegen).
-                (Some("Decimal"), Some("Decimal")) if matches!(*op, BinOp::Add | BinOp::Sub | BinOp::Mul) => {
-                    Some("Decimal".into())
-                }
-                (Some("Decimal"), Some("Int")) | (Some("Int"), Some("Decimal")) if matches!(*op, BinOp::Mul) => {
-                    Some("Decimal".into())
-                }
-                (Some("Float"), _) | (_, Some("Float")) => Some("Float".into()),
-                // temporal: `DateTime - DateTime` is the elapsed milliseconds
-                // (Int); shifting a `DateTime` by `Int` ms yields a `DateTime`.
-                (Some("DateTime"), Some("DateTime")) if matches!(*op, BinOp::Sub) => Some("Int".into()),
-                (Some("DateTime"), Some("Int")) if matches!(*op, BinOp::Add | BinOp::Sub) => {
-                    Some("DateTime".into())
-                }
-                (Some("Int"), Some("DateTime")) if matches!(*op, BinOp::Add) => Some("DateTime".into()),
-                _ => None,
-            }
-        }
-        Expr::Declassify(inner) => resolve_type(inner, locals, table),
-        Expr::Raw(inner) => resolve_type(inner, locals, table),
-        Expr::Await(inner) => resolve_type(inner, locals, table),
-        Expr::MethodCall { receiver, method, args } => {
-            if let Expr::Ident(name) = receiver.as_ref() {
-                // `db.exec` returns affected-row count; `db.query_one` is typed
-                // by the surrounding fn's return model (resolved in codegen).
-                if name == "db" {
-                    return if method == "exec" { Some("Int".into()) } else { None };
-                }
-                // endpoint verbs: `.get` -> String (response body), `.post` -> Int (status).
-                if table.endpoints.contains_key(name) {
-                    return match method.as_str() {
-                        "get" => Some("String".into()),
-                        "post" => Some("Int".into()),
-                        _ => None,
-                    };
-                }
-                // `collection.get(id)` yields the element type.
-                if method == "get" {
-                    if let Some(state) = table.states.get(name) {
-                        return Some(state.collection_type.clone());
-                    }
-                }
-            }
-            // `optional.or(default)` unwraps to the inner type.
-            if method == "or" {
-                if let Some(rt) = resolve_type(receiver, locals, table) {
-                    if let Some(inner) = generic_inner("Optional", &rt) {
-                        return Some(inner.to_string());
-                    }
-                }
-            }
-            // List stdlib methods (R-free; see spec 08). `at`/`first`/`last` are
-            // safe — they yield `Optional<T>` (miss ⇒ `none`).
-            if let Some(rt) = resolve_type(receiver, locals, table) {
-                if let Some(elem) = generic_inner("List", &rt).map(str::to_string) {
-                    match method.as_str() {
-                        "length" => return Some("Int".into()),
-                        "first" | "last" | "at" => return Some(format!("Optional<{}>", elem)),
-                        "reverse" => return Some(format!("List<{}>", elem)),
-                        // Higher-order ops (spec 19). `map` binds the closure
-                        // param to the element type and the result element type is
-                        // the body's; `filter` keeps `List<T>`; `reduce` is the
-                        // type of its `init`; `contains` is Bool.
-                        "filter" => return Some(format!("List<{}>", elem)),
-                        "contains" => return Some("Bool".into()),
-                        "map" => {
-                            if let Some(Expr::Closure { params, body }) = args.first() {
-                                if params.len() == 1 {
-                                    let mut inner = locals.clone();
-                                    inner.insert(params[0].clone(), (Some(elem.clone()), false));
-                                    if let Some(u) = resolve_type(body, &inner, table) {
-                                        return Some(format!("List<{}>", u));
-                                    }
-                                }
-                            }
-                            return None;
-                        }
-                        "reduce" => {
-                            return args.first().and_then(|init| resolve_type(init, locals, table));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // String stdlib methods.
-            if STRING_METHODS.contains(&method.as_str()) {
-                return match method.as_str() {
-                    "length" => Some("Int".into()),
-                    "contains" => Some("Bool".into()),
-                    "split" => Some("List<String>".into()),
-                    _ => Some("String".into()), // trim, upper, lower, replace
-                };
-            }
-            None
-        }
-        Expr::Record { name, .. } => Some(name.clone()),
-        Expr::NoneLit => Some("None".into()),
-        Expr::ListLit(items) => {
-            let elem = items.first().and_then(|e| resolve_type(e, locals, table))?;
-            Some(format!("List<{}>", elem))
-        }
-        // A ternary's type is its then-branch (both branches should agree).
-        Expr::Ternary { then, otherwise, .. } => {
-            resolve_type(then, locals, table).or_else(|| resolve_type(otherwise, locals, table))
-        }
-        // `a..b` yields a sequence of Int (so `for i in 0..n` binds `i: Int`).
-        Expr::Range { .. } => Some("List<Int>".into()),
-        // A closure has no first-class type in Cut 1 (argument-only); its body's
-        // type is resolved in context by the higher-order op above.
-        Expr::Closure { .. } => None,
-        // `xs[i]` is `.at(i)` sugar → `Optional<T>` (miss ⇒ `none`).
-        Expr::Index { base, .. } => {
-            let bt = resolve_type(base, locals, table)?;
-            generic_inner("List", &bt).map(|elem| format!("Optional<{}>", elem))
-        }
-    }
-}
-
-fn is_tainted(
+pub(super) fn is_tainted(
     expr: &Expr,
     locals: &HashMap<String, (Option<String>, bool)>,
     table: &SymbolTable,
@@ -406,7 +139,7 @@ fn is_tainted(
     }
 }
 
-fn function_returns_secret(
+pub(super) fn function_returns_secret(
     f: &FunctionNode,
     table: &SymbolTable,
     returns_secret: &HashMap<String, bool>,
@@ -420,7 +153,7 @@ fn function_returns_secret(
 
 /// Walk statements (recursing into `try`/`catch` blocks) looking for a return
 /// of secret-derived data.
-fn taint_scan(
+pub(super) fn taint_scan(
     stmts: &[Stmt],
     locals: &mut HashMap<String, (Option<String>, bool)>,
     table: &SymbolTable,
@@ -484,7 +217,7 @@ fn taint_scan(
 /// reject any name that isn't a declared `theme` token. Purely textual (CSS
 /// itself isn't parsed): `token(` … `)` is found by simple substring search, the
 /// same trick `codegen`'s `resolve_tokens` uses to rewrite them to `var(--x)`.
-fn check_token_refs(css: &str, line: usize, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
+pub(super) fn check_token_refs(css: &str, line: usize, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
     for name in scan_token_calls(css) {
         if !table.tokens.contains(&name) {
             errors.push(Diagnostic {
@@ -501,7 +234,7 @@ fn check_token_refs(css: &str, line: usize, table: &SymbolTable, errors: &mut Ve
 }
 
 /// Extract every `token(name)` call's `name` from a raw CSS string.
-fn scan_token_calls(css: &str) -> Vec<String> {
+pub(super) fn scan_token_calls(css: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = css;
     while let Some(pos) = rest.find("token(") {
@@ -525,7 +258,7 @@ fn scan_token_calls(css: &str) -> Vec<String> {
 /// named-style reference (`style Card`), which must name a declared `style`
 /// decl. Anything else (a dynamic/lowercase expression) isn't checked here —
 /// token substitution only applies to compile-time-known CSS text.
-fn check_style_ref(style_expr: &Expr, line: usize, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
+pub(super) fn check_style_ref(style_expr: &Expr, line: usize, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
     match style_expr {
         Expr::Str(css) => check_token_refs(css, line, table, errors),
         Expr::Ident(name) if starts_uppercase(name) => {
@@ -545,7 +278,7 @@ fn check_style_ref(style_expr: &Expr, line: usize, table: &SymbolTable, errors: 
     }
 }
 
-fn check_flow(f: &FunctionNode, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
+pub(super) fn check_flow(f: &FunctionNode, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
     let mut locals: HashMap<String, (Option<String>, bool)> = HashMap::new();
     for p in &f.params {
         locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
@@ -559,7 +292,7 @@ fn check_flow(f: &FunctionNode, table: &SymbolTable, errors: &mut Vec<Diagnostic
 /// `secret` field can never appear in the JSON), and a `body` model is the
 /// untrusted inbound payload (SQL-injection is still blocked by R23's literal-
 /// query rule, so body values can only flow through `$1` parameters).
-fn check_apis(program: &XeresProgram, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
+pub(super) fn check_apis(program: &XeresProgram, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
     let mut seen: HashSet<(&'static str, String)> = HashSet::new();
     let mut api_names: HashSet<&str> = HashSet::new();
     for api in &program.apis {
@@ -648,7 +381,7 @@ fn check_apis(program: &XeresProgram, table: &SymbolTable, errors: &mut Vec<Diag
     }
 }
 
-fn check_flow_stmts(
+pub(super) fn check_flow_stmts(
     stmts: &[Stmt],
     locals: &mut HashMap<String, (Option<String>, bool)>,
     f: &FunctionNode,
@@ -785,7 +518,7 @@ fn check_flow_stmts(
 /// R7 — a `return` must yield the declared return type.
 /// We only flag when the expression's type is *resolvable*; an unknown type is
 /// left to R1 rather than producing a misleading mismatch.
-fn check_return_type(
+pub(super) fn check_return_type(
     f: &FunctionNode,
     e: &Expr,
     locals: &HashMap<String, (Option<String>, bool)>,
@@ -826,7 +559,7 @@ fn check_return_type(
 
 /// Type assignability. Exact match, the numeric widening Int -> Float, and
 /// Optional coercion: `none` and a bare `T` both fit an `Optional<T>`.
-fn type_compatible(actual: &str, declared: &str) -> bool {
+pub(super) fn type_compatible(actual: &str, declared: &str) -> bool {
     if actual == declared || (actual == "Int" && declared == "Float") {
         return true;
     }
@@ -843,7 +576,7 @@ fn type_compatible(actual: &str, declared: &str) -> bool {
 // expressions exactly as they do to a `ui fn`, plus a scope rule (R8): every
 // identifier must be a declared prop, a `for` binding, or a known function.
 
-fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
+pub(super) fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<Diagnostic>) {
     for p in &s.params {
         if !is_known_type(&p.type_name, table) {
             errors.push(Diagnostic {
@@ -934,7 +667,7 @@ fn check_screen(s: &ScreenNode, table: &SymbolTable, errors: &mut Vec<Diagnostic
 /// screen/component (props of a component are themselves untrusted), so no
 /// interprocedural flow is needed, and conservative by design — like R7/R18 it
 /// only fires on provable taint.
-fn check_raw_taint(s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
+pub(super) fn check_raw_taint(s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
     // Untrusted-in sources: this view's props + any state cell bound to an input.
     let mut tainted: HashSet<String> = s.params.iter().map(|p| p.name.clone()).collect();
     for v in &s.body {
@@ -947,7 +680,7 @@ fn check_raw_taint(s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
 
 /// Collect every `state` cell that is two-way bound to an input control
 /// (`... bind cell`) anywhere in the view — those carry user-typed, untrusted data.
-fn collect_bound_states(v: &ViewNode, out: &mut HashSet<String>) {
+pub(super) fn collect_bound_states(v: &ViewNode, out: &mut HashSet<String>) {
     match v {
         ViewNode::Element { bind, children, .. } => {
             if let Some(var) = bind {
@@ -976,7 +709,7 @@ fn collect_bound_states(v: &ViewNode, out: &mut HashSet<String>) {
 
 /// Walk a view node's expression slots looking for `raw(...)` sinks, carrying the
 /// set of untrusted idents (extended by a `for` that iterates a tainted source).
-fn raw_walk_view(v: &ViewNode, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
+pub(super) fn raw_walk_view(v: &ViewNode, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
     match v {
         ViewNode::Element { arg, style, event, children, .. } => {
             if let Some(a) = arg {
@@ -1022,7 +755,7 @@ fn raw_walk_view(v: &ViewNode, tainted: &HashSet<String>, s: &ScreenNode, errors
 /// Descend an expression looking for `raw(inner)` sinks. A `raw` wrapping an
 /// untrusted value is the violation. Descent does not enter `declassify(...)`
 /// (the audited server-side downgrade laund­ers its subtree by construction).
-fn raw_walk_expr(e: &Expr, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
+pub(super) fn raw_walk_expr(e: &Expr, tainted: &HashSet<String>, s: &ScreenNode, errors: &mut Vec<Diagnostic>) {
     match e {
         Expr::Raw(inner) => {
             if expr_untrusted(inner, tainted) {
@@ -1106,7 +839,7 @@ fn raw_walk_expr(e: &Expr, tainted: &HashSet<String>, s: &ScreenNode, errors: &m
 /// (props + input-bound state, plus `for`-bindings over a tainted source).
 /// `declassify(...)` and `await` (server-derived; secrets already stripped) are
 /// laundered; literals are clean.
-fn expr_untrusted(e: &Expr, tainted: &HashSet<String>) -> bool {
+pub(super) fn expr_untrusted(e: &Expr, tainted: &HashSet<String>) -> bool {
     match e {
         Expr::Ident(v) => tainted.contains(v),
         Expr::Field { base, .. } => expr_untrusted(base, tainted),
@@ -1137,7 +870,7 @@ fn expr_untrusted(e: &Expr, tainted: &HashSet<String>) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn check_view(
+pub(super) fn check_view(
     v: &ViewNode,
     locals: &HashMap<String, (Option<String>, bool)>,
     states: &HashSet<String>,
@@ -1252,7 +985,7 @@ fn check_view(
 /// required ones present). Because args are checked here as ordinary Ui
 /// expressions, secret-containment (R3) and scope (R8) apply — a component
 /// cannot be a back door around the tier boundary.
-fn check_component(
+pub(super) fn check_component(
     name: &str,
     args: &[(String, Expr)],
     line: usize,
@@ -1332,7 +1065,7 @@ fn check_component(
 }
 
 /// Extract the `:name` route params from a pattern, e.g. `/post/:id` -> `["id"]`.
-fn route_params(pattern: &str) -> Vec<String> {
+pub(super) fn route_params(pattern: &str) -> Vec<String> {
     pattern.split('/').filter_map(|seg| seg.strip_prefix(':').map(str::to_string)).collect()
 }
 
@@ -1343,7 +1076,7 @@ fn route_params(pattern: &str) -> Vec<String> {
 /// pattern, and the supplied params must match its props (each once,
 /// type-compatible, all present). The target bypasses R8 as a screen name, but a
 /// param record's *values* are ordinary in-scope expressions, so they're checked.
-fn check_nav_target(
+pub(super) fn check_nav_target(
     target: &Expr,
     site: &str,
     sname: &str,
@@ -1457,7 +1190,7 @@ fn check_nav_target(
 
 /// Check an inline click-handler block (runs in the browser). Assignments must
 /// target an in-scope cell (a `state` or a `let`) with a compatible value type.
-fn check_handler_block(
+pub(super) fn check_handler_block(
     stmts: &[Stmt],
     locals: &HashMap<String, (Option<String>, bool)>,
     sname: &str,
@@ -1557,7 +1290,7 @@ fn check_handler_block(
 
 /// A screen expression is checked twice: the boundary rules via `check_expr`
 /// (as a Ui context), and scope via `check_bindings`.
-fn check_screen_expr(
+pub(super) fn check_screen_expr(
     e: &Expr,
     locals: &HashMap<String, (Option<String>, bool)>,
     sname: &str,
@@ -1571,7 +1304,7 @@ fn check_screen_expr(
 }
 
 /// R8 — every identifier must resolve to a prop, a `for` binding, or a function.
-fn check_bindings(
+pub(super) fn check_bindings(
     e: &Expr,
     locals: &HashMap<String, (Option<String>, bool)>,
     sname: &str,
@@ -1666,7 +1399,7 @@ fn check_bindings(
 
 /// Element type of an iterable. Resolves `for x in <synced collection>` and
 /// `for x in <List<T> state/prop>` to the element type `T`.
-fn element_type_of(
+pub(super) fn element_type_of(
     iter: &Expr,
     locals: &HashMap<String, (Option<String>, bool)>,
     table: &SymbolTable,
@@ -1684,7 +1417,7 @@ fn element_type_of(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn check_expr(
+pub(super) fn check_expr(
     expr: &Expr,
     locals: &HashMap<String, (Option<String>, bool)>,
     fn_env: EnvModifier,
@@ -2027,7 +1760,7 @@ fn check_expr(
 /// only through the trailing `$1`, `$2`, … parameters, so SQL injection is not
 /// expressible (concatenation/interpolation/a variable in query position is a
 /// compile error).
-fn check_db_method(
+pub(super) fn check_db_method(
     method: &str,
     args: &[Expr],
     fn_env: EnvModifier,
@@ -2073,7 +1806,7 @@ fn check_db_method(
 /// (Located: the host + its secret never reach the browser), the verb is `get`
 /// or `post`, and the path is a **string literal** — so the host is fixed and
 /// the program's egress surface stays statically auditable.
-fn check_endpoint_method(
+pub(super) fn check_endpoint_method(
     method: &str,
     args: &[Expr],
     fn_env: EnvModifier,
@@ -2130,7 +1863,7 @@ fn check_endpoint_method(
 /// literal beginning with `/` (R26, spec 24). That anchors the URL to `base`'s
 /// host: `"/p"`, or `"/p?x=" + a + b` are fine; a bare variable, or a literal not
 /// starting with `/`, is not (it could rewrite the host).
-fn endpoint_path_ok(e: &Expr) -> bool {
+pub(super) fn endpoint_path_ok(e: &Expr) -> bool {
     match e {
         Expr::Str(s) => s.starts_with('/'),
         Expr::Binary { op: BinOp::Add, left, .. } => endpoint_path_ok(left),
@@ -2143,7 +1876,7 @@ fn endpoint_path_ok(e: &Expr) -> bool {
 /// value: logging a credential is a compile error (use `declassify(...)` to
 /// release something deliberately).
 #[allow(clippy::too_many_arguments)]
-fn check_log_method(
+pub(super) fn check_log_method(
     method: &str,
     args: &[Expr],
     fn_env: EnvModifier,
@@ -2199,7 +1932,7 @@ fn check_log_method(
 /// the authenticated actor id, an `Optional<String>`), `.login(id)` and
 /// `.logout()` (mint / clear the signed `HttpOnly; Secure; SameSite=Strict`
 /// session cookie).
-fn check_session_member(
+pub(super) fn check_session_member(
     member: &str,
     argc: usize,
     fn_env: EnvModifier,
@@ -2249,13 +1982,13 @@ fn check_session_member(
 /// that binds any parameter must include `session.actor` among those params, so
 /// a protected resource can't be fetched or mutated by a caller-supplied id
 /// alone (the common IDOR omission stops compiling).
-fn check_actor_scope(stmts: &[Stmt], fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
+pub(super) fn check_actor_scope(stmts: &[Stmt], fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
     for s in stmts {
         stmt_actor_scope(s, fn_name, line, errors);
     }
 }
 
-fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
+pub(super) fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
     match s {
         Stmt::Let { value, .. }
         | Stmt::Assign { value, .. }
@@ -2289,7 +2022,7 @@ fn stmt_actor_scope(s: &Stmt, fn_name: &str, line: usize, errors: &mut Vec<Diagn
     }
 }
 
-fn expr_actor_scope(e: &Expr, fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
+pub(super) fn expr_actor_scope(e: &Expr, fn_name: &str, line: usize, errors: &mut Vec<Diagnostic>) {
     if let Expr::MethodCall { receiver, method, args } = e {
         let is_db = matches!(receiver.as_ref(), Expr::Ident(n) if n == "db");
         if is_db && matches!(method.as_str(), "query" | "query_one" | "exec") {
@@ -2338,11 +2071,11 @@ fn expr_actor_scope(e: &Expr, fn_name: &str, line: usize, errors: &mut Vec<Diagn
     }
 }
 
-fn stmts_use_session(stmts: &[Stmt]) -> bool {
+pub(super) fn stmts_use_session(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_uses_session)
 }
 
-fn stmt_uses_session(s: &Stmt) -> bool {
+pub(super) fn stmt_uses_session(s: &Stmt) -> bool {
     match s {
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Return(value)
         | Stmt::Expr(value) => expr_uses_session(value),
@@ -2360,7 +2093,7 @@ fn stmt_uses_session(s: &Stmt) -> bool {
     }
 }
 
-fn expr_uses_session(e: &Expr) -> bool {
+pub(super) fn expr_uses_session(e: &Expr) -> bool {
     let is_session = |x: &Expr| matches!(x, Expr::Ident(n) if n == "session");
     match e {
         Expr::Field { base, .. } => is_session(base) || expr_uses_session(base),
@@ -2384,7 +2117,7 @@ fn expr_uses_session(e: &Expr) -> bool {
 /// R21 — String stdlib methods: the receiver must be a `String` and the arg
 /// count must match (`contains`/`split` take 1, `replace` 2, the rest 0).
 #[allow(clippy::too_many_arguments)]
-fn check_string_method(
+pub(super) fn check_string_method(
     receiver: &Expr,
     method: &str,
     args: &[Expr],
@@ -2423,7 +2156,7 @@ fn check_string_method(
 /// (spec 08). Gates the dispatch so list `.length()` doesn't fall into the String
 /// check (R21) and `.first/.last/.at/.reverse` don't fall into the collection
 /// check (R12).
-fn is_list_method_call(
+pub(super) fn is_list_method_call(
     receiver: &Expr,
     method: &str,
     locals: &HashMap<String, (Option<String>, bool)>,
@@ -2440,7 +2173,7 @@ fn is_list_method_call(
 /// rule). `at` takes one `Int`; `length`/`first`/`last`/`reverse` take none. The
 /// safe accessors return `Optional<T>`, so a miss is `none` (caller unwraps via
 /// `.or`) — there's no separate bounds rule.
-fn check_list_method(
+pub(super) fn check_list_method(
     method: &str,
     args: &[Expr],
     locals: &HashMap<String, (Option<String>, bool)>,
@@ -2476,7 +2209,7 @@ fn check_list_method(
 /// Is this a higher-order list op (spec 19)? `map`/`filter`/`reduce` take a
 /// closure; `contains` takes a value. All require a `List<T>` receiver (so a
 /// `String.contains` still routes to the String stdlib).
-fn is_list_higher_order(
+pub(super) fn is_list_higher_order(
     receiver: &Expr,
     method: &str,
     locals: &HashMap<String, (Option<String>, bool)>,
@@ -2494,7 +2227,7 @@ fn is_list_higher_order(
 /// bound to the element/accumulator type — so the tier/secret rules (R3/R4/R5)
 /// propagate into the body for free (a `ui` body still can't read a secret, etc.).
 #[allow(clippy::too_many_arguments)]
-fn check_list_higher_order(
+pub(super) fn check_list_higher_order(
     receiver: &Expr,
     method: &str,
     args: &[Expr],
@@ -2578,7 +2311,7 @@ fn check_list_higher_order(
 /// R12 — method calls are only on `synced` collections, and only client-side.
 /// `add(row)` takes the element type; `remove(id)` takes a String.
 #[allow(clippy::too_many_arguments)]
-fn check_collection_method(
+pub(super) fn check_collection_method(
     receiver: &Expr,
     method: &str,
     args: &[Expr],
@@ -2625,7 +2358,7 @@ fn check_collection_method(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn check_method_arg(
+pub(super) fn check_method_arg(
     method: &str,
     coll: &str,
     args: &[Expr],
@@ -2658,7 +2391,7 @@ fn check_method_arg(
 
 /// R4 — in browser code (`ui`/`none`), a call to a `server` fn is an async RPC
 /// and must be the direct operand of `await`. `await` is browser-only.
-fn check_await(
+pub(super) fn check_await(
     e: &Expr,
     awaited: bool,
     in_browser: bool,
@@ -2741,7 +2474,7 @@ fn check_await(
 
 /// R9 — a record literal must name a model and supply each field exactly once
 /// with a type-compatible value. All fields are required (no defaults yet).
-fn check_record(
+pub(super) fn check_record(
     name: &str,
     fields: &[(String, Expr)],
     locals: &HashMap<String, (Option<String>, bool)>,
@@ -2812,447 +2545,6 @@ fn check_record(
     }
 }
 
-fn env_label(e: EnvModifier) -> &'static str {
-    match e {
-        EnvModifier::Server => "server-side",
-        EnvModifier::Ui => "in the browser",
-        EnvModifier::None => "in an unspecified environment (may run client-side)",
-    }
-}
-
-pub fn analyze(program: &XeresProgram) -> Analysis {
-    let mut errors = Vec::new();
-    let mut table = SymbolTable {
-        models: HashMap::new(),
-        enums: HashMap::new(),
-        fns: HashMap::new(),
-        states: HashMap::new(),
-        components: HashMap::new(),
-        screens: HashMap::new(),
-        endpoints: HashMap::new(),
-        tokens: HashSet::new(),
-        styles: HashSet::new(),
-    };
-
-    // Theme tokens (spec 26): light + dark share one name namespace for
-    // `token(x)` resolution, but duplicates are checked PER theme (a name
-    // legitimately repeats across light/dark — that's how a dark variant
-    // overrides a token's value, not a duplicate declaration).
-    let mut light_token_names: HashSet<&str> = HashSet::new();
-    let mut dark_token_names: HashSet<&str> = HashSet::new();
-    for t in &program.themes {
-        let seen = if t.is_dark { &mut dark_token_names } else { &mut light_token_names };
-        for tok in &t.tokens {
-            if !seen.insert(tok.name.as_str()) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R2 duplicate-decl",
-                    message: format!(
-                        "theme token `{}` is declared more than once in the {} theme.",
-                        tok.name,
-                        if t.is_dark { "dark" } else { "default" }
-                    ),
-                    line: tok.line,
-                });
-            }
-            table.tokens.insert(tok.name.clone());
-        }
-    }
-    // Named styles (spec 26): register + reject a duplicate name (R2), same
-    // convention as every other top-level decl.
-    let mut style_names: HashSet<&str> = HashSet::new();
-    for s in &program.styles {
-        if !style_names.insert(s.name.as_str()) {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R2 duplicate-decl",
-                message: format!("style `{}` is declared more than once.", s.name),
-                line: s.line,
-            });
-        }
-        table.styles.insert(s.name.clone());
-    }
-    // R37 unknown-token — a named style's own CSS body may reference `token(x)`.
-    for s in &program.styles {
-        check_token_refs(&s.css, s.line, &table, &mut errors);
-    }
-
-    for ep in &program.endpoints {
-        if table.endpoints.insert(ep.name.clone(), ep).is_some() {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R2 duplicate-decl",
-                message: format!("endpoint `{}` is declared more than once.", ep.name),
-                line: ep.line,
-            });
-        }
-    }
-
-    // Enums: register, and reject duplicate enum names / duplicate variants (R2).
-    for e in &program.enums {
-        if table.enums.insert(e.name.clone(), e).is_some() || table.models.contains_key(&e.name) {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R2 duplicate-decl",
-                message: format!("type `{}` is declared more than once.", e.name),
-                line: e.line,
-            });
-        }
-        let mut seen = HashSet::new();
-        for v in &e.variants {
-            if !seen.insert(v) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R2 duplicate-decl",
-                    message: format!("variant `{}` is declared twice in enum `{}`.", v, e.name),
-                    line: e.line,
-                });
-            }
-        }
-    }
-
-    // Screens and components compile to render functions in one namespace and
-    // are mounted/invoked by name — so names must be unique (R2), and a
-    // component must be Capitalized so a view can tell `StatCard { … }`
-    // (invocation) from a lowercase built-in element (R17).
-    let mut screen_names: HashSet<&str> = HashSet::new();
-    for s in &program.screens {
-        if !screen_names.insert(s.name.as_str()) {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R2 duplicate-decl",
-                message: format!(
-                    "{} `{}` is declared more than once.",
-                    if s.is_component { "component" } else { "screen" },
-                    s.name
-                ),
-                line: s.line,
-            });
-        }
-        if s.is_component {
-            if !starts_uppercase(&s.name) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R17 component",
-                    message: format!(
-                        "component `{}` must start with an uppercase letter — components are invoked as a Capitalized tag in views (e.g. `{}` vs a lowercase built-in element).",
-                        s.name, s.name
-                    ),
-                    line: s.line,
-                });
-            }
-            table.components.insert(s.name.clone(), s);
-        } else {
-            // A `ui screen` is a navigation target (R28); prop-less ones are
-            // mountable routes (see `navigate(...)` / `link` checks).
-            table.screens.insert(s.name.clone(), s);
-        }
-    }
-
-    for m in &program.models {
-        if table.models.insert(m.name.clone(), m).is_some() {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R2 duplicate-decl",
-                message: format!("model `{}` is declared more than once.", m.name),
-                line: m.line,
-            });
-        }
-        let mut seen = HashSet::new();
-        for p in &m.properties {
-            if !seen.insert(&p.name) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R2 duplicate-decl",
-                    message: format!("field `{}` is declared twice in model `{}`.", p.name, m.name),
-                    line: p.line,
-                });
-            }
-        }
-    }
-    for f in &program.functions {
-        if table.fns.insert(f.name.clone(), FnSig { env: f.env, ret: f.return_type.clone() }).is_some() {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R2 duplicate-decl",
-                message: format!("function `{}` is declared more than once.", f.name),
-                line: f.line,
-            });
-        }
-    }
-
-    for m in &program.models {
-        for p in &m.properties {
-            if !is_known_type(&p.data_type, &table) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R1 unknown-type",
-                    message: format!("field `{}.{}` has unknown type `{}`.", m.name, p.name, p.data_type),
-                    line: p.line,
-                });
-            }
-        }
-    }
-    for s in &program.states {
-        table.states.insert(s.name.clone(), s);
-        if !is_known_type(&s.collection_type, &table) {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R1 unknown-type",
-                message: format!("synced state `{}` references unknown type `{}`.", s.name, s.collection_type),
-                line: s.line,
-            });
-        } else if let Some(model) = table.models.get(s.collection_type.as_str()) {
-            // R10 — a synced collection needs a stable string key to merge on.
-            let has_id = model.field("id").map(|p| p.data_type == "String").unwrap_or(false);
-            if !has_id {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R10 sync-key",
-                    message: format!(
-                        "synced collection `{}` requires model `{}` to have an `id: String` field (the merge key).",
-                        s.name, s.collection_type
-                    ),
-                    line: s.line,
-                });
-            }
-        }
-    }
-    for f in &program.functions {
-        for p in &f.params {
-            if !is_known_type(&p.type_name, &table) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R1 unknown-type",
-                    message: format!("parameter `{}: {}` of `{}` has unknown type.", p.name, p.type_name, f.name),
-                    line: f.line,
-                });
-            }
-        }
-        if let Some(ret) = &f.return_type {
-            if !is_known_type(ret, &table) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R1 unknown-type",
-                    message: format!("return type `{}` of `{}` is unknown.", ret, f.name),
-                    line: f.line,
-                });
-            }
-        }
-    }
-
-    // R24 — an `auth` fn must be server-side and must consult `session`.
-    for f in &program.functions {
-        if !f.is_auth {
-            continue;
-        }
-        if f.env != EnvModifier::Server {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R24 authn-required",
-                message: format!("`auth` is a server-only modifier, but `{}` runs {}.", f.name, env_label(f.env)),
-                line: f.line,
-            });
-        }
-        if !stmts_use_session(&f.body) {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R24 authn-required",
-                message: format!(
-                    "`auth fn {}` never consults `session`. Read `session.actor` to authenticate the caller — an `auth` fn that ignores the session is the 'forgot the auth check' bug.",
-                    f.name
-                ),
-                line: f.line,
-            });
-        }
-        // R25 — a parameterized `db` query in this protected fn must bind the
-        // actor (anti-IDOR).
-        check_actor_scope(&f.body, &f.name, f.line, &mut errors);
-    }
-
-    for f in &program.functions {
-        check_flow(f, &table, &mut errors);
-    }
-
-    // Inbound API routes (spec 23): R36 structural discipline + check each route
-    // body as a server-tier function (so R5/R15/R23/R30/... all fire).
-    check_apis(program, &table, &mut errors);
-
-    for s in &program.screens {
-        check_screen(s, &table, &mut errors);
-    }
-
-    // R31 — auth-gated routes. A protected (`auth`) screen needs: to be a route
-    // (prop-less, not a component), a session to gate against (some fn must
-    // establish one), and a *public* default route to bounce unauthenticated
-    // users to. The enforcement is two-tier (client redirect + server shell
-    // guard); this rule keeps the surface coherent.
-    let navigable_root = program
-        .screens
-        .iter()
-        .find(|s| !s.is_component && s.params.is_empty())
-        .map(|s| s.name.clone());
-    let app_uses_session = program.functions.iter().any(|f| stmts_use_session(&f.body));
-    for s in &program.screens {
-        if !s.is_auth {
-            continue;
-        }
-        if s.is_component {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R31 auth-route",
-                message: format!("`auth` marks a protected route; it can't be used on component `{}`.", s.name),
-                line: s.line,
-            });
-            continue;
-        }
-        if !s.params.is_empty() {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R31 auth-route",
-                message: format!("an `auth` screen must be a prop-less route; `{}` takes props.", s.name),
-                line: s.line,
-            });
-        }
-        if !app_uses_session {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R31 auth-route",
-                message: format!(
-                    "`auth ui screen {}` needs a session, but no function establishes one (call `session.login(...)` in an `auth server fn`).",
-                    s.name
-                ),
-                line: s.line,
-            });
-        }
-        if navigable_root.as_deref() == Some(s.name.as_str()) {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R31 auth-route",
-                message: format!(
-                    "the default route `{}` must be public so unauthenticated users have a landing/login page — mark a different screen `auth`.",
-                    s.name
-                ),
-                line: s.line,
-            });
-        }
-    }
-
-    // R32 — typed route params. A `route "/post/:id"` pattern binds the screen's
-    // props from the URL: every `:name` must name a prop and every prop must be
-    // bound, the param props must be `String`/`Int` (parseable from a segment),
-    // the pattern needs at least one `:param`, and `route` is for screens (a
-    // component is invoked, not navigated to). A valid param route is then
-    // navigable via `navigate(Screen { … })` (R28's "routes are prop-less" is
-    // relaxed for it — see check_nav_target).
-    for s in &program.screens {
-        let Some(pattern) = &s.route else { continue };
-        if s.is_component {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R32 route-param",
-                message: format!("`route` is for screens, not component `{}`.", s.name),
-                line: s.line,
-            });
-            continue;
-        }
-        let pat: Vec<String> = route_params(pattern);
-        if pat.is_empty() {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R32 route-param",
-                message: format!("route `{}` on `{}` has no `:param` segment — use a plain screen for a static path.", pattern, s.name),
-                line: s.line,
-            });
-        }
-        for pp in &pat {
-            if !s.params.iter().any(|p| &p.name == pp) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R32 route-param",
-                    message: format!("route param `:{}` on `{}` has no matching prop — add `{}: String` (or `Int`).", pp, s.name, pp),
-                    line: s.line,
-                });
-            }
-        }
-        for p in &s.params {
-            if !pat.contains(&p.name) {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R32 route-param",
-                    message: format!("prop `{}` on route `{}` isn't bound by the pattern `{}` (add `:{}`).", p.name, s.name, pattern, p.name),
-                    line: s.line,
-                });
-            }
-            if p.type_name != "String" && p.type_name != "Int" {
-                errors.push(Diagnostic {
-                    file: String::new(),
-                    rule: "R32 route-param",
-                    message: format!("route param `{}` on `{}` must be `String` or `Int`, got `{}` (it's parsed from a URL segment).", p.name, s.name, p.type_name),
-                    line: s.line,
-                });
-            }
-        }
-    }
-
-    let mut returns_secret: HashMap<String, bool> =
-        program.functions.iter().map(|f| (f.name.clone(), false)).collect();
-    loop {
-        let mut changed = false;
-        for f in &program.functions {
-            let now = function_returns_secret(f, &table, &returns_secret);
-            if now && !returns_secret[&f.name] {
-                returns_secret.insert(f.name.clone(), true);
-                changed = true;
-            }
-        }
-        if !changed { break; }
-    }
-
-    for f in &program.functions {
-        if !returns_secret[&f.name] {
-            continue;
-        }
-        if f.env != EnvModifier::Server {
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R5 secret-leak-via-return",
-                message: format!(
-                    "`{}` returns secret-derived data but runs {}. Only `server` functions may return secret data; use `declassify(...)` server-side if release is intended.",
-                    f.name, env_label(f.env)
-                ),
-                line: f.line,
-            });
-        } else if !f.return_type.as_deref().is_some_and(|t| is_model_shaped(t, &table)) {
-            // R5, server side (spec 29 sweep finding): a `server fn` was
-            // exempted above on the assumption that wire-projection strips
-            // `secret` fields automatically — true for a Model return, but a
-            // bare scalar (String/Int/…) built from a secret field carries no
-            // such marker once extracted, so it crosses to ANY RPC caller as
-            // plain text (proven live: a `server fn` returning `user.
-            // password_hash` as a bare `String` compiled clean and the raw
-            // value appeared in the `/__xeres/<fn>` JSON response). Require
-            // the same `declassify(...)` this rule's own message always
-            // recommended, now actually enforced server-side too.
-            errors.push(Diagnostic {
-                file: String::new(),
-                rule: "R5 secret-leak-via-return",
-                message: format!(
-                    "server fn `{}` returns a bare `{}` built from a secret field, with no `declassify(...)`. A Model return gets its `secret` fields stripped automatically on the wire; a scalar return doesn't, so this value would reach any RPC caller as plain text. Wrap it in `declassify(...)` to confirm the release is deliberate.",
-                    f.name,
-                    f.return_type.as_deref().unwrap_or("value")
-                ),
-                line: f.line,
-            });
-        }
-    }
-
-    // stable, readable ordering: by line
-    errors.sort_by_key(|e| e.line);
-
-    Analysis { errors, returns_secret }
-}
-
 /// R29 (spec 18) — Decimal arithmetic/ordered-compare discipline, checked on the
 /// *original* binary (pre-lowering). Decimal is a string-backed exact money type:
 /// it must never mix with `Float` (the binary-float error this primitive exists
@@ -3260,7 +2552,7 @@ pub fn analyze(program: &XeresProgram) -> Analysis {
 /// ordered/`==` compares need both sides Decimal, and `/` is deferred until a cut
 /// with an explicit rounding mode. `String {+} Decimal` is left alone — that's
 /// display concatenation (Cut 1), not arithmetic.
-fn check_decimal_binary(
+pub(super) fn check_decimal_binary(
     op: BinOp,
     lt: Option<&str>,
     rt: Option<&str>,
@@ -3324,323 +2616,4 @@ fn check_decimal_binary(
         )),
     }
 }
-
-// --------------------------------------------------------- typed lowering
-//
-// Decimal arithmetic desugaring (spec 18). `interp::binary` and codegen's
-// `emit_*` are type-blind — a Decimal is a *string*, so a bare `+`/`<` would
-// concatenate / compare lexicographically. After type-checking succeeds, this
-// pass rewrites Decimal `+ - * < > <= >=` into `__dec_*` builtin calls that every
-// backend emits exactly (the interpreter's `__dec_*` dispatch, the browser's
-// `__dec.*` BigInt runtime, the server's `rust_decimal` helpers). No new
-// `Value`/`Expr` shape, no `emit_*` refactor; the pattern generalizes to any
-// future typed operator. Runs only on a program that already passed `analyze`,
-// so it can assume types resolve and the R29 discipline holds.
-
-/// The `__dec_*` builtin a Decimal binary op lowers to, or `None` to leave the op
-/// as-is (native concat for `String + Decimal`, `==`/`!=`, plain numerics). Only
-/// the legal, R29-passing combinations lower — an `analyze`-rejected program
-/// never reaches here, so this never has to lower a `Decimal {+} Int` etc.
-fn dec_lowering_callee(op: BinOp, lt: Option<&str>, rt: Option<&str>) -> Option<&'static str> {
-    let l = lt == Some("Decimal");
-    let r = rt == Some("Decimal");
-    match op {
-        BinOp::Add if l && r => Some("__dec_add"),
-        BinOp::Sub if l && r => Some("__dec_sub"),
-        BinOp::Mul if (l && r) || (l && rt == Some("Int")) || (r && lt == Some("Int")) => {
-            Some("__dec_mul")
-        }
-        BinOp::Lt if l && r => Some("__dec_lt"),
-        BinOp::Gt if l && r => Some("__dec_gt"),
-        BinOp::LtEq if l && r => Some("__dec_le"),
-        BinOp::GtEq if l && r => Some("__dec_ge"),
-        _ => None,
-    }
-}
-
-/// Rewrite Decimal binary ops to `__dec_*` calls across the whole program. Called
-/// from `main::compile` after `analyze` succeeds, before interp/codegen.
-pub fn lower(program: &mut XeresProgram) {
-    // A read-only symbol table that borrows only the declarations lowering does
-    // NOT mutate (models/enums/states/endpoints). `fns` is owned (`FnSig`) and
-    // `resolve_type` never reads `screens`/`components`, so we can still take
-    // `&mut` to functions/screens below with no borrow conflict.
-    let XeresProgram { models, enums, functions, states, endpoints, screens, apis, .. } = program;
-    let table = SymbolTable {
-        models: models.iter().map(|m| (m.name.clone(), &*m)).collect(),
-        enums: enums.iter().map(|e| (e.name.clone(), &*e)).collect(),
-        fns: functions
-            .iter()
-            .map(|f| (f.name.clone(), FnSig { env: f.env, ret: f.return_type.clone() }))
-            .collect(),
-        states: states.iter().map(|s| (s.name.clone(), &*s)).collect(),
-        components: HashMap::new(),
-        screens: HashMap::new(),
-        endpoints: endpoints.iter().map(|e| (e.name.clone(), &*e)).collect(),
-        tokens: HashSet::new(),
-        styles: HashSet::new(),
-    };
-
-    for f in functions.iter_mut() {
-        let mut locals: HashMap<String, (Option<String>, bool)> = HashMap::new();
-        for p in &f.params {
-            locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
-        }
-        lower_stmts(&mut f.body, &mut locals, &table);
-    }
-
-    for s in screens.iter_mut() {
-        let mut locals: HashMap<String, (Option<String>, bool)> = HashMap::new();
-        for p in &s.params {
-            locals.insert(p.name.clone(), (Some(p.type_name.clone()), false));
-        }
-        for st in &mut s.states {
-            lower_expr(&mut st.init, &locals, &table);
-            locals.insert(st.name.clone(), (Some(st.type_name.clone()), false));
-        }
-        for v in &mut s.body {
-            lower_view(v, &locals, &table);
-        }
-        // `on load` runs as a browser handler with props + state cells in scope.
-        let mut load_locals = locals.clone();
-        lower_stmts(&mut s.load, &mut load_locals, &table);
-    }
-
-    // API route bodies (spec 23) — same Decimal desugaring as a server fn body,
-    // with the `body` model param in scope.
-    for api in apis.iter_mut() {
-        for route in api.routes.iter_mut() {
-            let mut locals: HashMap<String, (Option<String>, bool)> = HashMap::new();
-            if let Some(b) = &route.body {
-                locals.insert(b.name.clone(), (Some(b.type_name.clone()), false));
-            }
-            lower_stmts(&mut route.body_stmts, &mut locals, &table);
-        }
-    }
-}
-
-fn lower_stmts(
-    stmts: &mut [Stmt],
-    locals: &mut HashMap<String, (Option<String>, bool)>,
-    table: &SymbolTable,
-) {
-    for stmt in stmts.iter_mut() {
-        match stmt {
-            Stmt::Let { name, type_ann, value } => {
-                lower_expr(value, locals, table);
-                let ty = type_ann.clone().or_else(|| resolve_type(&*value, locals, table));
-                locals.insert(name.clone(), (ty, false));
-            }
-            Stmt::Assign { value, .. } => lower_expr(value, locals, table),
-            Stmt::Return(e) | Stmt::Expr(e) => lower_expr(e, locals, table),
-            Stmt::Try { body, handler } => {
-                let mut b = locals.clone();
-                lower_stmts(body, &mut b, table);
-                let mut h = locals.clone();
-                lower_stmts(handler, &mut h, table);
-            }
-            Stmt::If { cond, then_body, else_body } => {
-                lower_expr(cond, locals, table);
-                let mut t = locals.clone();
-                lower_stmts(then_body, &mut t, table);
-                let mut e = locals.clone();
-                lower_stmts(else_body, &mut e, table);
-            }
-            Stmt::For { var, iter, body } => {
-                lower_expr(iter, locals, table);
-                let elem = element_type_of(&*iter, locals, table);
-                let mut inner = locals.clone();
-                inner.insert(var.clone(), (elem, false));
-                lower_stmts(body, &mut inner, table);
-            }
-            Stmt::While { cond, body } => {
-                lower_expr(cond, locals, table);
-                let mut inner = locals.clone();
-                lower_stmts(body, &mut inner, table);
-            }
-            Stmt::Match { scrutinee, arms } => {
-                lower_expr(scrutinee, locals, table);
-                for arm in arms.iter_mut() {
-                    let mut inner = locals.clone();
-                    lower_stmts(&mut arm.body, &mut inner, table);
-                }
-            }
-            Stmt::Transaction(body) => {
-                let mut inner = locals.clone();
-                lower_stmts(body, &mut inner, table);
-            }
-            Stmt::Break | Stmt::Continue => {}
-        }
-    }
-}
-
-fn lower_expr(
-    expr: &mut Expr,
-    locals: &HashMap<String, (Option<String>, bool)>,
-    table: &SymbolTable,
-) {
-    match expr {
-        Expr::Binary { op, left, right } => {
-            let op = *op;
-            // Bottom-up: lower the operands first, so a nested `(a + b) * c`
-            // resolves the inner result as Decimal (via the `__dec_*` typing in
-            // `resolve_type`) before this level decides.
-            lower_expr(left, locals, table);
-            lower_expr(right, locals, table);
-            let lt = resolve_type(&**left, locals, table);
-            let rt = resolve_type(&**right, locals, table);
-            if let Some(callee) = dec_lowering_callee(op, lt.as_deref(), rt.as_deref()) {
-                let l = std::mem::replace(left.as_mut(), Expr::NoneLit);
-                let r = std::mem::replace(right.as_mut(), Expr::NoneLit);
-                *expr = Expr::Call { callee: callee.to_string(), args: vec![l, r] };
-            } else if matches!(op, BinOp::Add)
-                && (lt.as_deref() == Some("String") || rt.as_deref() == Some("String"))
-            {
-                // String display-concatenation (spec 24): `String + <scalar>` →
-                // `__str_concat(a, b)` that every backend emits (Rust `format!`,
-                // TS `+`, interp Display-concat). Chains: the result is a String,
-                // so `"a" + b + c` folds left-to-right.
-                let l = std::mem::replace(left.as_mut(), Expr::NoneLit);
-                let r = std::mem::replace(right.as_mut(), Expr::NoneLit);
-                *expr = Expr::Call { callee: "__str_concat".to_string(), args: vec![l, r] };
-            }
-        }
-        Expr::Field { base, .. } => lower_expr(base, locals, table),
-        Expr::Call { args, .. } => {
-            for a in args.iter_mut() {
-                lower_expr(a, locals, table);
-            }
-        }
-        Expr::Unary { expr: inner, .. } => lower_expr(inner, locals, table),
-        Expr::Declassify(inner) | Expr::Raw(inner) | Expr::Await(inner) => {
-            lower_expr(inner, locals, table)
-        }
-        Expr::MethodCall { receiver, method, args } => {
-            lower_expr(receiver, locals, table);
-            let recv_elem = resolve_type(&**receiver, locals, table)
-                .as_deref()
-                .and_then(|t| generic_inner("List", t).map(str::to_string));
-            // Higher-order closures (spec 19 × 18): lower the body with the closure
-            // param(s) bound to the element/accumulator type, so a Decimal op inside
-            // the body still desugars (otherwise its operand types wouldn't resolve).
-            if let Some(elem) = &recv_elem {
-                match method.as_str() {
-                    "map" | "filter" => {
-                        if let [Expr::Closure { params, body }] = args.as_mut_slice() {
-                            if params.len() == 1 {
-                                let mut inner = locals.clone();
-                                inner.insert(params[0].clone(), (Some(elem.clone()), false));
-                                lower_expr(body, &inner, table);
-                                return;
-                            }
-                        }
-                    }
-                    "reduce" => {
-                        if let [init, Expr::Closure { params, body }] = args.as_mut_slice() {
-                            if params.len() == 2 {
-                                lower_expr(init, locals, table);
-                                let u = resolve_type(&*init, locals, table);
-                                let mut inner = locals.clone();
-                                inner.insert(params[0].clone(), (u, false));
-                                inner.insert(params[1].clone(), (Some(elem.clone()), false));
-                                lower_expr(body, &inner, table);
-                                return;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            for a in args.iter_mut() {
-                lower_expr(a, locals, table);
-            }
-            // `List.contains(x)` → a distinct `__list_contains(list, x)` builtin so
-            // the type-blind backends don't confuse it with `String.contains`
-            // (which has a different per-tier spelling). Spec 19.
-            if recv_elem.is_some() && method == "contains" && args.len() == 1 {
-                let recv = std::mem::replace(receiver.as_mut(), Expr::NoneLit);
-                let needle = std::mem::replace(&mut args[0], Expr::NoneLit);
-                *expr = Expr::Call { callee: "__list_contains".to_string(), args: vec![recv, needle] };
-            }
-        }
-        Expr::Record { fields, .. } => {
-            for (_, v) in fields.iter_mut() {
-                lower_expr(v, locals, table);
-            }
-        }
-        Expr::ListLit(items) => {
-            for it in items.iter_mut() {
-                lower_expr(it, locals, table);
-            }
-        }
-        Expr::Ternary { cond, then, otherwise } => {
-            lower_expr(cond, locals, table);
-            lower_expr(then, locals, table);
-            lower_expr(otherwise, locals, table);
-        }
-        Expr::Range { start, end } => {
-            lower_expr(start, locals, table);
-            lower_expr(end, locals, table);
-        }
-        // Closure reached outside a higher-order call (unreachable for a checked
-        // program) — lower the body best-effort. `xs[i]` lowers its base + index.
-        Expr::Closure { body, .. } => lower_expr(body, locals, table),
-        Expr::Index { base, index } => {
-            lower_expr(base, locals, table);
-            lower_expr(index, locals, table);
-        }
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_)
-        | Expr::NoneLit => {}
-    }
-}
-
-fn lower_view(
-    v: &mut ViewNode,
-    locals: &HashMap<String, (Option<String>, bool)>,
-    table: &SymbolTable,
-) {
-    match v {
-        ViewNode::Element { arg, style, event, children, .. } => {
-            if let Some(a) = arg {
-                lower_expr(a, locals, table);
-            }
-            if let Some(st) = style {
-                lower_expr(st, locals, table);
-            }
-            match event {
-                Some(Handler::Call(e)) => lower_expr(e, locals, table),
-                Some(Handler::Block(stmts)) => {
-                    let mut inner = locals.clone();
-                    lower_stmts(stmts, &mut inner, table);
-                }
-                None => {}
-            }
-            for c in children.iter_mut() {
-                lower_view(c, locals, table);
-            }
-        }
-        ViewNode::For { var, iter, body } => {
-            lower_expr(iter, locals, table);
-            let elem = element_type_of(&*iter, locals, table);
-            let mut inner = locals.clone();
-            inner.insert(var.clone(), (elem, false));
-            for c in body.iter_mut() {
-                lower_view(c, &inner, table);
-            }
-        }
-        ViewNode::If { cond, then_body, else_body } => {
-            lower_expr(cond, locals, table);
-            for c in then_body.iter_mut() {
-                lower_view(c, locals, table);
-            }
-            for c in else_body.iter_mut() {
-                lower_view(c, locals, table);
-            }
-        }
-        ViewNode::Component { args, .. } => {
-            for (_, v) in args.iter_mut() {
-                lower_expr(v, locals, table);
-            }
-        }
-    }
-}
+
